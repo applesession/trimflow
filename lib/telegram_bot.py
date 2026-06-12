@@ -784,9 +784,9 @@ def parse_add_command(text):
         raise RuntimeError("Команда должна начинаться с /add ")
 
     raw_payload = text[len("/add "):]
-    parts = [part.strip() for part in re.split(r"\s+:\s+", raw_payload)]
+    parts = [part.strip() for part in re.split(r"\s*;\s*", raw_payload)]
     if len(parts) not in {3, 4}:
-        raise RuntimeError("Формат: /add Название : 001-003 : magnet:?xt=... : 2")
+        raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; 2")
 
     title, episodes_range, magnet = parts[:3]
     season = parts[3] if len(parts) == 4 else "1"
@@ -882,7 +882,7 @@ def build_help_message():
         "/retry <номер> - повторно поставить аниме в очередь",
         "",
         "Пример:",
-        "/add Мой тайтл : 001-003 : magnet:?xt=urn:btih:... : 1",
+        "/add Мой тайтл ; 001-003 ; magnet:?xt=urn:btih:... ; 1",
     ])
 
 

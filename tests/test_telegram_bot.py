@@ -52,7 +52,7 @@ class TelegramBotTests(unittest.TestCase):
 
     def test_parse_add_command_extracts_required_fields(self):
         payload = parse_add_command(
-            "/add Test Title : 001-003 : magnet:?xt=urn:btih:testhash : 2",
+            "/add Test Title ; 001-003 ; magnet:?xt=urn:btih:testhash ; 2",
         )
 
         self.assertEqual(payload["title"], "Test Title")
@@ -97,7 +97,7 @@ class TelegramBotTests(unittest.TestCase):
     def test_add_job_from_command_creates_and_deduplicates_job(self):
         tmp_dir = self.make_workspace_temp_dir()
         config = self.make_config(tmp_dir)
-        command = "/add Test Title : 001-003 : magnet:?xt=urn:btih:testhash : 2"
+        command = "/add Test Title ; 001-003 ; magnet:?xt=urn:btih:testhash ; 2"
 
         first = add_job_from_command(config, command)
         second = add_job_from_command(config, command)
