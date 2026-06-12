@@ -1,0 +1,7 @@
+requests
+PySocks
+python-dotenv
+boto3
+numpy
+scipy
+librosa

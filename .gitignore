@@ -1,0 +1,12 @@
+.env
+.venv/
+venv/
+jobs.json
+state.json
+completed_jobs.json
+telegram_state.json
+__pycache__/
+*.py[cod]
+.runtime/
+logs/
+.test_tmp/

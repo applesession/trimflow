@@ -1,0 +1,65 @@
+{
+  "defaults": {
+    "output_dir": "./output",
+    "watermark_path": "./assets/watermark.png",
+    "skip_types": ["op", "ed"],
+    "cleanup": {
+      "downloads": true,
+      "temp": true,
+      "output": true
+    },
+    "timing_detection": {
+      "enabled": true,
+      "mode": "audio_fingerprint",
+      "search_head_seconds": 300,
+      "search_tail_seconds": 180,
+      "min_support_episodes": 2,
+      "frame_step_seconds": 0.25,
+      "min_segment_seconds": 45,
+      "max_segment_seconds": 150,
+      "feature_sample_rate": 16000,
+      "feature_hop_length": 4000,
+      "consensus_min_similarity": 0.69,
+      "pair_match_min_seconds": 20,
+      "cache_enabled": true,
+      "detector_version": "v2",
+      "auto_cut_min_confidence": "high"
+    },
+    "timing_providers": {
+      "anilibria_enabled": true,
+      "aniskip_enabled": false
+    },
+    "delivery": {
+      "s3_enabled": true,
+      "s3_upload_video": false,
+      "s3_upload_timestamps": false,
+      "s3_upload_manifest": true,
+      "vk_enabled": true,
+      "vk_wall_post_enabled": true,
+      "vk_comment_enabled": true,
+      "vk_comment_banner_path": "./assets/banner.png",
+      "vk_comment_template": "2202 2088 8598 1325 - Поддержать монетой (Сбер)❤️\n\nhttps://www.donationalerts.com/r/animemonstrs - Поддержать монетой (СБП)✨\n\nhttps://vk.com/donut/animonster - Платная подписка🔥"
+    },
+    "encoding": {
+      "video_codec": "h264_nvenc",
+      "preset": "fast",
+      "cq": 23,
+      "segment_video_codec": "h264_nvenc",
+      "segment_preset": "fast",
+      "segment_cut_mode": "copy",
+      "segment_cq": 18,
+      "segment_pixel_format": "yuv420p",
+      "audio_codec": "aac"
+    }
+  },
+  "automation": {
+    "enabled": true,
+    "provider": "aniliberty",
+    "jobs_path": "./jobs.json",
+    "completed_jobs_path": "./completed_jobs.json",
+    "state_path": "./state.json",
+    "poll_limit": 25,
+    "download_root": "./downloads",
+    "default_source_type": "magnet"
+  }
+}
