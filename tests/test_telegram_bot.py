@@ -31,6 +31,7 @@ from lib.telegram_bot import (
     get_telegram_proxy_url,
     _telegram_request,
     telegram_force_ipv4_enabled,
+    update_telegram_state_progress,
 )
 
 
@@ -403,6 +404,55 @@ class TelegramBotTests(unittest.TestCase):
             handle_update(config, confirm_update)
 
             self.assertEqual(len(load_telegram_state()["pending_actions"]), 0)
+
+        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        self.assertEqual(jobs_data, [])
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_progress_update_preserves_pending_actions_created_by_handle_update(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_jobs(config, [{"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001"}])
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            initial_state = load_telegram_state()
+            self.assertEqual(initial_state["pending_actions"], {})
+
+            remove_update = {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/remove 1", "date": 111},
+            }
+            handle_update(config, remove_update)
+
+            state_after_handle = load_telegram_state()
+            self.assertIn("123", state_after_handle["pending_actions"])
+
+            updated_state = update_telegram_state_progress(
+                last_update_id=remove_update["update_id"],
+                last_handled_at=remove_update["message"]["date"],
+            )
+            self.assertIn("123", updated_state["pending_actions"])
+            self.assertEqual(updated_state["last_update_id"], 1)
+            self.assertEqual(updated_state["last_handled_at"], 111)
+
+            confirm_update = {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить удаление", "date": 222},
+            }
+            handle_update(config, confirm_update)
+
+            state_after_confirm = load_telegram_state()
+            self.assertEqual(state_after_confirm["pending_actions"], {})
+
+            updated_state = update_telegram_state_progress(
+                last_update_id=confirm_update["update_id"],
+                last_handled_at=confirm_update["message"]["date"],
+            )
+            self.assertEqual(updated_state["pending_actions"], {})
+            self.assertEqual(updated_state["last_update_id"], 2)
+            self.assertEqual(updated_state["last_handled_at"], 222)
 
         jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])

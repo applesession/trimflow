@@ -152,6 +152,16 @@ def save_telegram_state(state):
         file.write("\n")
 
 
+def update_telegram_state_progress(*, last_update_id=None, last_handled_at=None):
+    state = load_telegram_state()
+    if last_update_id is not None:
+        state["last_update_id"] = last_update_id
+    if last_handled_at is not None:
+        state["last_handled_at"] = last_handled_at
+    save_telegram_state(state)
+    return state
+
+
 def _telegram_request(method, payload=None, timeout=60):
     token = get_telegram_token()
     if not token:

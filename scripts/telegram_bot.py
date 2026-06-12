@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.config import load_config  # noqa: E402
 from lib.runtime import ensure_runtime_paths, log_line  # noqa: E402
-from lib.telegram_bot import fetch_updates, handle_update, load_telegram_state, save_telegram_state  # noqa: E402
+from lib.telegram_bot import fetch_updates, handle_update, load_telegram_state, update_telegram_state_progress  # noqa: E402
 
 
 load_dotenv()
@@ -38,15 +38,14 @@ def main():
         for update in updates:
             try:
                 update_id = update.get("update_id")
-                if update_id is not None:
-                    state["last_update_id"] = update_id
                 handled = handle_update(config, update)
-                if handled:
-                    state["last_handled_at"] = update.get("message", {}).get("date")
-                save_telegram_state(state)
+                state = update_telegram_state_progress(
+                    last_update_id=update_id,
+                    last_handled_at=update.get("message", {}).get("date") if handled else None,
+                )
             except Exception as exc:
                 log_line(log_path, f"telegram_update_failed error={repr(exc)} update_id={update.get('update_id')}")
-                save_telegram_state(state)
+                state = update_telegram_state_progress(last_update_id=update.get("update_id"))
 
 
 if __name__ == "__main__":
