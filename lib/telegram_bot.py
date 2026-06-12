@@ -10,7 +10,7 @@ import requests
 from urllib3.util import connection as urllib3_connection
 
 from lib.autojobs import find_matching_job, format_episodes_range
-from lib.config import load_completed_jobs, load_jobs, load_state, save_jobs
+from lib.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs
 from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
 from lib.helpers import ensure_non_empty_slug, parse_episodes_range
 from lib.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -55,6 +55,8 @@ def build_main_keyboard():
 def build_confirmation_keyboard(action_type):
     if action_type == "remove":
         buttons = [[{"text": "Подтвердить удаление"}, {"text": "Отменить удаление"}]]
+    elif action_type == "complete":
+        buttons = [[{"text": "Подтвердить завершение"}, {"text": "Отменить завершение"}]]
     else:
         buttons = [[{"text": "Подтвердить повтор"}, {"text": "Отменить повтор"}]]
     return {
@@ -723,6 +725,20 @@ def format_remove_result(job):
     ])
 
 
+def format_complete_confirmation(job, index):
+    return "\n".join([
+        "Подтверждение завершения",
+        "",
+        f"Номер: {index}",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+        "",
+        "Аниме будет убрано из очереди и перенесено в completed_jobs.json",
+        "Подтверди завершение кнопкой ниже",
+    ])
+
+
 def format_retry_result(job, already_exists=False):
     if already_exists:
         return "\n".join([
@@ -734,6 +750,26 @@ def format_retry_result(job, already_exists=False):
 
     return "\n".join([
         "Аниме повторно поставлено в очередь",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+    ])
+
+
+def format_complete_result(job, already_archived=False):
+    if already_archived:
+        return "\n".join([
+            "Аниме убрано из очереди",
+            "",
+            "Запись уже была в completed_jobs.json, дубль не добавлен",
+            f"Тайтл: {get_display_title(job)}",
+            f"Сезон: {job.get('season', 1)}",
+            f"Эпизоды: {job.get('episodes_range', '?')}",
+        ])
+
+    return "\n".join([
+        "Аниме перенесено в completed_jobs.json",
         "",
         f"Тайтл: {get_display_title(job)}",
         f"Сезон: {job.get('season', 1)}",
@@ -758,6 +794,31 @@ def remove_job_by_identity(config, job_identity):
     return removed_job
 
 
+def archive_job_to_completed(config, job, source="telegram_complete"):
+    completed_jobs = load_completed_jobs(config)
+    job_identity = build_job_identity(job)
+    for item in completed_jobs:
+        archived_job = item.get("job") or {}
+        if build_job_identity(archived_job) == job_identity:
+            return True
+
+    completed_jobs.append({
+        "status": "completed",
+        "completed_at": datetime.now().astimezone().isoformat(),
+        "job": job,
+        "output_display_name": None,
+        "output_video": None,
+        "output_timestamps": None,
+        "output_manifest": None,
+        "delivery_summary": {},
+        "partial_vk": False,
+        "completion_source": source,
+        "completion_note": "Manually archived from Telegram bot",
+    })
+    save_completed_jobs(config, completed_jobs)
+    return False
+
+
 def retry_job_to_queue(config, job):
     jobs = load_jobs(config)
     if find_matching_job(jobs, job) is not None:
@@ -778,6 +839,8 @@ def confirm_pending_action(config, chat_id, text):
     actionable_texts = {
         "Подтвердить удаление",
         "Отменить удаление",
+        "Подтвердить завершение",
+        "Отменить завершение",
         "Подтвердить повтор",
         "Отменить повтор",
     }
@@ -790,10 +853,12 @@ def confirm_pending_action(config, chat_id, text):
 
     confirm_map = {
         "remove": "Подтвердить удаление",
+        "complete": "Подтвердить завершение",
         "retry": "Подтвердить повтор",
     }
     cancel_map = {
         "remove": "Отменить удаление",
+        "complete": "Отменить завершение",
         "retry": "Отменить повтор",
     }
     action_type = pending.get("type")
@@ -808,6 +873,11 @@ def confirm_pending_action(config, chat_id, text):
     if action_type == "remove":
         removed_job = remove_job_by_identity(config, pending.get("job_identity"))
         return format_remove_result(removed_job)
+
+    if action_type == "complete":
+        removed_job = remove_job_by_identity(config, pending.get("job_identity"))
+        already_archived = archive_job_to_completed(config, removed_job)
+        return format_complete_result(removed_job, already_archived=already_archived)
 
     if action_type == "retry":
         job = pending.get("job_snapshot") or {}
@@ -930,6 +1000,7 @@ def build_help_message():
         "/log - хвост cron.log",
         "/jobs - показать последние аниме в очереди",
         "/remove <номер> - удалить аниме из очереди",
+        "/complete <номер> - убрать аниме из очереди и вручную пометить завершённым",
         "/retry <номер> - повторно поставить аниме в очередь",
         "",
         "Пример:",
@@ -963,6 +1034,14 @@ def handle_command(config, text):
             "text": format_remove_confirmation(job, index),
             "reply_markup": build_confirmation_keyboard("remove"),
             "pending_action": build_pending_action_payload("remove", "jobs", index, job),
+        }
+    if text.startswith("/complete"):
+        index = parse_index_command(text, "complete")
+        job, _jobs = get_job_by_index(config, index)
+        return {
+            "text": format_complete_confirmation(job, index),
+            "reply_markup": build_confirmation_keyboard("complete"),
+            "pending_action": build_pending_action_payload("complete", "jobs", index, job),
         }
     if text == "/retry":
         return format_retry_candidates_message(config)

@@ -513,6 +513,98 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(len(jobs_data), 1)
         self.assertEqual(jobs_data[0]["title_ru"], "А")
 
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_complete_flow_moves_job_from_queue_to_completed_archive(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        completed_path = tmp_dir / "completed_jobs.json"
+        config["automation"]["completed_jobs_path"] = str(completed_path.resolve())
+        save_jobs(config, [{
+            "title": "A",
+            "title_ru": "А",
+            "season": 1,
+            "episodes_range": "001",
+            "source": {
+                "type": "magnet",
+                "magnet": "magnet:?xt=urn:btih:testhash",
+                "download_dir": "downloads/A",
+            },
+        }])
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            update = {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/complete 1"},
+            }
+            handled = handle_update(config, update)
+
+            self.assertTrue(handled)
+            pending = get_pending_action(123)
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending["type"], "complete")
+
+            confirm_update = {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить завершение"},
+            }
+            handle_update(config, confirm_update)
+
+        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
+        self.assertEqual(jobs_data, [])
+        self.assertEqual(len(completed_data), 1)
+        self.assertEqual(completed_data[0]["job"]["title_ru"], "А")
+        self.assertEqual(completed_data[0]["completion_source"], "telegram_complete")
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_complete_flow_does_not_duplicate_existing_completed_entry(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        completed_path = tmp_dir / "completed_jobs.json"
+        config["automation"]["completed_jobs_path"] = str(completed_path.resolve())
+        job = {
+            "title": "A",
+            "title_ru": "А",
+            "season": 1,
+            "episodes_range": "001",
+            "source": {
+                "type": "magnet",
+                "magnet": "magnet:?xt=urn:btih:testhash",
+                "download_dir": "downloads/A",
+            },
+        }
+        save_jobs(config, [job])
+        completed_path.write_text(
+            json.dumps([
+                {
+                    "status": "completed",
+                    "completed_at": "2026-06-13T10:00:00+00:00",
+                    "job": job,
+                    "delivery_summary": {},
+                }
+            ], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/complete 1"},
+            })
+            handle_update(config, {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить завершение"},
+            })
+
+        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
+        self.assertEqual(jobs_data, [])
+        self.assertEqual(len(completed_data), 1)
+
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
     def test_handle_update_returns_error_message_for_invalid_command(self, _mock_allowed, mock_send_reply):
