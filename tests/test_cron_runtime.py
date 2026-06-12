@@ -8,7 +8,15 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from lib.runner import build_job_identity, run_jobs
-from lib.runtime import acquire_lock, is_lock_stale, log_line, release_lock
+from lib.runtime import (
+    acquire_lock,
+    build_default_runtime_status,
+    is_lock_stale,
+    load_runtime_status,
+    log_line,
+    release_lock,
+    update_runtime_status,
+)
 from scripts import cron_run
 
 
@@ -65,6 +73,38 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertIn("hello world", line)
         self.assertIn("hello world", stdout.getvalue())
         self.assertIn("hello world", log_path.read_text(encoding="utf-8"))
+
+    def test_build_default_runtime_status_creates_expected_shape(self):
+        status = build_default_runtime_status()
+
+        self.assertEqual(status["run_status"], "idle")
+        self.assertEqual(status["queue_progress"]["jobs_processed"], 0)
+        self.assertIsNone(status["current_job"])
+        self.assertIsNone(status["last_run"])
+
+    def test_update_runtime_status_merges_nested_values(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        status_path = tmp_dir / "runtime_status.json"
+
+        update_runtime_status(
+            status_path,
+            run_status="running",
+            current_stage="processing",
+            queue_progress={"total_jobs": 5},
+            current_job={"title": "A", "stage": "job_start"},
+        )
+        update_runtime_status(
+            status_path,
+            current_job={"current_episode": 3},
+            queue_progress={"jobs_processed": 1},
+        )
+        status = load_runtime_status(status_path)
+
+        self.assertEqual(status["run_status"], "running")
+        self.assertEqual(status["queue_progress"]["total_jobs"], 5)
+        self.assertEqual(status["queue_progress"]["jobs_processed"], 1)
+        self.assertEqual(status["current_job"]["title"], "A")
+        self.assertEqual(status["current_job"]["current_episode"], 3)
 
     @patch("lib.runner.process_job")
     @patch("lib.runner.save_completed_jobs")
@@ -157,6 +197,44 @@ class CronRuntimeTests(unittest.TestCase):
         mock_save_jobs.assert_not_called()
         mock_save_completed_jobs.assert_not_called()
 
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_updates_runtime_status_for_success(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        status_path = tmp_dir / "runtime_status.json"
+        jobs = [{"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}]
+        mock_load_completed_jobs.return_value = []
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "A",
+            "delivery_summary": {
+                "vk": {"enabled": True, "video_uploaded": True},
+                "s3": {"enabled": False, "uploaded": False},
+            },
+        }
+
+        summary = run_jobs({"defaults": {}}, jobs, runtime_status_path=status_path)
+        status = load_runtime_status(status_path)
+
+        self.assertEqual(summary["jobs_processed"], 1)
+        self.assertEqual(status["current_stage"], "job_completed")
+        self.assertEqual(status["last_run"]["status"], "completed")
+        self.assertEqual(status["last_run"]["title_ru"], "А")
+
     def test_build_job_identity_uses_source_signature_and_range(self):
         first = build_job_identity({
             "title": "A",
@@ -190,6 +268,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "status_path": tmp_dir / "runtime_status.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": False,
@@ -236,6 +315,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "status_path": tmp_dir / "runtime_status.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": True,
@@ -302,6 +382,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "status_path": tmp_dir / "runtime_status.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": True,
@@ -370,6 +451,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "status_path": tmp_dir / "runtime_status.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": True,

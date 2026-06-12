@@ -10,6 +10,7 @@ from lib.telegram_bot import (
     add_job_from_command,
     build_main_keyboard,
     build_help_message,
+    format_current_message,
     format_discovery_message,
     format_error_message,
     format_jobs_message,
@@ -138,6 +139,7 @@ class TelegramBotTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "status_path": tmp_dir / "runtime_status.json",
         }
         runtime_paths["lock_path"].write_text("locked", encoding="utf-8")
         runtime_paths["log_path"].write_text(
@@ -188,14 +190,84 @@ class TelegramBotTests(unittest.TestCase):
         self.assertTrue(keyboard["resize_keyboard"])
         self.assertFalse(keyboard["one_time_keyboard"])
         self.assertEqual(keyboard["keyboard"][0][0]["text"], "Статус")
-        self.assertEqual(keyboard["keyboard"][0][1]["text"], "Очередь")
-        self.assertEqual(keyboard["keyboard"][1][0]["text"], "Помощь")
+        self.assertEqual(keyboard["keyboard"][0][1]["text"], "Текущая")
+        self.assertEqual(keyboard["keyboard"][1][0]["text"], "Очередь")
+        self.assertEqual(keyboard["keyboard"][1][1]["text"], "Помощь")
 
     def test_normalize_command_text_maps_button_aliases(self):
         self.assertEqual(normalize_command_text("Статус"), "/status")
+        self.assertEqual(normalize_command_text("Текущая"), "/current")
         self.assertEqual(normalize_command_text("Очередь"), "/jobs")
         self.assertEqual(normalize_command_text("Помощь"), "/help")
         self.assertEqual(normalize_command_text("/jobs"), "/jobs")
+
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_current_message_shows_active_job(self, mock_load_runtime_status):
+        mock_load_runtime_status.return_value = {
+            "run_status": "running",
+            "run_started_at": "2026-06-13T10:00:00+00:00",
+            "current_stage": "processing",
+            "queue_progress": {
+                "current_job_index": 2,
+                "total_jobs": 5,
+                "jobs_processed": 1,
+                "jobs_failed": 0,
+            },
+            "current_job": {
+                "title": "English Title",
+                "title_ru": "Русский тайтл",
+                "season": 1,
+                "episodes_range": "001-010",
+                "stage": "render_segments",
+                "started_at": "2026-06-13T10:01:00+00:00",
+                "current_episode": 3,
+                "total_episodes": 10,
+                "current_episode_file": "ep03.mkv",
+            },
+            "last_run": None,
+        }
+
+        message = format_current_message()
+
+        self.assertIn("Текущая обработка", message)
+        self.assertIn("Русский тайтл", message)
+        self.assertIn("Этап: вырезка сегментов", message)
+        self.assertIn("Текущая серия: 3", message)
+        self.assertIn("Всего серий: 10", message)
+
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_current_message_shows_last_run_when_idle(self, mock_load_runtime_status):
+        mock_load_runtime_status.return_value = {
+            "run_status": "completed",
+            "run_finished_at": "2026-06-13T12:00:00+00:00",
+            "current_stage": "completed",
+            "queue_progress": {
+                "current_job_index": 0,
+                "total_jobs": 5,
+                "jobs_processed": 5,
+                "jobs_failed": 1,
+            },
+            "current_job": None,
+            "last_run": {
+                "title": "English Title",
+                "title_ru": "Русский тайтл",
+                "status": "failed",
+                "stage": "job_failed",
+                "finished_at": "2026-06-13T12:00:00+00:00",
+                "jobs_processed": 4,
+                "jobs_failed": 1,
+                "current_episode": 8,
+                "total_episodes": 12,
+            },
+        }
+
+        message = format_current_message()
+
+        self.assertIn("Сейчас ничего не обрабатывается", message)
+        self.assertIn("Последний запуск", message)
+        self.assertIn("Русский тайтл", message)
+        self.assertIn("Статус: с ошибкой", message)
+        self.assertIn("Последняя серия: 8 / 12", message)
 
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)

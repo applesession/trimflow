@@ -13,7 +13,7 @@ from lib.autojobs import find_matching_job, format_episodes_range
 from lib.config import load_jobs, load_state, save_jobs
 from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
 from lib.helpers import ensure_non_empty_slug, parse_episodes_range
-from lib.runtime import ensure_runtime_paths
+from lib.runtime import ensure_runtime_paths, load_runtime_status
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -43,8 +43,8 @@ def format_reason_ru(reason):
 def build_main_keyboard():
     return {
         "keyboard": [
-            [{"text": "Статус"}, {"text": "Очередь"}],
-            [{"text": "Помощь"}],
+            [{"text": "Статус"}, {"text": "Текущая"}],
+            [{"text": "Очередь"}, {"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -267,6 +267,30 @@ def format_datetime_ru(iso_value):
     return parsed.astimezone().strftime("%d.%m.%Y %H:%M")
 
 
+def format_runtime_stage_ru(stage):
+    mapping = {
+        "cron_start": "запуск cron",
+        "discovery": "обновление очереди",
+        "processing": "обработка очереди",
+        "completed": "завершено",
+        "failed": "завершено с ошибкой",
+        "job_start": "старт аниме",
+        "job_completed": "аниме обработано",
+        "job_failed": "ошибка обработки",
+        "validation": "подготовка",
+        "download": "загрузка исходников",
+        "episode_scan": "поиск серий",
+        "detector": "поиск OP/ED",
+        "render_segments": "вырезка сегментов",
+        "concat": "склейка частей",
+        "final_render": "финальный рендер",
+        "delivery_s3": "сохранение манифеста",
+        "delivery_vk": "публикация в VK",
+        "job_done": "аниме готово",
+    }
+    return mapping.get(stage, stage or "неизвестно")
+
+
 def find_job_by_title(jobs, title):
     normalized = str(title or "").strip()
     if not normalized:
@@ -316,6 +340,56 @@ def format_status_message(config):
     return "\n".join(lines)
 
 
+def format_current_message():
+    runtime_status = load_runtime_status()
+    run_status = runtime_status.get("run_status")
+    current_job = runtime_status.get("current_job") or {}
+    queue_progress = runtime_status.get("queue_progress") or {}
+    last_run = runtime_status.get("last_run") or {}
+
+    if run_status == "running" and current_job:
+        return "\n".join([
+            "Текущая обработка",
+            "",
+            f"Тайтл: {get_display_title(current_job)}",
+            f"Сезон: {current_job.get('season', '?')}",
+            f"Эпизоды: {current_job.get('episodes_range', '?')}",
+            f"Этап: {format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage'))}",
+            (
+                "Прогресс очереди: "
+                f"{queue_progress.get('current_job_index', 0)}/{queue_progress.get('total_jobs', 0)}"
+                f" | готово {queue_progress.get('jobs_processed', 0)}"
+                f" | ошибок {queue_progress.get('jobs_failed', 0)}"
+            ),
+            f"Текущая серия: {current_job.get('current_episode') or 'ещё не началась'}",
+            f"Всего серий: {current_job.get('total_episodes') or 'неизвестно'}",
+            f"Файл серии: {current_job.get('current_episode_file') or 'ещё не выбран'}",
+            f"Старт: {format_datetime_ru(current_job.get('started_at') or runtime_status.get('run_started_at'))}",
+        ])
+
+    if last_run:
+        return "\n".join([
+            "Сейчас ничего не обрабатывается",
+            "",
+            "Последний запуск",
+            f"Тайтл: {get_display_title(last_run)}",
+            f"Статус: {'успешно' if last_run.get('status') == 'completed' else 'с ошибкой'}",
+            f"Финальный этап: {format_runtime_stage_ru(last_run.get('stage') or runtime_status.get('current_stage'))}",
+            f"Завершено: {format_datetime_ru(last_run.get('finished_at') or runtime_status.get('run_finished_at'))}",
+            (
+                "Прогресс очереди: "
+                f"готово {last_run.get('jobs_processed', 0)}"
+                f" | ошибок {last_run.get('jobs_failed', 0)}"
+            ),
+            f"Последняя серия: {last_run.get('current_episode') or 'неизвестно'} / {last_run.get('total_episodes') or 'неизвестно'}",
+        ])
+
+    return "\n".join([
+        "Сейчас ничего не обрабатывается",
+        "История запусков пока пуста",
+    ])
+
+
 def format_jobs_message(config, limit=10):
     jobs = load_jobs(config)
     if not jobs:
@@ -342,6 +416,7 @@ def normalize_command_text(text):
     normalized = str(text or "").strip()
     aliases = {
         "Статус": "/status",
+        "Текущая": "/current",
         "Очередь": "/jobs",
         "Помощь": "/help",
     }
@@ -443,6 +518,7 @@ def build_help_message():
         "",
         "/start - краткая справка",
         "/status - статус очереди и runtime",
+        "/current - текущее или последнее выполнение",
         "/jobs - показать последние аниме в очереди",
         "",
         "Пример:",
@@ -458,6 +534,8 @@ def handle_command(config, text):
         return build_help_message()
     if text.startswith("/status"):
         return format_status_message(config)
+    if text.startswith("/current"):
+        return format_current_message()
     if text.startswith("/jobs"):
         return format_jobs_message(config)
     if text.startswith("/add "):

@@ -9,6 +9,7 @@ DEFAULT_RUNTIME_DIR = Path(".runtime")
 DEFAULT_LOGS_DIR = Path("logs")
 DEFAULT_CRON_LOCK_NAME = "cron.lock"
 DEFAULT_CRON_LOG_NAME = "cron.log"
+DEFAULT_RUNTIME_STATUS_NAME = "runtime_status.json"
 TEMP_ROOT = Path("./temp")
 SUPPORTED_VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 REQUIRED_ENV_VARS = [

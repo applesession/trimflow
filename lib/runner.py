@@ -7,6 +7,11 @@ from lib.config import (
     save_jobs,
 )
 from lib.pipeline import process_job
+from lib.runtime import (
+    load_runtime_status,
+    mark_runtime_job_finish,
+    mark_runtime_job_start,
+)
 from lib.validation import (
     validate_required_env,
     validate_required_files,
@@ -75,7 +80,7 @@ def build_completed_job_entry(job, job_result):
     }
 
 
-def run_jobs(config, jobs, log=None, on_job_success=None, on_job_failure=None):
+def run_jobs(config, jobs, runtime_status_path=None, log=None, on_job_success=None, on_job_failure=None):
     log = log or print
     active_jobs = list(jobs or [])
 
@@ -109,9 +114,18 @@ def run_jobs(config, jobs, log=None, on_job_success=None, on_job_failure=None):
         log("\n" + "=" * 80)
         log(f"START JOB {index}/{len(merged_jobs)}: {merged_job['title']}")
         log("=" * 80)
+        if runtime_status_path:
+            mark_runtime_job_start(
+                runtime_status_path,
+                merged_job,
+                current_job_index=index,
+                total_jobs=len(merged_jobs),
+                jobs_processed=summary["jobs_processed"],
+                jobs_failed=summary["jobs_failed"],
+            )
 
         try:
-            job_result = process_job(merged_job)
+            job_result = process_job(merged_job, runtime_status_path=runtime_status_path)
             if is_job_completed(job_result):
                 active_jobs, removed = remove_job_from_queue(active_jobs, merged_job)
                 if removed:
@@ -120,6 +134,18 @@ def run_jobs(config, jobs, log=None, on_job_success=None, on_job_failure=None):
                 save_completed_jobs(config, completed_jobs)
 
             summary["jobs_processed"] += 1
+            if runtime_status_path:
+                current_job = load_runtime_status(runtime_status_path).get("current_job") or {}
+                mark_runtime_job_finish(
+                    runtime_status_path,
+                    merged_job,
+                    status="completed",
+                    stage="job_completed",
+                    current_episode=current_job.get("current_episode"),
+                    total_episodes=current_job.get("total_episodes"),
+                    jobs_processed=summary["jobs_processed"],
+                    jobs_failed=summary["jobs_failed"],
+                )
             if on_job_success:
                 on_job_success(merged_job, job_result)
         except Exception as exc:
@@ -127,6 +153,18 @@ def run_jobs(config, jobs, log=None, on_job_success=None, on_job_failure=None):
             log(repr(exc))
             summary["jobs_failed"] += 1
             summary["failed_titles"].append(merged_job.get("title"))
+            if runtime_status_path:
+                current_job = load_runtime_status(runtime_status_path).get("current_job") or {}
+                mark_runtime_job_finish(
+                    runtime_status_path,
+                    merged_job,
+                    status="failed",
+                    stage="job_failed",
+                    current_episode=current_job.get("current_episode"),
+                    total_episodes=current_job.get("total_episodes"),
+                    jobs_processed=summary["jobs_processed"],
+                    jobs_failed=summary["jobs_failed"],
+                )
             if on_job_failure:
                 on_job_failure(merged_job, exc)
             continue

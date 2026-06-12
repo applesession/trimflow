@@ -36,6 +36,7 @@ from lib.media import (
     render_final,
     render_segment,
 )
+from lib.runtime import update_runtime_status
 from lib.storage import upload_file_to_s3
 from lib.validation import reset_temp_dir
 from lib.vk import publish_video_to_vk
@@ -669,7 +670,19 @@ def cleanup_job_artifacts(cleanup, download_dir=None, temp_dir=None, job_output_
         shutil.rmtree(job_output_dir, ignore_errors=True)
 
 
-def process_job(job):
+def set_runtime_stage(runtime_status_path, stage, **current_job_updates):
+    if not runtime_status_path:
+        return
+
+    payload = {
+        "current_stage": stage,
+    }
+    if current_job_updates:
+        payload["current_job"] = {"stage": stage, **current_job_updates}
+    update_runtime_status(runtime_status_path, **payload)
+
+
+def process_job(job, runtime_status_path=None):
     title = job["title"]
     title_ru = job.get("title_ru")
     mal_id = job.get("mal_id")
@@ -699,11 +712,14 @@ def process_job(job):
     success = False
 
     try:
+        set_runtime_stage(runtime_status_path, "validation")
+        set_runtime_stage(runtime_status_path, "download")
         download_dir, detected_episode_files, ignored_files = collect_episode_files(
             source,
             title_slug,
         )
 
+        set_runtime_stage(runtime_status_path, "episode_scan")
         episode_files, excluded_out_of_range = filter_episode_files(
             detected_episode_files,
             allowed_episodes,
@@ -711,6 +727,11 @@ def process_job(job):
         excluded_files = ignored_files + excluded_out_of_range
         log_episode_selection(episode_files, excluded_files)
         episode_infos = build_episode_infos(episode_files)
+        set_runtime_stage(
+            runtime_status_path,
+            "episode_scan",
+            total_episodes=len(episode_infos),
+        )
         if aniskip_enabled and mal_id:
             prefetched_aniskip_results = build_prefetched_aniskip_results(episode_infos, mal_id, skip_types)
         elif aniskip_enabled and not mal_id:
@@ -731,6 +752,7 @@ def process_job(job):
                 "anilibria",
                 "AniLibria provider disabled by config",
             )
+        set_runtime_stage(runtime_status_path, "detector", total_episodes=len(episode_infos))
         detector_inputs = {
             "aniskip_by_episode": prefetched_aniskip_results,
             "anilibria_by_episode": prefetched_anilibria_results,
@@ -755,6 +777,13 @@ def process_job(job):
         manifest_episodes = []
 
         for episode_info in episode_infos:
+            set_runtime_stage(
+                runtime_status_path,
+                "render_segments",
+                current_episode=episode_info["episode"],
+                total_episodes=len(episode_infos),
+                current_episode_file=Path(episode_info["path"]).name,
+            )
             cumulative_time, segment_outputs, manifest_episode, timestamp_line = process_episode(
                 episode_info,
                 skip_types,
@@ -769,8 +798,10 @@ def process_job(job):
             manifest_episodes.append(manifest_episode)
             timestamps.append(timestamp_line)
 
+        set_runtime_stage(runtime_status_path, "concat", total_episodes=len(episode_infos))
         create_concat_file(all_segments, concat_file)
         render_concat(concat_file, concat_output)
+        set_runtime_stage(runtime_status_path, "final_render", total_episodes=len(episode_infos))
         render_final(
             concat_output=concat_output,
             watermark_path=watermark_path,
@@ -817,6 +848,7 @@ def process_job(job):
         s3_uploaded_files = {}
         s3_manifest_pending = False
         if delivery["s3_enabled"]:
+            set_runtime_stage(runtime_status_path, "delivery_s3", total_episodes=len(episode_infos))
             print(f"[DELIVERY] S3 start: {pretty_base_name}")
             s3_error = None
             try:
@@ -844,6 +876,7 @@ def process_job(job):
                 )
 
         if delivery["vk_enabled"]:
+            set_runtime_stage(runtime_status_path, "delivery_vk", total_episodes=len(episode_infos))
             print(f"[DELIVERY] VK video start: {pretty_base_name}")
             try:
                 wall_post_text = (
@@ -931,6 +964,7 @@ def process_job(job):
                 manifest["delivery_summary"] = delivery_summary
                 write_outputs(output_txt, output_manifest, timestamps, manifest)
 
+        set_runtime_stage(runtime_status_path, "job_done", total_episodes=len(episode_infos))
         success = True
         print(f"\n=== JOB DONE: {title} ===")
         print(output_video)

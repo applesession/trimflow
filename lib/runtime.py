@@ -8,6 +8,7 @@ from lib.constants import (
     DEFAULT_CRON_LOG_NAME,
     DEFAULT_LOGS_DIR,
     DEFAULT_RUNTIME_DIR,
+    DEFAULT_RUNTIME_STATUS_NAME,
 )
 
 
@@ -25,7 +26,164 @@ def ensure_runtime_paths():
         "logs_dir": logs_dir,
         "lock_path": runtime_dir / DEFAULT_CRON_LOCK_NAME,
         "log_path": logs_dir / DEFAULT_CRON_LOG_NAME,
+        "status_path": runtime_dir / DEFAULT_RUNTIME_STATUS_NAME,
     }
+
+
+def get_runtime_status_path():
+    return ensure_runtime_paths()["status_path"]
+
+
+def build_default_runtime_status():
+    return {
+        "schema_version": 1,
+        "updated_at": None,
+        "run_status": "idle",
+        "run_started_at": None,
+        "run_finished_at": None,
+        "current_stage": None,
+        "queue_progress": {
+            "current_job_index": 0,
+            "total_jobs": 0,
+            "jobs_processed": 0,
+            "jobs_failed": 0,
+        },
+        "current_job": None,
+        "last_run": None,
+    }
+
+
+def load_runtime_status(status_path=None):
+    path = Path(status_path) if status_path else get_runtime_status_path()
+    if not path.exists():
+        return build_default_runtime_status()
+
+    with open(path, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} must contain a JSON object")
+
+    status = build_default_runtime_status()
+    status.update(data)
+    status.setdefault("queue_progress", build_default_runtime_status()["queue_progress"])
+    return status
+
+
+def save_runtime_status(status, status_path=None):
+    path = Path(status_path) if status_path else get_runtime_status_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(status, file, indent=2, ensure_ascii=False)
+        file.write("\n")
+
+
+def _merge_runtime_value(current, update):
+    if isinstance(current, dict) and isinstance(update, dict):
+        merged = dict(current)
+        for key, value in update.items():
+            if value is None and key in merged:
+                merged[key] = None
+            else:
+                merged[key] = _merge_runtime_value(merged.get(key), value)
+        return merged
+    return update
+
+
+def update_runtime_status(status_path=None, **changes):
+    status = load_runtime_status(status_path)
+    for key, value in changes.items():
+        if isinstance(value, dict) and isinstance(status.get(key), dict):
+            status[key] = _merge_runtime_value(status.get(key), value)
+        else:
+            status[key] = value
+    status["updated_at"] = utc_now_iso()
+    save_runtime_status(status, status_path)
+    return status
+
+
+def mark_runtime_job_start(
+    status_path,
+    job,
+    *,
+    current_job_index,
+    total_jobs,
+    jobs_processed,
+    jobs_failed,
+):
+    return update_runtime_status(
+        status_path,
+        current_stage="job_start",
+        queue_progress={
+            "current_job_index": current_job_index,
+            "total_jobs": total_jobs,
+            "jobs_processed": jobs_processed,
+            "jobs_failed": jobs_failed,
+        },
+        current_job={
+            "title": job.get("title"),
+            "title_ru": job.get("title_ru"),
+            "season": job.get("season"),
+            "episodes_range": job.get("episodes_range"),
+            "stage": "job_start",
+            "started_at": utc_now_iso(),
+            "current_episode": None,
+            "total_episodes": None,
+            "current_episode_file": None,
+        },
+    )
+
+
+def mark_runtime_job_finish(
+    status_path,
+    job,
+    *,
+    status,
+    stage,
+    current_episode,
+    total_episodes,
+    jobs_processed,
+    jobs_failed,
+):
+    current_job = load_runtime_status(status_path).get("current_job") or {}
+    return update_runtime_status(
+        status_path,
+        current_stage=stage,
+        queue_progress={
+            "jobs_processed": jobs_processed,
+            "jobs_failed": jobs_failed,
+        },
+        current_job=None,
+        last_run={
+            "status": status,
+            "finished_at": utc_now_iso(),
+            "title": job.get("title"),
+            "title_ru": job.get("title_ru"),
+            "season": job.get("season"),
+            "episodes_range": job.get("episodes_range"),
+            "stage": stage,
+            "current_episode": current_episode,
+            "total_episodes": total_episodes,
+            "jobs_processed": jobs_processed,
+            "jobs_failed": jobs_failed,
+            "started_at": current_job.get("started_at"),
+        },
+    )
+
+
+def mark_runtime_run_finish(status_path, *, status, current_stage, jobs_processed, jobs_failed):
+    return update_runtime_status(
+        status_path,
+        run_status=status,
+        run_finished_at=utc_now_iso(),
+        current_stage=current_stage,
+        queue_progress={
+            "jobs_processed": jobs_processed,
+            "jobs_failed": jobs_failed,
+            "current_job_index": 0,
+        },
+        current_job=None,
+    )
 
 
 def build_lock_payload(command):
