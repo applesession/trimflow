@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lib.anilibria import _extract_release_aliases_from_torrents_page
+from lib.anilibria import (
+    _build_request_kwargs,
+    _extract_release_aliases_from_torrents_page,
+    get_anilibria_proxy_url,
+)
 from lib.autojobs import collect_release_episode_numbers, discover_jobs, format_episodes_range, merge_episode_ranges
 from lib.config import build_default_state, load_completed_jobs, load_jobs, load_state
 
@@ -72,6 +76,29 @@ class ConfigStateTests(unittest.TestCase):
             _extract_release_aliases_from_torrents_page(html),
             ["test-one", "test-two", "test-three"],
         )
+
+    def test_get_anilibria_proxy_url_returns_env_value(self):
+        with patch.dict("os.environ", {"ANILIBERTY_PROXY_URL": "socks5h://user:pass@host:1080"}):
+            self.assertEqual(get_anilibria_proxy_url(), "socks5h://user:pass@host:1080")
+
+    def test_build_request_kwargs_uses_proxy_when_configured(self):
+        with patch.dict("os.environ", {"ANILIBERTY_PROXY_URL": "socks5h://user:pass@host:1080"}):
+            kwargs = _build_request_kwargs(timeout=20, params={"query": "test"})
+
+        self.assertEqual(kwargs["timeout"], 20)
+        self.assertEqual(kwargs["params"], {"query": "test"})
+        self.assertEqual(kwargs["proxies"]["http"], "socks5h://user:pass@host:1080")
+        self.assertEqual(kwargs["proxies"]["https"], "socks5h://user:pass@host:1080")
+
+    def test_build_request_kwargs_omits_proxy_when_not_configured(self):
+        with patch.dict("os.environ", {}, clear=False):
+            if "ANILIBERTY_PROXY_URL" in __import__("os").environ:
+                del __import__("os").environ["ANILIBERTY_PROXY_URL"]
+            kwargs = _build_request_kwargs(timeout=30)
+
+        self.assertEqual(kwargs["timeout"], 30)
+        self.assertNotIn("params", kwargs)
+        self.assertNotIn("proxies", kwargs)
 
     def test_collect_release_episode_numbers_ignores_zero_and_negative(self):
         release_payload = {

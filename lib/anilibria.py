@@ -1,3 +1,4 @@
+import os
 import re
 
 import requests
@@ -13,6 +14,27 @@ DEFAULT_HEADERS = {
     "User-Agent": "workspace-gojo-satoru/1.0 (+https://aniliberty.top)",
     "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
 }
+
+
+def get_anilibria_proxy_url():
+    return (os.getenv("ANILIBERTY_PROXY_URL") or "").strip()
+
+
+def _build_request_kwargs(timeout, params=None):
+    kwargs = {
+        "timeout": timeout,
+        "headers": DEFAULT_HEADERS,
+    }
+    if params is not None:
+        kwargs["params"] = params
+
+    proxy_url = get_anilibria_proxy_url()
+    if proxy_url:
+        kwargs["proxies"] = {
+            "http": proxy_url,
+            "https": proxy_url,
+        }
+    return kwargs
 
 
 def _extract_names(payload):
@@ -118,13 +140,13 @@ def _match_title(payload, title, aliases):
 
 
 def _request(url, params=None):
-    response = requests.get(url, params=params, timeout=20, headers=DEFAULT_HEADERS)
+    response = requests.get(url, **_build_request_kwargs(timeout=20, params=params))
     response.raise_for_status()
     return response.json(), response.url
 
 
 def _request_text(url, params=None):
-    response = requests.get(url, params=params, timeout=30, headers=DEFAULT_HEADERS)
+    response = requests.get(url, **_build_request_kwargs(timeout=30, params=params))
     response.raise_for_status()
     return response.text, response.url
 
