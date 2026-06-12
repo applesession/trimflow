@@ -202,6 +202,22 @@ def send_message(chat_id, text, reply_markup=None):
     )
 
 
+def send_formatted_message(chat_id, text, *, parse_mode="MarkdownV2", reply_markup=None):
+    payload = {
+        "chat_id": str(chat_id),
+        "text": text,
+        "disable_web_page_preview": True,
+        "parse_mode": parse_mode,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return _telegram_request(
+        "sendMessage",
+        payload=payload,
+        timeout=20,
+    )
+
+
 def send_reply(chat_id, text, include_keyboard=True):
     reply_markup = build_main_keyboard() if include_keyboard else None
     return send_message(chat_id, text, reply_markup=reply_markup)
@@ -357,6 +373,17 @@ def tail_lines(path, limit):
     with open(path, "r", encoding="utf-8") as file:
         lines = file.read().splitlines()
     return lines[-int(limit):]
+
+
+def escape_markdown_v2(text):
+    value = str(text or "")
+    for char in ["\\", "_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
+        value = value.replace(char, f"\\{char}")
+    return value
+
+
+def sanitize_code_block_content(text):
+    return str(text or "").replace("```", "``\u200b`")
 
 
 def find_job_by_title(jobs, title):
@@ -530,6 +557,20 @@ def format_log_message(lines_limit=20, max_chars=3500):
         "",
         content,
     ])
+
+
+def format_log_message_markdown(lines_limit=20, max_chars=3500):
+    raw_message = format_log_message(lines_limit=lines_limit, max_chars=max_chars)
+    if raw_message in {"Лог ещё не создан", "Лог пока пуст"}:
+        return raw_message
+
+    lines = raw_message.splitlines()
+    title = lines[0] if lines else "Хвост лога"
+    content = "\n".join(lines[2:]) if len(lines) > 2 else ""
+    return (
+        f"{escape_markdown_v2(title)}\n\n"
+        f"```log\n{sanitize_code_block_content(content)}\n```"
+    )
 
 
 def parse_index_command(text, command_name):
@@ -899,7 +940,10 @@ def handle_command(config, text):
     if text.startswith("/errors"):
         return format_errors_message()
     if text.startswith("/log"):
-        return format_log_message()
+        return {
+            "text": format_log_message_markdown(),
+            "parse_mode": "MarkdownV2",
+        }
     if text.startswith("/jobs"):
         return format_jobs_message(config)
     if text.startswith("/remove"):
@@ -960,10 +1004,12 @@ def handle_update(config, update):
         pending_action = response.get("pending_action")
         if pending_action:
             set_pending_action(chat_id, pending_action)
-        send_message(
+        sender = send_formatted_message if response.get("parse_mode") else send_message
+        sender(
             chat_id,
             response.get("text", ""),
             reply_markup=response.get("reply_markup"),
+            **({"parse_mode": response.get("parse_mode")} if response.get("parse_mode") else {}),
         )
         return True
 

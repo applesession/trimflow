@@ -9,6 +9,7 @@ DEFAULT_RUNTIME_DIR = Path(".runtime")
 DEFAULT_LOGS_DIR = Path("logs")
 DEFAULT_CRON_LOCK_NAME = "cron.lock"
 DEFAULT_CRON_LOG_NAME = "cron.log"
+DEFAULT_TELEGRAM_LOG_NAME = "telegram_bot.log"
 DEFAULT_RUNTIME_STATUS_NAME = "runtime_status.json"
 DEFAULT_RUNTIME_ERRORS_NAME = "runtime_errors.json"
 DEFAULT_RUNTIME_ERRORS_LIMIT = 20

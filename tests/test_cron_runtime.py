@@ -374,6 +374,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
             "status_path": tmp_dir / "runtime_status.json",
             "errors_path": tmp_dir / "runtime_errors.json",
         }
@@ -422,6 +423,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
             "status_path": tmp_dir / "runtime_status.json",
             "errors_path": tmp_dir / "runtime_errors.json",
         }
@@ -490,6 +492,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
             "status_path": tmp_dir / "runtime_status.json",
             "errors_path": tmp_dir / "runtime_errors.json",
         }
@@ -560,6 +563,7 @@ class CronRuntimeTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
             "status_path": tmp_dir / "runtime_status.json",
             "errors_path": tmp_dir / "runtime_errors.json",
         }

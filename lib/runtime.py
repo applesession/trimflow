@@ -11,6 +11,7 @@ from lib.constants import (
     DEFAULT_RUNTIME_ERRORS_LIMIT,
     DEFAULT_RUNTIME_ERRORS_NAME,
     DEFAULT_RUNTIME_STATUS_NAME,
+    DEFAULT_TELEGRAM_LOG_NAME,
 )
 
 
@@ -28,6 +29,7 @@ def ensure_runtime_paths():
         "logs_dir": logs_dir,
         "lock_path": runtime_dir / DEFAULT_CRON_LOCK_NAME,
         "log_path": logs_dir / DEFAULT_CRON_LOG_NAME,
+        "telegram_log_path": logs_dir / DEFAULT_TELEGRAM_LOG_NAME,
         "status_path": runtime_dir / DEFAULT_RUNTIME_STATUS_NAME,
         "errors_path": runtime_dir / DEFAULT_RUNTIME_ERRORS_NAME,
     }

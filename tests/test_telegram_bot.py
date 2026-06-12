@@ -16,6 +16,7 @@ from lib.telegram_bot import (
     format_error_message,
     format_errors_message,
     format_log_message,
+    format_log_message_markdown,
     format_jobs_message,
     format_publish_success_message,
     format_status_message,
@@ -143,6 +144,7 @@ class TelegramBotTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
             "status_path": tmp_dir / "runtime_status.json",
         }
         runtime_paths["lock_path"].write_text("locked", encoding="utf-8")
@@ -338,6 +340,7 @@ class TelegramBotTests(unittest.TestCase):
             "logs_dir": tmp_dir,
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
             "status_path": tmp_dir / "runtime_status.json",
             "errors_path": tmp_dir / "runtime_errors.json",
         }
@@ -351,6 +354,27 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertIn("line 29", message)
         self.assertNotIn("line 0", message)
+
+    def test_log_message_markdown_wraps_content_in_code_block(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        runtime_paths = {
+            "runtime_dir": tmp_dir,
+            "logs_dir": tmp_dir,
+            "lock_path": tmp_dir / "cron.lock",
+            "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
+            "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
+        }
+        runtime_paths["log_path"].write_text("line <1>\nline &2", encoding="utf-8")
+
+        with patch("lib.telegram_bot.ensure_runtime_paths", return_value=runtime_paths):
+            message = format_log_message_markdown(lines_limit=20)
+
+        self.assertIn("Хвост лога", message)
+        self.assertIn("```log", message)
+        self.assertIn("line <1>", message)
+        self.assertIn("line &2", message)
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)

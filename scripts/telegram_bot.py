@@ -21,7 +21,7 @@ def main():
     config = load_config()
     state = load_telegram_state()
     paths = ensure_runtime_paths()
-    log_path = paths["log_path"]
+    log_path = paths["telegram_log_path"]
     log_line(log_path, "start telegram_bot")
     failure_delay_seconds = 5
 
