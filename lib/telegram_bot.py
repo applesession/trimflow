@@ -52,6 +52,24 @@ def build_main_keyboard():
     }
 
 
+def build_jobs_pagination_keyboard(has_previous, has_next):
+    keyboard = []
+    navigation_row = []
+    if has_previous:
+        navigation_row.append({"text": "Назад"})
+    if has_next:
+        navigation_row.append({"text": "Вперед"})
+    if navigation_row:
+        keyboard.append(navigation_row)
+
+    keyboard.extend(build_main_keyboard()["keyboard"])
+    return {
+        "keyboard": keyboard,
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+
 def build_confirmation_keyboard(action_type):
     if action_type == "remove":
         buttons = [[{"text": "Подтвердить удаление"}, {"text": "Отменить удаление"}]]
@@ -126,6 +144,7 @@ def build_default_telegram_state():
         "last_update_id": None,
         "last_handled_at": None,
         "pending_actions": {},
+        "jobs_pagination": {},
     }
 
 
@@ -143,6 +162,7 @@ def load_telegram_state():
     state = build_default_telegram_state()
     state.update(data)
     state.setdefault("pending_actions", {})
+    state.setdefault("jobs_pagination", {})
     return state
 
 
@@ -381,6 +401,33 @@ def clear_pending_action(chat_id):
     save_telegram_state(state)
 
 
+def get_jobs_pagination_page(chat_id):
+    state = load_telegram_state()
+    raw_value = state.get("jobs_pagination", {}).get(str(chat_id))
+    if raw_value is None:
+        return None
+    try:
+        return max(1, int(raw_value))
+    except (TypeError, ValueError):
+        return None
+
+
+def set_jobs_pagination_page(chat_id, page):
+    state = load_telegram_state()
+    jobs_pagination = dict(state.get("jobs_pagination", {}))
+    jobs_pagination[str(chat_id)] = max(1, int(page))
+    state["jobs_pagination"] = jobs_pagination
+    save_telegram_state(state)
+
+
+def clear_jobs_pagination_page(chat_id):
+    state = load_telegram_state()
+    jobs_pagination = dict(state.get("jobs_pagination", {}))
+    jobs_pagination.pop(str(chat_id), None)
+    state["jobs_pagination"] = jobs_pagination
+    save_telegram_state(state)
+
+
 def tail_lines(path, limit):
     with open(path, "r", encoding="utf-8") as file:
         lines = file.read().splitlines()
@@ -527,25 +574,79 @@ def format_errors_message(limit=5):
     return "\n".join(lines).rstrip()
 
 
-def format_jobs_message(config, limit=10, numbered=True):
+def get_jobs_page_data(config, page=1, page_size=15):
     jobs = load_jobs(config)
     if not jobs:
+        return {
+            "jobs": [],
+            "total_jobs": 0,
+            "page": 1,
+            "page_size": int(page_size),
+            "total_pages": 1,
+            "start_index": 0,
+            "end_index": 0,
+            "has_previous": False,
+            "has_next": False,
+        }
+
+    page_size = max(1, int(page_size))
+    total_jobs = len(jobs)
+    total_pages = max(1, (total_jobs + page_size - 1) // page_size)
+    page = max(1, min(int(page), total_pages))
+    start_index = (page - 1) * page_size
+    end_index = min(start_index + page_size, total_jobs)
+    return {
+        "jobs": jobs[start_index:end_index],
+        "total_jobs": total_jobs,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "start_index": start_index,
+        "end_index": end_index,
+        "has_previous": page > 1,
+        "has_next": page < total_pages,
+    }
+
+
+def format_jobs_message(config, page=1, page_size=15, numbered=True):
+    page_data = get_jobs_page_data(config, page=page, page_size=page_size)
+    if not page_data["jobs"]:
         return "Очередь пуста"
 
-    tail = jobs[-int(limit):]
     lines = [
         "Очередь аниме",
         "",
-        f"Всего: {len(jobs)}",
-        f"Показываю последних: {len(tail)}",
+        f"Всего: {page_data['total_jobs']}",
+        f"Страница: {page_data['page']}/{page_data['total_pages']}",
+        f"Показываю: {page_data['start_index'] + 1}-{page_data['end_index']}",
         "",
     ]
-    for index, job in enumerate(tail, start=1):
+    for index, job in enumerate(page_data["jobs"], start=page_data["start_index"] + 1):
         prefix = f"{index}. " if numbered else "- "
         lines.append(f"{prefix}{get_display_title(job)}")
         lines.append(f"  Сезон: {job.get('season', 1)}")
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
+
+
+def build_jobs_message_response(config, chat_id, page=1, page_size=15):
+    page_data = get_jobs_page_data(config, page=page, page_size=page_size)
+    if not page_data["jobs"]:
+        clear_jobs_pagination_page(chat_id)
+        return "Очередь пуста"
+
+    set_jobs_pagination_page(chat_id, page_data["page"])
+    return {
+        "text": format_jobs_message(
+            config,
+            page=page_data["page"],
+            page_size=page_data["page_size"],
+        ),
+        "reply_markup": build_jobs_pagination_keyboard(
+            page_data["has_previous"],
+            page_data["has_next"],
+        ),
+    }
 
 
 def format_log_message(lines_limit=20, max_chars=3500):
@@ -1026,7 +1127,18 @@ def handle_command(config, text):
             "parse_mode": "MarkdownV2",
         }
     if text.startswith("/jobs"):
-        return format_jobs_message(config)
+        parts = text.split(maxsplit=1)
+        page = 1
+        if len(parts) == 2:
+            try:
+                page = int(parts[1].strip())
+            except ValueError as exc:
+                raise RuntimeError("Формат: /jobs или /jobs <страница>") from exc
+            if page < 1:
+                raise RuntimeError("Номер страницы должен быть не меньше 1")
+        return {
+            "jobs_page": page,
+        }
     if text.startswith("/remove"):
         index = parse_index_command(text, "remove")
         job, _jobs = get_job_by_index(config, index)
@@ -1063,6 +1175,19 @@ def handle_command(config, text):
     return "Неизвестная команда. Напиши /help"
 
 
+def maybe_handle_jobs_navigation(config, chat_id, text):
+    if text not in {"Назад", "Вперед"}:
+        return None
+
+    current_page = get_jobs_pagination_page(chat_id)
+    if current_page is None:
+        return "Список очереди не открыт. Напиши /jobs"
+
+    if text == "Назад":
+        return build_jobs_message_response(config, chat_id, page=max(1, current_page - 1))
+    return build_jobs_message_response(config, chat_id, page=current_page + 1)
+
+
 def handle_update(config, update):
     message = update.get("message") or {}
     chat = message.get("chat") or {}
@@ -1081,6 +1206,18 @@ def handle_update(config, update):
             send_reply(chat_id, confirm_response, include_keyboard=True)
             return True
 
+        navigation_response = maybe_handle_jobs_navigation(config, chat_id, normalized_text)
+        if navigation_response is not None:
+            if isinstance(navigation_response, dict):
+                send_message(
+                    chat_id,
+                    navigation_response.get("text", ""),
+                    reply_markup=navigation_response.get("reply_markup"),
+                )
+            else:
+                send_reply(chat_id, navigation_response, include_keyboard=True)
+            return True
+
         response = handle_command(config, normalized_text)
     except Exception as exc:
         response = "\n".join([
@@ -1090,6 +1227,18 @@ def handle_update(config, update):
         ])
 
     if isinstance(response, dict):
+        if "jobs_page" in response:
+            jobs_response = build_jobs_message_response(config, chat_id, page=response["jobs_page"])
+            if isinstance(jobs_response, dict):
+                send_message(
+                    chat_id,
+                    jobs_response.get("text", ""),
+                    reply_markup=jobs_response.get("reply_markup"),
+                )
+            else:
+                send_reply(chat_id, jobs_response, include_keyboard=True)
+            return True
+
         pending_action = response.get("pending_action")
         if pending_action:
             set_pending_action(chat_id, pending_action)

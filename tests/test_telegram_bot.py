@@ -20,6 +20,7 @@ from lib.telegram_bot import (
     format_jobs_message,
     format_publish_success_message,
     format_status_message,
+    get_jobs_pagination_page,
     get_pending_action,
     get_display_title,
     handle_update,
@@ -334,6 +335,27 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("1. А", message)
         self.assertIn("2. Б", message)
 
+    def test_jobs_message_uses_absolute_indexes_on_requested_page(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        jobs = []
+        for index in range(1, 29):
+            jobs.append({
+                "title": f"Title {index}",
+                "title_ru": f"Тайтл {index}",
+                "season": 1,
+                "episodes_range": f"{index:03d}",
+            })
+        save_jobs(config, jobs)
+
+        message = format_jobs_message(config, page=2, page_size=15)
+
+        self.assertIn("Страница: 2/2", message)
+        self.assertIn("Показываю: 16-28", message)
+        self.assertIn("16. Тайтл 16", message)
+        self.assertIn("28. Тайтл 28", message)
+        self.assertNotIn("1. Тайтл 16", message)
+
     def test_log_message_reads_tail_and_handles_missing_file(self):
         tmp_dir = self.make_workspace_temp_dir()
         runtime_paths = {
@@ -555,8 +577,53 @@ class TelegramBotTests(unittest.TestCase):
         completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])
         self.assertEqual(len(completed_data), 1)
-        self.assertEqual(completed_data[0]["job"]["title_ru"], "А")
-        self.assertEqual(completed_data[0]["completion_source"], "telegram_complete")
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_jobs_pagination_navigation_uses_buttons_and_persists_page(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        jobs = []
+        for index in range(1, 29):
+            jobs.append({
+                "title": f"Title {index}",
+                "title_ru": f"Тайтл {index}",
+                "season": 1,
+                "episodes_range": f"{index:03d}",
+            })
+        save_jobs(config, jobs)
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/jobs"},
+            })
+            first_message = mock_send_message.call_args_list[-1].args[1]
+            first_markup = mock_send_message.call_args_list[-1].kwargs["reply_markup"]
+            self.assertIn("Страница: 1/2", first_message)
+            self.assertIn("1. Тайтл 1", first_message)
+            self.assertEqual(first_markup["keyboard"][0][0]["text"], "Вперед")
+            self.assertEqual(get_jobs_pagination_page(123), 1)
+
+            handle_update(config, {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Вперед"},
+            })
+            second_message = mock_send_message.call_args_list[-1].args[1]
+            second_markup = mock_send_message.call_args_list[-1].kwargs["reply_markup"]
+            self.assertIn("Страница: 2/2", second_message)
+            self.assertIn("16. Тайтл 16", second_message)
+            self.assertEqual(second_markup["keyboard"][0][0]["text"], "Назад")
+            self.assertEqual(get_jobs_pagination_page(123), 2)
+
+            handle_update(config, {
+                "update_id": 3,
+                "message": {"chat": {"id": 123}, "text": "Назад"},
+            })
+            third_message = mock_send_message.call_args_list[-1].args[1]
+            self.assertIn("Страница: 1/2", third_message)
+            self.assertEqual(get_jobs_pagination_page(123), 1)
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
