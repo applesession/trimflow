@@ -2,6 +2,8 @@ from pathlib import Path
 import json
 import sys
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -9,6 +11,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from lib.autojobs import discover_jobs  # noqa: E402
 from lib.config import load_config, load_jobs, load_state, save_jobs, save_state  # noqa: E402
+
+
+load_dotenv()
 
 
 def main():
