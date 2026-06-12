@@ -14,6 +14,7 @@ from lib.config import load_config, load_jobs, load_state, save_jobs, save_state
 from lib.runner import run_jobs  # noqa: E402
 from lib.runtime import (
     acquire_lock,
+    append_runtime_error,
     ensure_runtime_paths,
     log_line,
     mark_runtime_run_finish,
@@ -45,6 +46,7 @@ def main():
     lock_path = paths["lock_path"]
     log_path = paths["log_path"]
     status_path = paths["status_path"]
+    errors_path = paths["errors_path"]
     command = "python scripts/cron_run.py"
 
     lock_result = acquire_lock(lock_path, command)
@@ -119,6 +121,15 @@ def main():
             update_runtime_status(status_path, queue_progress={"total_jobs": len(jobs)})
         except Exception as exc:
             log_line(log_path, f"warning discovery_failed error={repr(exc)}")
+            append_runtime_error(
+                context="discovery_failed",
+                message=repr(exc),
+                error_type=type(exc).__name__,
+                stage="discovery",
+                run_status="running",
+                status_path=status_path,
+                errors_path=errors_path,
+            )
             notify_best_effort(
                 log_path,
                 format_error_message("discovery", repr(exc)),
@@ -130,6 +141,7 @@ def main():
             config,
             jobs,
             runtime_status_path=status_path,
+            runtime_errors_path=errors_path,
             log=lambda message: log_line(log_path, message),
             on_job_success=lambda job, result: notify_best_effort(
                 log_path,
@@ -174,6 +186,15 @@ def main():
             current_stage="failed",
             jobs_processed=0,
             jobs_failed=0,
+        )
+        append_runtime_error(
+            context="cron_run_error",
+            message=repr(exc),
+            error_type=type(exc).__name__,
+            stage="failed",
+            run_status="failed",
+            status_path=status_path,
+            errors_path=errors_path,
         )
         log_line(log_path, f"error {repr(exc)}")
         notify_best_effort(

@@ -8,6 +8,7 @@ from lib.config import (
 )
 from lib.pipeline import process_job
 from lib.runtime import (
+    append_runtime_error,
     load_runtime_status,
     mark_runtime_job_finish,
     mark_runtime_job_start,
@@ -80,7 +81,15 @@ def build_completed_job_entry(job, job_result):
     }
 
 
-def run_jobs(config, jobs, runtime_status_path=None, log=None, on_job_success=None, on_job_failure=None):
+def run_jobs(
+    config,
+    jobs,
+    runtime_status_path=None,
+    runtime_errors_path=None,
+    log=None,
+    on_job_success=None,
+    on_job_failure=None,
+):
     log = log or print
     active_jobs = list(jobs or [])
 
@@ -155,6 +164,21 @@ def run_jobs(config, jobs, runtime_status_path=None, log=None, on_job_success=No
             summary["failed_titles"].append(merged_job.get("title"))
             if runtime_status_path:
                 current_job = load_runtime_status(runtime_status_path).get("current_job") or {}
+                append_runtime_error(
+                    context="job_failed",
+                    message=repr(exc),
+                    error_type=type(exc).__name__,
+                    stage=current_job.get("stage") or "job_failed",
+                    title=merged_job.get("title"),
+                    title_ru=merged_job.get("title_ru"),
+                    season=merged_job.get("season"),
+                    episodes_range=merged_job.get("episodes_range"),
+                    current_episode=current_job.get("current_episode"),
+                    total_episodes=current_job.get("total_episodes"),
+                    run_status="running",
+                    status_path=runtime_status_path,
+                    errors_path=runtime_errors_path,
+                )
                 mark_runtime_job_finish(
                     runtime_status_path,
                     merged_job,

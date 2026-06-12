@@ -8,6 +8,8 @@ from lib.constants import (
     DEFAULT_CRON_LOG_NAME,
     DEFAULT_LOGS_DIR,
     DEFAULT_RUNTIME_DIR,
+    DEFAULT_RUNTIME_ERRORS_LIMIT,
+    DEFAULT_RUNTIME_ERRORS_NAME,
     DEFAULT_RUNTIME_STATUS_NAME,
 )
 
@@ -27,11 +29,16 @@ def ensure_runtime_paths():
         "lock_path": runtime_dir / DEFAULT_CRON_LOCK_NAME,
         "log_path": logs_dir / DEFAULT_CRON_LOG_NAME,
         "status_path": runtime_dir / DEFAULT_RUNTIME_STATUS_NAME,
+        "errors_path": runtime_dir / DEFAULT_RUNTIME_ERRORS_NAME,
     }
 
 
 def get_runtime_status_path():
     return ensure_runtime_paths()["status_path"]
+
+
+def get_runtime_errors_path():
+    return ensure_runtime_paths()["errors_path"]
 
 
 def build_default_runtime_status():
@@ -50,6 +57,14 @@ def build_default_runtime_status():
         },
         "current_job": None,
         "last_run": None,
+    }
+
+
+def build_default_runtime_errors():
+    return {
+        "schema_version": 1,
+        "updated_at": None,
+        "errors": [],
     }
 
 
@@ -78,6 +93,32 @@ def save_runtime_status(status, status_path=None):
         file.write("\n")
 
 
+def load_runtime_errors(errors_path=None):
+    path = Path(errors_path) if errors_path else get_runtime_errors_path()
+    if not path.exists():
+        return build_default_runtime_errors()
+
+    with open(path, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} must contain a JSON object")
+
+    errors = build_default_runtime_errors()
+    errors.update(data)
+    if not isinstance(errors.get("errors"), list):
+        errors["errors"] = []
+    return errors
+
+
+def save_runtime_errors(errors_payload, errors_path=None):
+    path = Path(errors_path) if errors_path else get_runtime_errors_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(errors_payload, file, indent=2, ensure_ascii=False)
+        file.write("\n")
+
+
 def _merge_runtime_value(current, update):
     if isinstance(current, dict) and isinstance(update, dict):
         merged = dict(current)
@@ -100,6 +141,54 @@ def update_runtime_status(status_path=None, **changes):
     status["updated_at"] = utc_now_iso()
     save_runtime_status(status, status_path)
     return status
+
+
+def trim_runtime_errors(errors, limit=DEFAULT_RUNTIME_ERRORS_LIMIT):
+    return list(errors[:limit])
+
+
+def append_runtime_error(
+    *,
+    context,
+    message,
+    error_type,
+    stage=None,
+    title=None,
+    title_ru=None,
+    season=None,
+    episodes_range=None,
+    current_episode=None,
+    total_episodes=None,
+    run_status=None,
+    status_path=None,
+    errors_path=None,
+):
+    runtime_status = load_runtime_status(status_path)
+    current_job = runtime_status.get("current_job") or {}
+    last_run = runtime_status.get("last_run") or {}
+    source_job = current_job or last_run
+
+    entry = {
+        "id": f"{utc_now_iso()}|{context}",
+        "created_at": utc_now_iso(),
+        "run_status": run_status or runtime_status.get("run_status") or "idle",
+        "context": context,
+        "stage": stage or current_job.get("stage") or runtime_status.get("current_stage"),
+        "title": title if title is not None else source_job.get("title"),
+        "title_ru": title_ru if title_ru is not None else source_job.get("title_ru"),
+        "season": season if season is not None else source_job.get("season"),
+        "episodes_range": episodes_range if episodes_range is not None else source_job.get("episodes_range"),
+        "current_episode": current_episode if current_episode is not None else current_job.get("current_episode"),
+        "total_episodes": total_episodes if total_episodes is not None else current_job.get("total_episodes"),
+        "message": message,
+        "error_type": error_type,
+    }
+
+    payload = load_runtime_errors(errors_path)
+    payload["errors"] = trim_runtime_errors([entry, *payload.get("errors", [])])
+    payload["updated_at"] = entry["created_at"]
+    save_runtime_errors(payload, errors_path)
+    return entry
 
 
 def mark_runtime_job_start(

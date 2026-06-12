@@ -13,6 +13,7 @@ from lib.telegram_bot import (
     format_current_message,
     format_discovery_message,
     format_error_message,
+    format_errors_message,
     format_jobs_message,
     format_publish_success_message,
     format_status_message,
@@ -192,12 +193,14 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(keyboard["keyboard"][0][0]["text"], "Статус")
         self.assertEqual(keyboard["keyboard"][0][1]["text"], "Текущая")
         self.assertEqual(keyboard["keyboard"][1][0]["text"], "Очередь")
-        self.assertEqual(keyboard["keyboard"][1][1]["text"], "Помощь")
+        self.assertEqual(keyboard["keyboard"][1][1]["text"], "Ошибки")
+        self.assertEqual(keyboard["keyboard"][2][0]["text"], "Помощь")
 
     def test_normalize_command_text_maps_button_aliases(self):
         self.assertEqual(normalize_command_text("Статус"), "/status")
         self.assertEqual(normalize_command_text("Текущая"), "/current")
         self.assertEqual(normalize_command_text("Очередь"), "/jobs")
+        self.assertEqual(normalize_command_text("Ошибки"), "/errors")
         self.assertEqual(normalize_command_text("Помощь"), "/help")
         self.assertEqual(normalize_command_text("/jobs"), "/jobs")
 
@@ -268,6 +271,47 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Русский тайтл", message)
         self.assertIn("Статус: с ошибкой", message)
         self.assertIn("Последняя серия: 8 / 12", message)
+
+    @patch("lib.telegram_bot.load_runtime_errors")
+    def test_errors_message_shows_empty_state(self, mock_load_runtime_errors):
+        mock_load_runtime_errors.return_value = {
+            "schema_version": 1,
+            "updated_at": None,
+            "errors": [],
+        }
+
+        message = format_errors_message()
+
+        self.assertIn("Ошибок пока нет", message)
+        self.assertIn("История сбоев ещё не накоплена", message)
+
+    @patch("lib.telegram_bot.load_runtime_errors")
+    def test_errors_message_shows_recent_items(self, mock_load_runtime_errors):
+        mock_load_runtime_errors.return_value = {
+            "schema_version": 1,
+            "updated_at": "2026-06-13T12:00:00+00:00",
+            "errors": [
+                {
+                    "created_at": "2026-06-13T12:00:00+00:00",
+                    "context": "job_failed",
+                    "stage": "render_segments",
+                    "title": "English Title",
+                    "title_ru": "Русский тайтл",
+                    "current_episode": 3,
+                    "total_episodes": 10,
+                    "message": "RuntimeError('boom')",
+                }
+            ],
+        }
+
+        message = format_errors_message()
+
+        self.assertIn("Последние ошибки", message)
+        self.assertIn("Контекст: job_failed", message)
+        self.assertIn("Этап: вырезка сегментов", message)
+        self.assertIn("Тайтл: Русский тайтл", message)
+        self.assertIn("Серия: 3 / 10", message)
+        self.assertIn("RuntimeError('boom')", message)
 
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)

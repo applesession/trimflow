@@ -10,8 +10,11 @@ from uuid import uuid4
 from lib.runner import build_job_identity, run_jobs
 from lib.runtime import (
     acquire_lock,
+    append_runtime_error,
+    build_default_runtime_errors,
     build_default_runtime_status,
     is_lock_stale,
+    load_runtime_errors,
     load_runtime_status,
     log_line,
     release_lock,
@@ -81,6 +84,73 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(status["queue_progress"]["jobs_processed"], 0)
         self.assertIsNone(status["current_job"])
         self.assertIsNone(status["last_run"])
+
+    def test_build_default_runtime_errors_creates_expected_shape(self):
+        errors = build_default_runtime_errors()
+
+        self.assertEqual(errors["errors"], [])
+        self.assertIsNone(errors["updated_at"])
+
+    def test_append_runtime_error_trims_to_last_20(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        status_path = tmp_dir / "runtime_status.json"
+        errors_path = tmp_dir / "runtime_errors.json"
+
+        update_runtime_status(
+            status_path,
+            run_status="running",
+            current_stage="processing",
+            current_job={"title": "A", "stage": "render_segments", "current_episode": 2, "total_episodes": 12},
+        )
+        for index in range(25):
+            append_runtime_error(
+                context=f"ctx_{index}",
+                message=f"boom_{index}",
+                error_type="RuntimeError",
+                status_path=status_path,
+                errors_path=errors_path,
+            )
+
+        payload = load_runtime_errors(errors_path)
+
+        self.assertEqual(len(payload["errors"]), 20)
+        self.assertEqual(payload["errors"][0]["context"], "ctx_24")
+        self.assertEqual(payload["errors"][-1]["context"], "ctx_5")
+
+    def test_append_runtime_error_uses_runtime_status_context(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        status_path = tmp_dir / "runtime_status.json"
+        errors_path = tmp_dir / "runtime_errors.json"
+
+        update_runtime_status(
+            status_path,
+            run_status="running",
+            current_stage="render_segments",
+            current_job={
+                "title": "A",
+                "title_ru": "А",
+                "season": 1,
+                "episodes_range": "001-010",
+                "stage": "render_segments",
+                "current_episode": 4,
+                "total_episodes": 10,
+            },
+        )
+        append_runtime_error(
+            context="job_failed",
+            message="RuntimeError('boom')",
+            error_type="RuntimeError",
+            status_path=status_path,
+            errors_path=errors_path,
+        )
+
+        payload = load_runtime_errors(errors_path)
+        entry = payload["errors"][0]
+
+        self.assertEqual(entry["title_ru"], "А")
+        self.assertEqual(entry["current_episode"], 4)
+        self.assertEqual(entry["total_episodes"], 10)
+        self.assertEqual(entry["stage"], "render_segments")
 
     def test_update_runtime_status_merges_nested_values(self):
         tmp_dir = self.make_workspace_temp_dir()
@@ -235,6 +305,42 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(status["last_run"]["status"], "completed")
         self.assertEqual(status["last_run"]["title_ru"], "А")
 
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_writes_runtime_error_for_failure(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        status_path = tmp_dir / "runtime_status.json"
+        errors_path = tmp_dir / "runtime_errors.json"
+        jobs = [{"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}]
+        mock_load_completed_jobs.return_value = []
+        mock_process_job.side_effect = RuntimeError("boom")
+
+        run_jobs(
+            {"defaults": {}},
+            jobs,
+            runtime_status_path=status_path,
+            runtime_errors_path=errors_path,
+        )
+        payload = load_runtime_errors(errors_path)
+
+        self.assertEqual(len(payload["errors"]), 1)
+        self.assertEqual(payload["errors"][0]["context"], "job_failed")
+        self.assertEqual(payload["errors"][0]["title_ru"], "А")
+
     def test_build_job_identity_uses_source_signature_and_range(self):
         first = build_job_identity({
             "title": "A",
@@ -269,6 +375,7 @@ class CronRuntimeTests(unittest.TestCase):
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
             "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": False,
@@ -316,6 +423,7 @@ class CronRuntimeTests(unittest.TestCase):
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
             "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": True,
@@ -383,6 +491,7 @@ class CronRuntimeTests(unittest.TestCase):
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
             "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": True,
@@ -452,6 +561,7 @@ class CronRuntimeTests(unittest.TestCase):
             "lock_path": tmp_dir / "cron.lock",
             "log_path": tmp_dir / "cron.log",
             "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
         }
         mock_acquire_lock.return_value = {
             "acquired": True,

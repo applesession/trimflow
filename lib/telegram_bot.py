@@ -13,7 +13,7 @@ from lib.autojobs import find_matching_job, format_episodes_range
 from lib.config import load_jobs, load_state, save_jobs
 from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
 from lib.helpers import ensure_non_empty_slug, parse_episodes_range
-from lib.runtime import ensure_runtime_paths, load_runtime_status
+from lib.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -44,7 +44,8 @@ def build_main_keyboard():
     return {
         "keyboard": [
             [{"text": "Статус"}, {"text": "Текущая"}],
-            [{"text": "Очередь"}, {"text": "Помощь"}],
+            [{"text": "Очередь"}, {"text": "Ошибки"}],
+            [{"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -291,6 +292,13 @@ def format_runtime_stage_ru(stage):
     return mapping.get(stage, stage or "неизвестно")
 
 
+def shorten_error_message(message, limit=280):
+    text = str(message or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def find_job_by_title(jobs, title):
     normalized = str(title or "").strip()
     if not normalized:
@@ -390,6 +398,36 @@ def format_current_message():
     ])
 
 
+def format_errors_message(limit=5):
+    runtime_errors = load_runtime_errors()
+    items = list(runtime_errors.get("errors", []))[: int(limit)]
+    if not items:
+        return "\n".join([
+            "Ошибок пока нет",
+            "История сбоев ещё не накоплена",
+        ])
+
+    lines = ["Последние ошибки", ""]
+    for item in items:
+        title = get_display_title(item)
+        series_text = ""
+        if item.get("current_episode"):
+            total = item.get("total_episodes") or "?"
+            series_text = f"Серия: {item.get('current_episode')} / {total}\n"
+        lines.append(
+            "\n".join([
+                f"{format_datetime_ru(item.get('created_at'))}",
+                f"Контекст: {item.get('context') or 'неизвестно'}",
+                f"Этап: {format_runtime_stage_ru(item.get('stage'))}",
+                f"Тайтл: {title}",
+                series_text + f"Ошибка: {shorten_error_message(item.get('message'))}",
+            ])
+        )
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def format_jobs_message(config, limit=10):
     jobs = load_jobs(config)
     if not jobs:
@@ -418,6 +456,7 @@ def normalize_command_text(text):
         "Статус": "/status",
         "Текущая": "/current",
         "Очередь": "/jobs",
+        "Ошибки": "/errors",
         "Помощь": "/help",
     }
     return aliases.get(normalized, normalized)
@@ -519,6 +558,7 @@ def build_help_message():
         "/start - краткая справка",
         "/status - статус очереди и runtime",
         "/current - текущее или последнее выполнение",
+        "/errors - последние ошибки выполнения",
         "/jobs - показать последние аниме в очереди",
         "",
         "Пример:",
@@ -536,6 +576,8 @@ def handle_command(config, text):
         return format_status_message(config)
     if text.startswith("/current"):
         return format_current_message()
+    if text.startswith("/errors"):
+        return format_errors_message()
     if text.startswith("/jobs"):
         return format_jobs_message(config)
     if text.startswith("/add "):
