@@ -5,9 +5,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lib.anilibria import (
+    _build_recent_releases_from_api,
     _build_request_kwargs,
     _extract_release_aliases_from_torrents_page,
     get_anilibria_proxy_url,
+    list_recent_releases,
 )
 from lib.autojobs import collect_release_episode_numbers, discover_jobs, format_episodes_range, merge_episode_ranges
 from lib.config import build_default_state, load_completed_jobs, load_jobs, load_state
@@ -99,6 +101,64 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 30)
         self.assertNotIn("params", kwargs)
         self.assertNotIn("proxies", kwargs)
+
+    @patch("lib.anilibria._request")
+    def test_build_recent_releases_from_api_uses_list_endpoint(self, mock_request):
+        mock_request.return_value = (
+            {
+                "list": [
+                    {"id": 2, "alias": "b", "updated_at": "2026-06-12T10:00:00+00:00"},
+                    {"id": 1, "alias": "a", "updated_at": "2026-06-13T10:00:00+00:00"},
+                ]
+            },
+            "https://aniliberty.top/api/v1/anime/releases/list?limit=25",
+        )
+
+        urls = []
+        errors = []
+        releases = _build_recent_releases_from_api(25, urls, errors)
+
+        self.assertEqual(len(releases), 2)
+        self.assertEqual(urls, ["https://aniliberty.top/api/v1/anime/releases/list?limit=25"])
+        self.assertEqual(errors, [])
+        request_url = mock_request.call_args.args[0]
+        request_params = mock_request.call_args.kwargs["params"]
+        self.assertEqual(request_url, "https://aniliberty.top/api/v1/anime/releases/list")
+        self.assertEqual(request_params, {"limit": 25})
+
+    @patch("lib.anilibria._build_recent_releases_from_torrents_page")
+    @patch("lib.anilibria._request")
+    def test_list_recent_releases_prefers_api_results(self, mock_request, mock_torrents):
+        mock_request.return_value = (
+            {
+                "items": [
+                    {"id": 1, "alias": "older", "updated_at": "2026-06-12T10:00:00+00:00"},
+                    {"id": 2, "alias": "newer", "updated_at": "2026-06-13T10:00:00+00:00"},
+                ]
+            },
+            "https://aniliberty.top/api/v1/anime/releases/list?limit=25",
+        )
+        mock_torrents.return_value = []
+
+        result = list_recent_releases(limit=25)
+
+        self.assertEqual([item["alias"] for item in result["releases"]], ["newer", "older"])
+        self.assertEqual(result["request_urls"], ["https://aniliberty.top/api/v1/anime/releases/list?limit=25"])
+        mock_torrents.assert_not_called()
+
+    @patch("lib.anilibria._build_recent_releases_from_torrents_page")
+    @patch("lib.anilibria._request")
+    def test_list_recent_releases_falls_back_to_torrents_page_when_api_is_empty(self, mock_request, mock_torrents):
+        mock_request.return_value = (
+            {"items": []},
+            "https://aniliberty.top/api/v1/anime/releases/list?limit=25",
+        )
+        mock_torrents.return_value = [{"id": 3, "alias": "fallback", "updated_at": "2026-06-13T10:00:00+00:00"}]
+
+        result = list_recent_releases(limit=25)
+
+        self.assertEqual([item["alias"] for item in result["releases"]], ["fallback"])
+        mock_torrents.assert_called_once()
 
     def test_collect_release_episode_numbers_ignores_zero_and_negative(self):
         release_payload = {

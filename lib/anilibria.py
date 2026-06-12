@@ -207,10 +207,33 @@ def _build_recent_releases_from_torrents_page(limit, urls, errors):
     return releases
 
 
+def _build_recent_releases_from_api(limit, urls, errors):
+    api_attempts = [
+        ("anime/releases/list", {"limit": int(limit)}),
+        ("anime/releases/list", None),
+    ]
+
+    for path, params in api_attempts:
+        try:
+            data, request_url = _request(f"{API_BASE_URL}/{path}", params=params)
+            urls.append(str(request_url))
+        except requests.RequestException as exc:
+            errors.append(f"{path}: {exc}")
+            continue
+
+        releases = _normalize_release_list(data)
+        if releases:
+            return releases
+
+    return []
+
+
 def list_recent_releases(limit=25):
     urls = []
     errors = []
-    releases = _build_recent_releases_from_torrents_page(limit, urls, errors)
+    releases = _build_recent_releases_from_api(limit, urls, errors)
+    if not releases:
+        releases = _build_recent_releases_from_torrents_page(limit, urls, errors)
 
     if not releases:
         error = "; ".join(errors) if errors else "no_releases_found"
