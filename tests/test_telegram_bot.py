@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import unittest
@@ -14,9 +15,11 @@ from lib.telegram_bot import (
     format_discovery_message,
     format_error_message,
     format_errors_message,
+    format_log_message,
     format_jobs_message,
     format_publish_success_message,
     format_status_message,
+    get_pending_action,
     get_display_title,
     handle_update,
     is_allowed_chat,
@@ -194,13 +197,15 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(keyboard["keyboard"][0][1]["text"], "Текущая")
         self.assertEqual(keyboard["keyboard"][1][0]["text"], "Очередь")
         self.assertEqual(keyboard["keyboard"][1][1]["text"], "Ошибки")
-        self.assertEqual(keyboard["keyboard"][2][0]["text"], "Помощь")
+        self.assertEqual(keyboard["keyboard"][2][0]["text"], "Лог")
+        self.assertEqual(keyboard["keyboard"][2][1]["text"], "Помощь")
 
     def test_normalize_command_text_maps_button_aliases(self):
         self.assertEqual(normalize_command_text("Статус"), "/status")
         self.assertEqual(normalize_command_text("Текущая"), "/current")
         self.assertEqual(normalize_command_text("Очередь"), "/jobs")
         self.assertEqual(normalize_command_text("Ошибки"), "/errors")
+        self.assertEqual(normalize_command_text("Лог"), "/log")
         self.assertEqual(normalize_command_text("Помощь"), "/help")
         self.assertEqual(normalize_command_text("/jobs"), "/jobs")
 
@@ -312,6 +317,127 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Тайтл: Русский тайтл", message)
         self.assertIn("Серия: 3 / 10", message)
         self.assertIn("RuntimeError('boom')", message)
+
+    def test_jobs_message_shows_numbering(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [
+            {"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001"},
+            {"title": "B", "title_ru": "Б", "season": 2, "episodes_range": "002"},
+        ])
+
+        message = format_jobs_message(config)
+
+        self.assertIn("1. А", message)
+        self.assertIn("2. Б", message)
+
+    def test_log_message_reads_tail_and_handles_missing_file(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        runtime_paths = {
+            "runtime_dir": tmp_dir,
+            "logs_dir": tmp_dir,
+            "lock_path": tmp_dir / "cron.lock",
+            "log_path": tmp_dir / "cron.log",
+            "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
+        }
+
+        with patch("lib.telegram_bot.ensure_runtime_paths", return_value=runtime_paths):
+            self.assertEqual(format_log_message(), "Лог ещё не создан")
+
+        runtime_paths["log_path"].write_text("\n".join([f"line {index}" for index in range(30)]), encoding="utf-8")
+        with patch("lib.telegram_bot.ensure_runtime_paths", return_value=runtime_paths):
+            message = format_log_message()
+
+        self.assertIn("line 29", message)
+        self.assertNotIn("line 0", message)
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_remove_flow_sets_pending_action_and_confirms(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_jobs(config, [{"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001"}])
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            update = {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/remove 1"},
+            }
+            handled = handle_update(config, update)
+
+            self.assertTrue(handled)
+            pending = get_pending_action(123)
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending["type"], "remove")
+
+            confirm_update = {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить удаление"},
+            }
+            handle_update(config, confirm_update)
+
+            self.assertEqual(len(load_telegram_state()["pending_actions"]), 0)
+
+        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        self.assertEqual(jobs_data, [])
+
+    @patch("lib.telegram_bot.send_reply")
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_retry_flow_adds_completed_job_back_to_queue(self, _mock_allowed, mock_send_message, mock_send_reply):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        completed_path = tmp_dir / "completed_jobs.json"
+        completed_path.write_text(
+            """[
+  {
+    "status": "completed",
+    "job": {
+      "title": "A",
+      "title_ru": "А",
+      "season": 1,
+      "episodes_range": "001",
+      "source": {
+        "type": "magnet",
+        "magnet": "magnet:?xt=urn:btih:testhash",
+        "download_dir": "downloads/A"
+      }
+    }
+  }
+]""",
+            encoding="utf-8",
+        )
+        config["automation"]["completed_jobs_path"] = str(completed_path.resolve())
+        save_jobs(config, [])
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            list_update = {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/retry"},
+            }
+            handle_update(config, list_update)
+            self.assertIn("Кандидаты для повтора", mock_send_reply.call_args.args[1])
+
+            pick_update = {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "/retry 1"},
+            }
+            handle_update(config, pick_update)
+            pending = get_pending_action(123)
+            self.assertEqual(pending["type"], "retry")
+
+            confirm_update = {
+                "update_id": 3,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить повтор"},
+            }
+            handle_update(config, confirm_update)
+
+        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(jobs_data), 1)
+        self.assertEqual(jobs_data[0]["title_ru"], "А")
 
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)

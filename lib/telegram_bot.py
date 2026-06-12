@@ -10,7 +10,7 @@ import requests
 from urllib3.util import connection as urllib3_connection
 
 from lib.autojobs import find_matching_job, format_episodes_range
-from lib.config import load_jobs, load_state, save_jobs
+from lib.config import load_completed_jobs, load_jobs, load_state, save_jobs
 from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
 from lib.helpers import ensure_non_empty_slug, parse_episodes_range
 from lib.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -45,10 +45,22 @@ def build_main_keyboard():
         "keyboard": [
             [{"text": "Статус"}, {"text": "Текущая"}],
             [{"text": "Очередь"}, {"text": "Ошибки"}],
-            [{"text": "Помощь"}],
+            [{"text": "Лог"}, {"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
+    }
+
+
+def build_confirmation_keyboard(action_type):
+    if action_type == "remove":
+        buttons = [[{"text": "Подтвердить удаление"}, {"text": "Отменить удаление"}]]
+    else:
+        buttons = [[{"text": "Подтвердить повтор"}, {"text": "Отменить повтор"}]]
+    return {
+        "keyboard": buttons,
+        "resize_keyboard": True,
+        "one_time_keyboard": True,
     }
 
 
@@ -111,6 +123,7 @@ def build_default_telegram_state():
         "schema_version": 1,
         "last_update_id": None,
         "last_handled_at": None,
+        "pending_actions": {},
     }
 
 
@@ -127,6 +140,7 @@ def load_telegram_state():
 
     state = build_default_telegram_state()
     state.update(data)
+    state.setdefault("pending_actions", {})
     return state
 
 
@@ -299,6 +313,52 @@ def shorten_error_message(message, limit=280):
     return text[: limit - 1].rstrip() + "…"
 
 
+def build_job_identity(job):
+    source = job.get("source", {}) if isinstance(job, dict) else {}
+    source_type = str(source.get("type", "")).strip().lower()
+    if source_type == "magnet":
+        source_signature = str(source.get("magnet", "")).strip()
+    elif source_type == "local":
+        source_signature = str(source.get("input_dir", "")).strip()
+    else:
+        source_signature = ""
+
+    return "|".join([
+        str(job.get("title", "")).strip().lower(),
+        str(job.get("season", "")).strip(),
+        str(job.get("episodes_range", "")).strip(),
+        source_type,
+        source_signature,
+    ])
+
+
+def get_pending_action(chat_id):
+    state = load_telegram_state()
+    return state.get("pending_actions", {}).get(str(chat_id))
+
+
+def set_pending_action(chat_id, action):
+    state = load_telegram_state()
+    pending_actions = dict(state.get("pending_actions", {}))
+    pending_actions[str(chat_id)] = action
+    state["pending_actions"] = pending_actions
+    save_telegram_state(state)
+
+
+def clear_pending_action(chat_id):
+    state = load_telegram_state()
+    pending_actions = dict(state.get("pending_actions", {}))
+    pending_actions.pop(str(chat_id), None)
+    state["pending_actions"] = pending_actions
+    save_telegram_state(state)
+
+
+def tail_lines(path, limit):
+    with open(path, "r", encoding="utf-8") as file:
+        lines = file.read().splitlines()
+    return lines[-int(limit):]
+
+
 def find_job_by_title(jobs, title):
     normalized = str(title or "").strip()
     if not normalized:
@@ -428,7 +488,7 @@ def format_errors_message(limit=5):
     return "\n".join(lines).rstrip()
 
 
-def format_jobs_message(config, limit=10):
+def format_jobs_message(config, limit=10, numbered=True):
     jobs = load_jobs(config)
     if not jobs:
         return "Очередь пуста"
@@ -441,13 +501,269 @@ def format_jobs_message(config, limit=10):
         f"Показываю последних: {len(tail)}",
         "",
     ]
-    for job in tail:
-        lines.append(
-            f"- {get_display_title(job)}"
-        )
+    for index, job in enumerate(tail, start=1):
+        prefix = f"{index}. " if numbered else "- "
+        lines.append(f"{prefix}{get_display_title(job)}")
         lines.append(f"  Сезон: {job.get('season', 1)}")
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
+
+
+def format_log_message(lines_limit=20, max_chars=3500):
+    log_path = ensure_runtime_paths()["log_path"]
+    if not log_path.exists():
+        return "Лог ещё не создан"
+
+    lines = tail_lines(log_path, lines_limit)
+    if not lines:
+        return "Лог пока пуст"
+
+    content = "\n".join(lines)
+    if len(content) > max_chars:
+        content = content[-max_chars:]
+        first_newline = content.find("\n")
+        if first_newline != -1:
+            content = content[first_newline + 1 :]
+
+    return "\n".join([
+        f"Хвост лога ({min(lines_limit, len(lines))} строк)",
+        "",
+        content,
+    ])
+
+
+def parse_index_command(text, command_name):
+    normalized = str(text or "").strip()
+    prefix = f"/{command_name}"
+    if normalized == prefix:
+        raise RuntimeError(f"Формат: /{command_name} <номер>")
+    if not normalized.startswith(prefix + " "):
+        raise RuntimeError(f"Формат: /{command_name} <номер>")
+
+    raw_index = normalized[len(prefix):].strip()
+    try:
+        index = int(raw_index)
+    except ValueError as exc:
+        raise RuntimeError("Номер должен быть целым числом") from exc
+    if index < 1:
+        raise RuntimeError("Номер должен быть не меньше 1")
+    return index
+
+
+def get_job_by_index(config, index):
+    jobs = load_jobs(config)
+    if index > len(jobs):
+        raise RuntimeError(f"Аниме с номером {index} не найдено")
+    return jobs[index - 1], jobs
+
+
+def build_failed_job_identities():
+    runtime_errors = load_runtime_errors()
+    identities = set()
+    for item in runtime_errors.get("errors", []):
+        if item.get("context") != "job_failed":
+            continue
+        job = {
+            "title": item.get("title"),
+            "season": item.get("season"),
+            "episodes_range": item.get("episodes_range"),
+            "source": {},
+        }
+        identities.add(build_job_identity(job))
+    return identities
+
+
+def build_retry_candidates(config):
+    jobs = load_jobs(config)
+    completed_jobs = load_completed_jobs(config)
+    failed_identities = build_failed_job_identities()
+    candidates = []
+
+    for job in jobs:
+        job_identity = build_job_identity(job)
+        loose_identity = "|".join(job_identity.split("|")[:3] + ["", ""])
+        if loose_identity in failed_identities or job_identity in failed_identities:
+            candidates.append({
+                "source": "failed_jobs",
+                "label": "failed queue",
+                "job": job,
+                "job_identity": job_identity,
+            })
+
+    for item in completed_jobs:
+        job = item.get("job") or {}
+        candidates.append({
+            "source": "completed_jobs",
+            "label": "completed archive",
+            "job": job,
+            "job_identity": build_job_identity(job),
+        })
+
+    return candidates
+
+
+def format_retry_candidates_message(config):
+    candidates = build_retry_candidates(config)
+    if not candidates:
+        return "Кандидатов для повтора пока нет"
+
+    lines = [
+        "Кандидаты для повтора",
+        "",
+        f"Всего: {len(candidates)}",
+        "",
+    ]
+    for index, candidate in enumerate(candidates, start=1):
+        job = candidate["job"]
+        lines.append(f"{index}. {get_display_title(job)}")
+        lines.append(f"  Источник: {candidate['label']}")
+        lines.append(f"  Сезон: {job.get('season', 1)}")
+        lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
+    lines.extend(["", "Формат: /retry <номер>"])
+    return "\n".join(lines)
+
+
+def build_pending_action_payload(action_type, source, index, job_snapshot):
+    return {
+        "type": action_type,
+        "source": source,
+        "index": index,
+        "job_identity": build_job_identity(job_snapshot),
+        "created_at": datetime.now().astimezone().isoformat(),
+        "job_snapshot": job_snapshot,
+    }
+
+
+def format_remove_confirmation(job, index):
+    return "\n".join([
+        "Подтверждение удаления",
+        "",
+        f"Номер: {index}",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+        "",
+        "Подтверди удаление кнопкой ниже",
+    ])
+
+
+def format_retry_confirmation(candidate, index):
+    job = candidate["job"]
+    return "\n".join([
+        "Подтверждение повтора",
+        "",
+        f"Номер: {index}",
+        f"Источник: {candidate['label']}",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+        "",
+        "Подтверди повтор кнопкой ниже",
+    ])
+
+
+def format_remove_result(job):
+    return "\n".join([
+        "Аниме удалено из очереди",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+    ])
+
+
+def format_retry_result(job, already_exists=False):
+    if already_exists:
+        return "\n".join([
+            "Повтор не выполнен",
+            "",
+            "Аниме уже находится в активной очереди",
+            f"Тайтл: {get_display_title(job)}",
+        ])
+
+    return "\n".join([
+        "Аниме повторно поставлено в очередь",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+    ])
+
+
+def remove_job_by_identity(config, job_identity):
+    jobs = load_jobs(config)
+    remaining = []
+    removed_job = None
+    removed = False
+    for job in jobs:
+        if not removed and build_job_identity(job) == job_identity:
+            removed_job = job
+            removed = True
+            continue
+        remaining.append(job)
+    if not removed_job:
+        raise RuntimeError("Актуальная запись для удаления не найдена")
+    save_jobs(config, remaining)
+    return removed_job
+
+
+def retry_job_to_queue(config, job):
+    jobs = load_jobs(config)
+    if find_matching_job(jobs, job) is not None:
+        return False
+    jobs.append(job)
+    save_jobs(config, jobs)
+    return True
+
+
+def resolve_retry_candidate(config, index):
+    candidates = build_retry_candidates(config)
+    if index > len(candidates):
+        raise RuntimeError(f"Кандидат с номером {index} не найден")
+    return candidates[index - 1]
+
+
+def confirm_pending_action(config, chat_id, text):
+    actionable_texts = {
+        "Подтвердить удаление",
+        "Отменить удаление",
+        "Подтвердить повтор",
+        "Отменить повтор",
+    }
+    if text not in actionable_texts:
+        return None
+
+    pending = get_pending_action(chat_id)
+    if not pending:
+        return "Нет действия, ожидающего подтверждения"
+
+    confirm_map = {
+        "remove": "Подтвердить удаление",
+        "retry": "Подтвердить повтор",
+    }
+    cancel_map = {
+        "remove": "Отменить удаление",
+        "retry": "Отменить повтор",
+    }
+    action_type = pending.get("type")
+    if text == cancel_map.get(action_type):
+        clear_pending_action(chat_id)
+        return "Действие отменено"
+
+    if text != confirm_map.get(action_type):
+        return None
+
+    clear_pending_action(chat_id)
+    if action_type == "remove":
+        removed_job = remove_job_by_identity(config, pending.get("job_identity"))
+        return format_remove_result(removed_job)
+
+    if action_type == "retry":
+        job = pending.get("job_snapshot") or {}
+        added = retry_job_to_queue(config, job)
+        return format_retry_result(job, already_exists=not added)
+
+    return "Неизвестное действие"
 
 
 def normalize_command_text(text):
@@ -457,6 +773,7 @@ def normalize_command_text(text):
         "Текущая": "/current",
         "Очередь": "/jobs",
         "Ошибки": "/errors",
+        "Лог": "/log",
         "Помощь": "/help",
     }
     return aliases.get(normalized, normalized)
@@ -559,7 +876,10 @@ def build_help_message():
         "/status - статус очереди и runtime",
         "/current - текущее или последнее выполнение",
         "/errors - последние ошибки выполнения",
+        "/log - хвост cron.log",
         "/jobs - показать последние аниме в очереди",
+        "/remove <номер> - удалить аниме из очереди",
+        "/retry <номер> - повторно поставить аниме в очередь",
         "",
         "Пример:",
         "/add Мой тайтл : 001-003 : magnet:?xt=urn:btih:... : 1",
@@ -578,8 +898,33 @@ def handle_command(config, text):
         return format_current_message()
     if text.startswith("/errors"):
         return format_errors_message()
+    if text.startswith("/log"):
+        return format_log_message()
     if text.startswith("/jobs"):
         return format_jobs_message(config)
+    if text.startswith("/remove"):
+        index = parse_index_command(text, "remove")
+        job, _jobs = get_job_by_index(config, index)
+        return {
+            "text": format_remove_confirmation(job, index),
+            "reply_markup": build_confirmation_keyboard("remove"),
+            "pending_action": build_pending_action_payload("remove", "jobs", index, job),
+        }
+    if text == "/retry":
+        return format_retry_candidates_message(config)
+    if text.startswith("/retry "):
+        index = parse_index_command(text, "retry")
+        candidate = resolve_retry_candidate(config, index)
+        return {
+            "text": format_retry_confirmation(candidate, index),
+            "reply_markup": build_confirmation_keyboard("retry"),
+            "pending_action": build_pending_action_payload(
+                "retry",
+                candidate["source"],
+                index,
+                candidate["job"],
+            ),
+        }
     if text.startswith("/add "):
         return format_add_result(add_job_from_command(config, text))
     return "Неизвестная команда. Напиши /help"
@@ -597,12 +942,30 @@ def handle_update(config, update):
         return False
 
     try:
-        response_text = handle_command(config, text.strip())
+        normalized_text = normalize_command_text(text.strip())
+        confirm_response = confirm_pending_action(config, chat_id, normalized_text)
+        if confirm_response is not None:
+            send_reply(chat_id, confirm_response, include_keyboard=True)
+            return True
+
+        response = handle_command(config, normalized_text)
     except Exception as exc:
-        response_text = "\n".join([
+        response = "\n".join([
             "Команда не выполнена",
             "",
             f"Причина: {exc}",
         ])
-    send_reply(chat_id, response_text, include_keyboard=True)
+
+    if isinstance(response, dict):
+        pending_action = response.get("pending_action")
+        if pending_action:
+            set_pending_action(chat_id, pending_action)
+        send_message(
+            chat_id,
+            response.get("text", ""),
+            reply_markup=response.get("reply_markup"),
+        )
+        return True
+
+    send_reply(chat_id, response, include_keyboard=True)
     return True
