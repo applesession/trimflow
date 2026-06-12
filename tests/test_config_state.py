@@ -111,7 +111,7 @@ class ConfigStateTests(unittest.TestCase):
                     {"id": 1, "alias": "a", "updated_at": "2026-06-13T10:00:00+00:00"},
                 ]
             },
-            "https://aniliberty.top/api/v1/anime/releases/list?limit=25",
+            "https://aniliberty.top/api/v1/anime/releases/latest?limit=25",
         )
 
         urls = []
@@ -119,11 +119,11 @@ class ConfigStateTests(unittest.TestCase):
         releases = _build_recent_releases_from_api(25, urls, errors)
 
         self.assertEqual(len(releases), 2)
-        self.assertEqual(urls, ["https://aniliberty.top/api/v1/anime/releases/list?limit=25"])
+        self.assertEqual(urls, ["https://aniliberty.top/api/v1/anime/releases/latest?limit=25"])
         self.assertEqual(errors, [])
         request_url = mock_request.call_args.args[0]
         request_params = mock_request.call_args.kwargs["params"]
-        self.assertEqual(request_url, "https://aniliberty.top/api/v1/anime/releases/list")
+        self.assertEqual(request_url, "https://aniliberty.top/api/v1/anime/releases/latest")
         self.assertEqual(request_params, {"limit": 25})
 
     @patch("lib.anilibria._build_recent_releases_from_torrents_page")
@@ -136,14 +136,14 @@ class ConfigStateTests(unittest.TestCase):
                     {"id": 2, "alias": "newer", "updated_at": "2026-06-13T10:00:00+00:00"},
                 ]
             },
-            "https://aniliberty.top/api/v1/anime/releases/list?limit=25",
+            "https://aniliberty.top/api/v1/anime/releases/latest?limit=25",
         )
         mock_torrents.return_value = []
 
         result = list_recent_releases(limit=25)
 
         self.assertEqual([item["alias"] for item in result["releases"]], ["newer", "older"])
-        self.assertEqual(result["request_urls"], ["https://aniliberty.top/api/v1/anime/releases/list?limit=25"])
+        self.assertEqual(result["request_urls"], ["https://aniliberty.top/api/v1/anime/releases/latest?limit=25"])
         mock_torrents.assert_not_called()
 
     @patch("lib.anilibria._build_recent_releases_from_torrents_page")
@@ -151,7 +151,7 @@ class ConfigStateTests(unittest.TestCase):
     def test_list_recent_releases_falls_back_to_torrents_page_when_api_is_empty(self, mock_request, mock_torrents):
         mock_request.return_value = (
             {"items": []},
-            "https://aniliberty.top/api/v1/anime/releases/list?limit=25",
+            "https://aniliberty.top/api/v1/anime/releases/latest?limit=25",
         )
         mock_torrents.return_value = [{"id": 3, "alias": "fallback", "updated_at": "2026-06-13T10:00:00+00:00"}]
 

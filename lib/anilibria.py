@@ -209,8 +209,8 @@ def _build_recent_releases_from_torrents_page(limit, urls, errors):
 
 def _build_recent_releases_from_api(limit, urls, errors):
     api_attempts = [
-        ("anime/releases/list", {"limit": int(limit)}),
-        ("anime/releases/list", None),
+        ("anime/releases/latest", {"limit": int(limit)}),
+        ("anime/releases/latest", None),
     ]
 
     for path, params in api_attempts:
