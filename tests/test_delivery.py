@@ -13,7 +13,7 @@ from lib.helpers import (
     sanitize_filename,
 )
 from lib.pipeline import build_compact_manifest, build_delivery_config
-from lib.vk import publish_video_to_vk
+from lib.vk import create_wall_comment, publish_video_to_vk
 
 
 class DeliveryTests(unittest.TestCase):
@@ -262,6 +262,22 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(result["comment_created"])
         self.assertIn("comment_photo", result["errors_by_stage"])
         self.assertIsNone(result["comment_attachment"])
+
+    @patch.dict("os.environ", {"VK_GROUP_ID": "236358467"})
+    @patch("lib.vk._vk_request")
+    def test_create_wall_comment_uses_from_group_flag(self, mock_vk_request):
+        mock_vk_request.return_value = {"comment_id": 99}
+
+        result = create_wall_comment(77, "comment text", attachments="photo-1_2")
+
+        self.assertEqual(result["comment_id"], 99)
+        self.assertEqual(mock_vk_request.call_args.args[0], "wall.createComment")
+        payload = mock_vk_request.call_args.args[1]
+        self.assertEqual(payload["owner_id"], -236358467)
+        self.assertEqual(payload["post_id"], 77)
+        self.assertEqual(payload["message"], "comment text")
+        self.assertEqual(payload["attachments"], "photo-1_2")
+        self.assertEqual(payload["from_group"], 1)
 
 
 if __name__ == "__main__":
