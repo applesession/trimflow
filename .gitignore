@@ -10,3 +10,4 @@ __pycache__/
 .runtime/
 logs/
 .test_tmp/
+config.json
