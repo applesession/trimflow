@@ -271,30 +271,51 @@ def send_message_to_allowed_chats(text, *, parse_mode=None):
 def format_discovery_message(summary, jobs_added):
     titles = [get_display_title(job) for job in jobs_added]
     lines = [
-        "Автодискавери завершён",
+        "🛰️ *Автодискавери завершён*",
         "",
-        f"Новых аниме: {summary.get('created_jobs', 0)}",
-        f"Обновлено аниме: {summary.get('updated_jobs', 0)}",
+        f"🆕 Новых аниме: {format_markdown_code(summary.get('created_jobs', 0))}",
+        f"🔄 Обновлено аниме: {format_markdown_code(summary.get('updated_jobs', 0))}",
     ]
     if titles:
-        lines.extend(["", "Новые тайтлы:"])
-        lines.extend(f"- {title}" for title in titles)
+        lines.extend(["", "🎬 *Новые тайтлы:*"])
+        lines.extend(f"• {escape_markdown_v2(title)}" for title in titles)
     return "\n".join(lines)
 
 
+def split_notification_context(context):
+    normalized = str(context or "").strip()
+    if ":" in normalized:
+        stage, title = normalized.split(":", 1)
+        return stage.strip(), title.strip()
+    return normalized, None
+
+
 def format_error_message(context, error):
-    return "\n".join([
-        "Ошибка",
+    stage, title = split_notification_context(context)
+    reason = normalize_notification_error_reason(error)
+
+    lines = [
+        "❌ *Ошибка выполнения*",
         "",
-        f"Контекст: {context}",
-        f"Детали: {error}",
+    ]
+    if title:
+        lines.append(f"🎬 *{escape_markdown_v2(title)}*")
+    lines.append(f"🔧 Этап: {format_markdown_code(stage or 'unknown')}")
+    lines.extend([
+        "",
+        f"Причина: {format_markdown_code(reason)}",
     ])
+    return "\n".join(lines)
 
 
 def normalize_notification_error_reason(error):
     text = str(error or "").strip()
     if not text:
         return "неизвестная ошибка"
+
+    called_process_match = re.search(r"CalledProcessError\((\d+),", text)
+    if called_process_match:
+        return f"ffmpeg exited with code {called_process_match.group(1)}"
 
     gateway_match = re.search(r"(\d{3})\s+Server Error:\s*([^']+?)\s+for url:", text)
     if gateway_match:
@@ -319,13 +340,13 @@ def format_publish_success_message(job, output_path_or_key=None):
     title = get_display_title(job)
     episodes_range = job.get("episodes_range", "?")
     lines = [
-        "Обработка завершена",
+        "✅ *Обработка завершена*",
         "",
-        f"Тайтл: {title}",
-        f"Эпизоды: {episodes_range}",
+        f"🎬 *{escape_markdown_v2(title)}*",
+        f"📺 Эпизоды: {format_markdown_code(episodes_range)}",
     ]
     if output_path_or_key:
-        lines.append(f"Результат: {output_path_or_key}")
+        lines.extend(["", f"📦 Результат: {format_markdown_code(output_path_or_key)}"])
     return "\n".join(lines)
 
 

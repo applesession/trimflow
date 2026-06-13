@@ -124,12 +124,25 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertIn("Автодискавери завершён", discovery)
         self.assertIn("Тестовый тайтл", discovery)
-        self.assertIn("Новых аниме: 1", discovery)
-        self.assertIn("Контекст: cron_run", error)
-        self.assertIn("Детали: boom", error)
-        self.assertIn("Обработка завершена", success)
-        self.assertIn("s3://bucket/file.mkv", success)
-        self.assertIn("Тестовый тайтл", success)
+        self.assertIn("🛰️ *Автодискавери завершён*", discovery)
+        self.assertIn("🆕 Новых аниме: `1`", discovery)
+        self.assertIn("❌ *Ошибка выполнения*", error)
+        self.assertIn("🔧 Этап: `cron_run`", error)
+        self.assertIn("Причина: `boom`", error)
+        self.assertIn("✅ *Обработка завершена*", success)
+        self.assertIn("📦 Результат: `s3://bucket/file.mkv`", success)
+        self.assertIn("🎬 *Тестовый тайтл*", success)
+
+    def test_error_message_formats_job_failed_as_markdown(self):
+        message = format_error_message(
+            "job_failed:Вечная воля",
+            "CalledProcessError(255, ['ffmpeg', '-y'])",
+        )
+
+        self.assertIn("❌ *Ошибка выполнения*", message)
+        self.assertIn("🎬 *Вечная воля*", message)
+        self.assertIn("🔧 Этап: `job_failed`", message)
+        self.assertIn("Причина: `ffmpeg exited with code 255`", message)
 
     def test_vk_publish_success_message_formats_markdown_with_partial_warning(self):
         message = format_vk_publish_success_message(

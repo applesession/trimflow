@@ -116,6 +116,7 @@ def main():
                     log_path,
                     format_discovery_message(discovery_result["summary"], jobs_added),
                     "discovery_summary",
+                    parse_mode="MarkdownV2",
                 )
 
             jobs = discovery_result["jobs"]
@@ -135,6 +136,7 @@ def main():
                 log_path,
                 format_error_message("discovery", repr(exc)),
                 "discovery_error",
+                parse_mode="MarkdownV2",
             )
 
         update_runtime_status(status_path, current_stage="processing", queue_progress={"total_jobs": len(jobs)})
@@ -158,12 +160,13 @@ def main():
                     result.get("output_video"),
                 ),
                 f"job_success:{job.get('title')}",
-                parse_mode="MarkdownV2" if result.get("delivery_summary", {}).get("vk", {}).get("enabled") else None,
+                parse_mode="MarkdownV2",
             ),
             on_job_failure=lambda job, exc: notify_best_effort(
                 log_path,
                 format_error_message(f"job_failed:{job.get('title')}", repr(exc)),
                 f"job_failed:{job.get('title')}",
+                parse_mode="MarkdownV2",
             ),
         )
 
@@ -202,6 +205,7 @@ def main():
             log_path,
             format_error_message("cron_run", repr(exc)),
             "cron_run_error",
+            parse_mode="MarkdownV2",
         )
         raise
     finally:
