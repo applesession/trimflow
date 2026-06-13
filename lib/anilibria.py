@@ -228,7 +228,7 @@ def _build_recent_releases_from_api(limit, urls, errors):
     return []
 
 
-def list_recent_releases(limit=25):
+def list_recent_releases(limit=50):
     urls = []
     errors = []
     releases = _build_recent_releases_from_api(limit, urls, errors)

@@ -69,12 +69,15 @@ def build_job_key(job):
     elif source_type == "local":
         source_signature = source.get("input_dir", "")
 
+    variant_identity = build_source_variant_identity(source)
+
     return "|".join([
         str(job.get("title", "")).strip().lower(),
         str(job.get("season", "")).strip(),
         get_job_processing_mode(job),
         str(source_type).strip().lower(),
         str(source_signature).strip(),
+        variant_identity,
     ])
 
 
@@ -93,6 +96,15 @@ def build_ongoing_progress_key_from_job(job):
         job.get("season"),
         source.get("type"),
     )
+
+
+def build_source_variant_identity(source):
+    source = source or {}
+    codec = str(source.get("variant_codec", "")).strip().lower()
+    label = str(source.get("variant_label", "")).strip().lower()
+    if not codec and not label:
+        return ""
+    return "|".join([codec, label])
 
 
 def mark_ongoing_full_publish(state, job):
@@ -161,7 +173,7 @@ def discover_jobs(config, jobs, state):
             },
         }
 
-    releases_result = list_recent_releases(limit=automation.get("poll_limit", 25))
+    releases_result = list_recent_releases(limit=automation.get("poll_limit", 50))
     created_jobs = 0
     updated_jobs_count = 0
 
@@ -181,7 +193,20 @@ def discover_jobs(config, jobs, state):
         if release_id is None:
             continue
 
-        episode_numbers = collect_release_episode_numbers(release_payload)
+        try:
+            selected_variant = select_release_source_variant(release_payload)
+        except RuntimeError as exc:
+            updated_state["skipped_items"].append({
+                "release_id": release_id,
+                "alias": release_payload.get("alias"),
+                "title": extract_release_title(release_payload),
+                "episodes": [],
+                "reason": str(exc),
+                "recorded_at": utc_now_iso(),
+            })
+            continue
+
+        episode_numbers = list(selected_variant["available_episodes"])
         new_episode_numbers = [
             episode_number
             for episode_number in episode_numbers
@@ -192,7 +217,12 @@ def discover_jobs(config, jobs, state):
             continue
 
         try:
-            base_job = build_job_from_release(release_payload, episode_numbers, automation)
+            base_job = build_job_from_release(
+                release_payload,
+                episode_numbers,
+                automation,
+                selected_variant=selected_variant,
+            )
         except RuntimeError as exc:
             mark_release_episodes_seen(updated_state, release_id, new_episode_numbers)
             updated_state["skipped_items"].append({
@@ -221,6 +251,7 @@ def discover_jobs(config, jobs, state):
                 release_payload,
                 [latest_episode],
                 automation,
+                selected_variant=selected_variant,
                 processing_mode="single_episode",
                 automation_context=build_discovery_job_context(
                     provider=automation.get("provider", "aniliberty"),
@@ -234,6 +265,7 @@ def discover_jobs(config, jobs, state):
                 release_payload,
                 episode_numbers,
                 automation,
+                selected_variant=selected_variant,
                 processing_mode="compilation",
                 automation_context=build_discovery_job_context(
                     provider=automation.get("provider", "aniliberty"),
@@ -255,6 +287,7 @@ def discover_jobs(config, jobs, state):
                 release_payload,
                 full_episodes,
                 automation,
+                selected_variant=selected_variant,
                 processing_mode="compilation",
                 automation_context=build_discovery_job_context(
                     provider=automation.get("provider", "aniliberty"),
@@ -299,13 +332,20 @@ def find_matching_job(jobs, candidate_job):
     candidate_season = str(candidate_job.get("season", "")).strip()
     candidate_source_type = candidate_job.get("source", {}).get("type", "").strip().lower()
     candidate_processing_mode = get_job_processing_mode(candidate_job)
+    candidate_variant_identity = build_source_variant_identity(candidate_job.get("source", {}))
 
     for job in jobs:
+        job_variant_identity = build_source_variant_identity(job.get("source", {}))
         if (
             str(job.get("title", "")).strip().lower() == candidate_title
             and str(job.get("season", "")).strip() == candidate_season
             and job.get("source", {}).get("type", "").strip().lower() == candidate_source_type
             and get_job_processing_mode(job) == candidate_processing_mode
+            and (
+                job_variant_identity == candidate_variant_identity
+                or not job_variant_identity
+                or not candidate_variant_identity
+            )
         ):
             return job
     return None
@@ -325,6 +365,7 @@ def build_job_from_release(
     new_episode_numbers,
     automation,
     *,
+    selected_variant=None,
     processing_mode="compilation",
     automation_context=None,
 ):
@@ -336,7 +377,8 @@ def build_job_from_release(
     if source_type != "magnet":
         raise RuntimeError(f"unsupported_source_type:{source_type}")
 
-    magnet = extract_release_magnet(release_payload)
+    variant = selected_variant or select_release_source_variant(release_payload)
+    magnet = variant.get("magnet")
     if not magnet:
         raise RuntimeError("missing_magnet")
 
@@ -353,6 +395,8 @@ def build_job_from_release(
             "type": "magnet",
             "magnet": magnet,
             "download_dir": str(download_dir).replace("\\", "/"),
+            "variant_codec": variant.get("codec"),
+            "variant_label": variant.get("label"),
         },
     }
     if title_ru:
@@ -385,6 +429,180 @@ def collect_release_episode_numbers(release_payload):
         numbers.add(parsed_number)
 
     return sorted(numbers)
+
+
+def _parse_variant_codec(value):
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if any(marker in text for marker in ["avc", "x264", "h.264", "h264"]):
+        return "avc"
+    if any(marker in text for marker in ["hevc", "x265", "h.265", "h265"]):
+        return "hevc"
+    return None
+
+
+def _parse_variant_resolution(payload):
+    candidates = [
+        payload.get("resolution"),
+        payload.get("quality"),
+        payload.get("video_quality"),
+        payload.get("videoQuality"),
+    ]
+    for value in candidates:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_variant_label(payload):
+    candidates = [
+        payload.get("label"),
+        payload.get("quality_label"),
+        payload.get("qualityLabel"),
+        payload.get("title"),
+        payload.get("name"),
+    ]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    codec = _parse_variant_codec(
+        payload.get("codec")
+        or payload.get("video_codec")
+        or payload.get("videoCodec")
+        or payload.get("label")
+        or payload.get("title")
+        or payload.get("name")
+    )
+    resolution = _parse_variant_resolution(payload)
+    parts = [part for part in [codec.upper() if codec else None, resolution] if part]
+    return " ".join(parts) if parts else None
+
+
+def _extract_variant_codec(payload):
+    for value in [
+        payload.get("codec"),
+        payload.get("video_codec"),
+        payload.get("videoCodec"),
+        payload.get("label"),
+        payload.get("title"),
+        payload.get("name"),
+    ]:
+        codec = _parse_variant_codec(value)
+        if codec:
+            return codec
+    return None
+
+
+def _iter_release_variant_payloads(release_payload):
+    variants = []
+    seen = set()
+
+    def push(candidate):
+        if not isinstance(candidate, dict):
+            return
+        marker = id(candidate)
+        if marker in seen:
+            return
+        seen.add(marker)
+        variants.append(candidate)
+
+    torrents = release_payload.get("torrents")
+    if isinstance(torrents, list):
+        for item in torrents:
+            push(item)
+    elif isinstance(torrents, dict):
+        for value in torrents.values():
+            if isinstance(value, list):
+                for item in value:
+                    push(item)
+            else:
+                push(value)
+
+    for key in ["qualities", "quality", "variants", "versions"]:
+        value = release_payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                push(item)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                if isinstance(nested, list):
+                    for item in nested:
+                        push(item)
+                else:
+                    push(nested)
+
+    legacy_magnet = None
+    torrent = release_payload.get("torrent")
+    if isinstance(torrent, dict):
+        legacy_magnet = _find_magnet_value(torrent)
+
+    if legacy_magnet:
+        variants.append({
+            "codec": "avc",
+            "label": "legacy",
+            "magnet": legacy_magnet,
+            "episodes": release_payload.get("episodes"),
+        })
+
+    return variants
+
+
+def extract_release_source_variants(release_payload):
+    variants = []
+    deduped = set()
+
+    for candidate in _iter_release_variant_payloads(release_payload):
+        magnet = _find_magnet_value(candidate)
+        codec = _extract_variant_codec(candidate)
+        episodes = collect_release_episode_numbers(candidate)
+        label = _extract_variant_label(candidate)
+        resolution = _parse_variant_resolution(candidate)
+
+        if not magnet or not codec or not episodes:
+            continue
+
+        identity = (magnet, codec, tuple(episodes))
+        if identity in deduped:
+            continue
+        deduped.add(identity)
+        variants.append({
+            "codec": codec,
+            "resolution": resolution,
+            "magnet": magnet,
+            "available_episodes": episodes,
+            "label": label,
+        })
+
+    return variants
+
+
+def select_release_source_variant(release_payload):
+    variants = extract_release_source_variants(release_payload)
+    if not variants:
+        raise RuntimeError("no_supported_torrent_variant")
+
+    for preferred_codec in ["avc", "hevc"]:
+        preferred = [
+            variant
+            for variant in variants
+            if variant["codec"] == preferred_codec and variant.get("magnet") and variant.get("available_episodes")
+        ]
+        if preferred:
+            preferred.sort(
+                key=lambda item: (
+                    -max(item["available_episodes"]),
+                    -len(item["available_episodes"]),
+                    str(item.get("resolution") or ""),
+                    str(item.get("label") or ""),
+                )
+            )
+            return preferred[0]
+
+    raise RuntimeError("no_supported_torrent_variant")
 
 
 def extract_release_title(release_payload):

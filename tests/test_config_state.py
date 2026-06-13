@@ -15,8 +15,10 @@ from lib.autojobs import (
     build_ongoing_progress_key,
     collect_release_episode_numbers,
     discover_jobs,
+    extract_release_source_variants,
     format_episodes_range,
     merge_episode_ranges,
+    select_release_source_variant,
 )
 from lib.config import build_default_state, load_completed_jobs, load_jobs, load_state
 
@@ -117,20 +119,20 @@ class ConfigStateTests(unittest.TestCase):
                     {"id": 1, "alias": "a", "updated_at": "2026-06-13T10:00:00+00:00"},
                 ]
             },
-            "https://aniliberty.top/api/v1/anime/releases/latest?limit=25",
+            "https://aniliberty.top/api/v1/anime/releases/latest?limit=50",
         )
 
         urls = []
         errors = []
-        releases = _build_recent_releases_from_api(25, urls, errors)
+        releases = _build_recent_releases_from_api(50, urls, errors)
 
         self.assertEqual(len(releases), 2)
-        self.assertEqual(urls, ["https://aniliberty.top/api/v1/anime/releases/latest?limit=25"])
+        self.assertEqual(urls, ["https://aniliberty.top/api/v1/anime/releases/latest?limit=50"])
         self.assertEqual(errors, [])
         request_url = mock_request.call_args.args[0]
         request_params = mock_request.call_args.kwargs["params"]
         self.assertEqual(request_url, "https://aniliberty.top/api/v1/anime/releases/latest")
-        self.assertEqual(request_params, {"limit": 25})
+        self.assertEqual(request_params, {"limit": 50})
 
     @patch("lib.anilibria._build_recent_releases_from_torrents_page")
     @patch("lib.anilibria._request")
@@ -142,14 +144,14 @@ class ConfigStateTests(unittest.TestCase):
                     {"id": 2, "alias": "newer", "updated_at": "2026-06-13T10:00:00+00:00"},
                 ]
             },
-            "https://aniliberty.top/api/v1/anime/releases/latest?limit=25",
+            "https://aniliberty.top/api/v1/anime/releases/latest?limit=50",
         )
         mock_torrents.return_value = []
 
-        result = list_recent_releases(limit=25)
+        result = list_recent_releases(limit=50)
 
         self.assertEqual([item["alias"] for item in result["releases"]], ["newer", "older"])
-        self.assertEqual(result["request_urls"], ["https://aniliberty.top/api/v1/anime/releases/latest?limit=25"])
+        self.assertEqual(result["request_urls"], ["https://aniliberty.top/api/v1/anime/releases/latest?limit=50"])
         mock_torrents.assert_not_called()
 
     @patch("lib.anilibria._build_recent_releases_from_torrents_page")
@@ -157,11 +159,11 @@ class ConfigStateTests(unittest.TestCase):
     def test_list_recent_releases_falls_back_to_torrents_page_when_api_is_empty(self, mock_request, mock_torrents):
         mock_request.return_value = (
             {"items": []},
-            "https://aniliberty.top/api/v1/anime/releases/latest?limit=25",
+            "https://aniliberty.top/api/v1/anime/releases/latest?limit=50",
         )
         mock_torrents.return_value = [{"id": 3, "alias": "fallback", "updated_at": "2026-06-13T10:00:00+00:00"}]
 
-        result = list_recent_releases(limit=25)
+        result = list_recent_releases(limit=50)
 
         self.assertEqual([item["alias"] for item in result["releases"]], ["fallback"])
         mock_torrents.assert_called_once()
@@ -178,6 +180,79 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(collect_release_episode_numbers(release_payload), [1, 2])
 
+    def test_extract_release_source_variants_prefers_explicit_variants(self):
+        release_payload = {
+            "episodes": [{"number": index} for index in range(1, 12)],
+            "torrents": [
+                {
+                    "label": "HEVC 1080p",
+                    "codec": "x265",
+                    "magnet": "magnet:?xt=urn:btih:hevc",
+                    "episodes": [{"number": index} for index in range(1, 11)],
+                },
+                {
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:avc",
+                    "episodes": [{"number": index} for index in range(1, 12)],
+                },
+            ],
+            "torrent": {"magnet": "magnet:?xt=urn:btih:legacy"},
+        }
+
+        variants = extract_release_source_variants(release_payload)
+
+        self.assertEqual([variant["codec"] for variant in variants], ["hevc", "avc", "avc"])
+        self.assertEqual(variants[0]["available_episodes"], list(range(1, 11)))
+        self.assertEqual(variants[1]["available_episodes"], list(range(1, 12)))
+
+    def test_select_release_source_variant_prefers_avc_then_falls_back_to_hevc(self):
+        release_payload = {
+            "episodes": [{"number": index} for index in range(1, 12)],
+            "torrents": [
+                {
+                    "label": "HEVC 1080p",
+                    "codec": "HEVC",
+                    "magnet": "magnet:?xt=urn:btih:hevc",
+                    "episodes": [{"number": index} for index in range(1, 11)],
+                },
+                {
+                    "label": "AVC 1080p",
+                    "codec": "AVC",
+                    "magnet": "magnet:?xt=urn:btih:avc",
+                    "episodes": [{"number": index} for index in range(1, 12)],
+                },
+            ],
+        }
+
+        variant = select_release_source_variant(release_payload)
+
+        self.assertEqual(variant["codec"], "avc")
+        self.assertEqual(variant["magnet"], "magnet:?xt=urn:btih:avc")
+        self.assertEqual(variant["available_episodes"], list(range(1, 12)))
+
+    def test_select_release_source_variant_falls_back_to_hevc_when_avc_missing_magnet(self):
+        release_payload = {
+            "torrents": [
+                {
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "episodes": [{"number": index} for index in range(1, 12)],
+                },
+                {
+                    "label": "HEVC 1080p",
+                    "codec": "x265",
+                    "magnet": "magnet:?xt=urn:btih:hevc",
+                    "episodes": [{"number": index} for index in range(1, 11)],
+                },
+            ],
+        }
+
+        variant = select_release_source_variant(release_payload)
+
+        self.assertEqual(variant["codec"], "hevc")
+        self.assertEqual(variant["available_episodes"], list(range(1, 11)))
+
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
     def test_discover_jobs_creates_jobs_and_is_idempotent(self, mock_list_recent_releases, mock_get_release_details):
@@ -185,7 +260,7 @@ class ConfigStateTests(unittest.TestCase):
             "releases": [
                 {"id": 10190, "alias": "test-release", "is_ongoing": True},
             ],
-            "request_urls": ["https://aniliberty.top/api/v1/anime/releases/list?limit=25"],
+            "request_urls": ["https://aniliberty.top/api/v1/anime/releases/list?limit=50"],
         }
         mock_get_release_details.return_value = {
             "release": {
@@ -194,10 +269,17 @@ class ConfigStateTests(unittest.TestCase):
                 "is_ongoing": True,
                 "name": {"english": "Test Release", "main": "Тестовый релиз"},
                 "external_ids": {"mal_id": 12345},
-                "torrent": {"magnet": "magnet:?xt=urn:btih:testrelease"},
-                "episodes": [
-                    {"number": 5},
-                    {"number": 6},
+                "episodes": [{"number": index} for index in range(1, 7)],
+                "torrents": [
+                    {
+                        "label": "AVC 1080p",
+                        "codec": "x264",
+                        "magnet": "magnet:?xt=urn:btih:testrelease",
+                        "episodes": [
+                            {"number": 5},
+                            {"number": 6},
+                        ],
+                    }
                 ],
             },
             "request_url": "https://aniliberty.top/api/v1/anime/releases/test-release",
@@ -205,7 +287,7 @@ class ConfigStateTests(unittest.TestCase):
 
         config = {
             "automation": {
-                "poll_limit": 25,
+                "poll_limit": 50,
                 "download_root": "./downloads",
                 "default_source_type": "magnet",
             }
@@ -216,6 +298,7 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(first_result["jobs"][0]["episodes_range"], "005-006")
         self.assertEqual(first_result["jobs"][0]["processing_mode"], "compilation")
         self.assertEqual(first_result["jobs"][0]["title_ru"], "Тестовый релиз")
+        self.assertEqual(first_result["jobs"][0]["source"]["variant_codec"], "avc")
         self.assertEqual(first_result["summary"]["created_jobs"], 1)
         self.assertEqual(len(first_result["state"]["seen_release_episodes"]), 2)
 
@@ -241,8 +324,12 @@ class ConfigStateTests(unittest.TestCase):
                 "is_ongoing": True,
                 "name": {"english": "Existing Release"},
                 "external_ids": {"mal_id": 777},
-                "torrent": {"magnet": magnet},
-                "episodes": [{"number": 4}],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": magnet,
+                    "episodes": [{"number": 4}],
+                }],
             },
             "request_url": "https://aniliberty.top/api/v1/anime/releases/existing-release",
         }
@@ -280,8 +367,12 @@ class ConfigStateTests(unittest.TestCase):
                 "is_ongoing": True,
                 "name": {"english": "Soft Match Release"},
                 "external_ids": {"mal_id": 8080},
-                "torrent": {"magnet": "magnet:?xt=urn:btih:newmagnet"},
-                "episodes": [{"number": 4}],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:newmagnet",
+                    "episodes": [{"number": 4}],
+                }],
             },
             "request_url": "https://aniliberty.top/api/v1/anime/releases/soft-match-release",
         }
@@ -317,8 +408,12 @@ class ConfigStateTests(unittest.TestCase):
                 "alias": "missing-mal",
                 "is_ongoing": True,
                 "name": {"english": "Missing Mal"},
-                "torrent": {"magnet": "magnet:?xt=urn:btih:missingmal"},
-                "episodes": [{"number": 1}],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:missingmal",
+                    "episodes": [{"number": 1}],
+                }],
             },
             "request_url": "https://aniliberty.top/api/v1/anime/releases/missing-mal",
         }
@@ -350,8 +445,12 @@ class ConfigStateTests(unittest.TestCase):
                 "alias": "ongoing-release",
                 "is_ongoing": True,
                 "name": {"english": "Ongoing Release", "main": "Онгоинг"},
-                "torrent": {"magnet": magnet},
-                "episodes": [{"number": index} for index in range(1, 11)],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": magnet,
+                    "episodes": [{"number": index} for index in range(1, 11)],
+                }],
             },
             "request_url": "https://aniliberty.top/api/v1/anime/releases/ongoing-release",
         }
@@ -388,7 +487,12 @@ class ConfigStateTests(unittest.TestCase):
         job = build_job_from_release(
             {
                 "name": {"english": "English Title", "main": "Русский тайтл"},
-                "torrent": {"magnet": "magnet:?xt=urn:btih:test"},
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:test",
+                    "episodes": [{"number": 1}, {"number": 2}],
+                }],
             },
             [1, 2],
             {"download_root": "./downloads", "default_source_type": "magnet"},
@@ -396,6 +500,130 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(job["title"], "English Title")
         self.assertEqual(job["title_ru"], "Русский тайтл")
+        self.assertEqual(job["source"]["variant_codec"], "avc")
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_uses_avc_variant_episode_range_instead_of_release_level_episodes(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 555, "alias": "variant-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 555,
+                "alias": "variant-release",
+                "is_ongoing": True,
+                "name": {"english": "Variant Release"},
+                "episodes": [{"number": index} for index in range(1, 12)],
+                "torrents": [
+                    {
+                        "label": "HEVC 1080p",
+                        "codec": "x265",
+                        "magnet": "magnet:?xt=urn:btih:hevc555",
+                        "episodes": [{"number": index} for index in range(1, 11)],
+                    },
+                    {
+                        "label": "AVC 1080p",
+                        "codec": "x264",
+                        "magnet": "magnet:?xt=urn:btih:avc555",
+                        "episodes": [{"number": index} for index in range(1, 12)],
+                    },
+                ],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/variant-release",
+        }
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], build_default_state())
+
+        self.assertEqual(len(result["jobs"]), 1)
+        self.assertEqual(result["jobs"][0]["episodes_range"], "001-011")
+        self.assertEqual(result["jobs"][0]["source"]["magnet"], "magnet:?xt=urn:btih:avc555")
+        self.assertEqual(result["jobs"][0]["source"]["variant_codec"], "avc")
+        self.assertEqual(len(result["state"]["seen_release_episodes"]), 11)
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_falls_back_to_hevc_when_avc_variant_is_unusable(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 556, "alias": "hevc-fallback-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 556,
+                "alias": "hevc-fallback-release",
+                "is_ongoing": True,
+                "name": {"english": "HEVC Fallback Release"},
+                "episodes": [{"number": index} for index in range(1, 12)],
+                "torrents": [
+                    {
+                        "label": "AVC 1080p",
+                        "codec": "x264",
+                        "episodes": [{"number": index} for index in range(1, 12)],
+                    },
+                    {
+                        "label": "HEVC 1080p",
+                        "codec": "x265",
+                        "magnet": "magnet:?xt=urn:btih:hevc556",
+                        "episodes": [{"number": index} for index in range(1, 11)],
+                    },
+                ],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/hevc-fallback-release",
+        }
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], build_default_state())
+
+        self.assertEqual(len(result["jobs"]), 1)
+        self.assertEqual(result["jobs"][0]["episodes_range"], "001-010")
+        self.assertEqual(result["jobs"][0]["source"]["magnet"], "magnet:?xt=urn:btih:hevc556")
+        self.assertEqual(result["jobs"][0]["source"]["variant_codec"], "hevc")
+        self.assertEqual(len(result["state"]["seen_release_episodes"]), 10)
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_skips_release_without_supported_variant(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 557, "alias": "broken-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 557,
+                "alias": "broken-release",
+                "is_ongoing": True,
+                "name": {"english": "Broken Release"},
+                "episodes": [{"number": index} for index in range(1, 12)],
+                "torrents": [
+                    {
+                        "label": "VP9 1080p",
+                        "codec": "vp9",
+                        "magnet": "magnet:?xt=urn:btih:vp9557",
+                        "episodes": [{"number": index} for index in range(1, 12)],
+                    }
+                ],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/broken-release",
+        }
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], build_default_state())
+
+        self.assertEqual(result["jobs"], [])
+        self.assertEqual(result["summary"]["created_jobs"], 0)
+        self.assertEqual(result["state"]["skipped_items"][0]["reason"], "no_supported_torrent_variant")
 
 
 if __name__ == "__main__":

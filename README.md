@@ -145,6 +145,8 @@ python scripts/discover_jobs.py
 Что делает discovery:
 - опрашивает AniLiberty API;
 - находит свежие ongoing-релизы;
+- выбирает конкретный torrent-вариант релиза, а не общий release-level `episodes`;
+- приоритизирует `AVC/x264`, а если он недоступен, делает fallback на `HEVC/x265`;
 - создаёт новые job'ы в `jobs.json` или расширяет `episodes_range` у существующих;
 - записывает уже увиденные эпизоды и skip-причины в `state.json`.
 

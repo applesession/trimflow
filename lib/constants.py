@@ -52,7 +52,7 @@ DEFAULT_AUTOMATION = {
     "jobs_path": "./jobs.json",
     "completed_jobs_path": "./completed_jobs.json",
     "state_path": "./state.json",
-    "poll_limit": 25,
+    "poll_limit": 50,
     "download_root": "./downloads",
     "default_source_type": "magnet",
 }
