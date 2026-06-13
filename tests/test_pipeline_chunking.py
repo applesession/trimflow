@@ -59,6 +59,52 @@ class PipelineChunkingTests(unittest.TestCase):
 
     @patch("lib.pipeline.cleanup_job_artifacts")
     @patch("lib.pipeline.write_outputs")
+    @patch("lib.pipeline.render_final")
+    @patch("lib.pipeline.process_episode")
+    @patch("lib.pipeline.build_detector_context")
+    @patch("lib.pipeline.build_episode_infos")
+    @patch("lib.pipeline.filter_episode_files")
+    @patch("lib.pipeline.collect_episode_files")
+    @patch("lib.pipeline.reset_temp_dir")
+    def test_process_job_single_episode_mode_skips_detector_and_segment_pipeline(
+        self,
+        mock_reset_temp_dir,
+        mock_collect_episode_files,
+        mock_filter_episode_files,
+        mock_build_episode_infos,
+        mock_build_detector_context,
+        mock_process_episode,
+        mock_render_final,
+        mock_write_outputs,
+        mock_cleanup,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        temp_dir = tmp_dir / "temp" / "Chunk_Test"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_reset_temp_dir.return_value = temp_dir
+        job = self.make_job(tmp_dir, episodes_range="010")
+        job["processing_mode"] = "single_episode"
+
+        episode_files = [
+            (10, Path("/tmp/ep10.mkv")),
+        ]
+        mock_collect_episode_files.return_value = (None, episode_files, [])
+        mock_filter_episode_files.return_value = (episode_files, [])
+
+        result = process_job(job)
+
+        self.assertTrue(result["output_video"].endswith(".mkv"))
+        self.assertEqual(result["quality_summary"], {})
+        mock_build_episode_infos.assert_not_called()
+        mock_build_detector_context.assert_not_called()
+        mock_process_episode.assert_not_called()
+        mock_render_final.assert_called_once()
+        self.assertEqual(mock_render_final.call_args.kwargs["concat_output"], Path("/tmp/ep10.mkv"))
+        self.assertEqual(mock_render_final.call_args.kwargs["encoding"]["audio_codec"], "aac")
+        self.assertIn("10 Серия", result["output_display_name"])
+
+    @patch("lib.pipeline.cleanup_job_artifacts")
+    @patch("lib.pipeline.write_outputs")
     @patch("lib.pipeline.build_compact_manifest")
     @patch("lib.pipeline.build_quality_summary")
     @patch("lib.pipeline.render_final")

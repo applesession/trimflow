@@ -17,6 +17,7 @@ from lib.detector import (
 from lib.discovery import filter_episode_files, find_episode_files
 from lib.helpers import (
     build_compilation_display_name,
+    build_single_episode_display_name,
     build_timestamps_description,
     build_vk_comment_text,
     build_vk_wall_post_text,
@@ -636,6 +637,68 @@ def write_outputs(output_txt, output_manifest, timestamps, manifest):
         json.dump(manifest, file, indent=2, ensure_ascii=False)
 
 
+def build_single_episode_manifest(
+    *,
+    job,
+    season,
+    episode_number,
+    source_file,
+    pretty_base_name,
+    output_video,
+    output_txt,
+    delivery_summary,
+):
+    return {
+        "title": job["title"],
+        "title_ru": job.get("title_ru"),
+        "mal_id": job.get("mal_id"),
+        "season": season,
+        "episodes_range": f"{int(episode_number):03d}",
+        "episodes_count": 1,
+        "source": job["source"]["type"],
+        "source_summary": {
+            "selected_episode_count": 1,
+            "excluded_file_count": 0,
+        },
+        "timing_detection": {
+            "enabled": False,
+            "available": False,
+            "reason": "single_episode_mode",
+        },
+        "timing_sources_summary": {
+            "anilibria_available": False,
+            "aniskip_available": False,
+            "detector_available": False,
+        },
+        "display_title": get_display_title(job),
+        "output_display_name": pretty_base_name,
+        "output_video": output_video.name,
+        "output_timestamps": output_txt.name,
+        "delivery_summary": delivery_summary,
+        "quality_summary": {},
+        "episodes": [{
+            "episode": int(episode_number),
+            "source_file": Path(source_file).name,
+            "original_duration": None,
+            "cleaned_duration": None,
+            "removed_duration": 0.0,
+            "segment_cut_mode": "single_episode",
+            "timing_info": {
+                "strategy": "single_episode_mode",
+                "confidence": "none",
+                "review_required": False,
+                "per_type": {},
+            },
+            "skip_summary": {
+                "warnings": [],
+            },
+        }],
+        "processing": {
+            "mode": "single_episode",
+        },
+    }
+
+
 def build_delivery_config(job):
     delivery = {
         "s3_enabled": True,
@@ -788,10 +851,10 @@ def process_episode_chunk(
 
 def process_job(job, runtime_status_path=None):
     title = job["title"]
-    title_ru = job.get("title_ru")
     mal_id = job.get("mal_id")
     season = str(job["season"]).zfill(2)
     episodes_range = job["episodes_range"]
+    processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
     source = job["source"]
     output_root = Path(job["output_dir"])
     watermark_path = Path(job["watermark_path"])
@@ -831,6 +894,182 @@ def process_job(job, runtime_status_path=None):
         )
         excluded_files = ignored_files + excluded_out_of_range
         log_episode_selection(episode_files, excluded_files)
+
+        if processing_mode == "single_episode":
+            if len(episode_files) != 1:
+                raise RuntimeError("single_episode mode requires exactly one selected episode")
+
+            episode_number, episode_path = episode_files[0]
+            pretty_base_name = build_single_episode_display_name(job, season, episode_number)
+            file_base_name = sanitize_filename(pretty_base_name)
+            output_video = job_output_dir / f"{file_base_name}.mkv"
+            output_txt = job_output_dir / f"{file_base_name}.txt"
+            output_manifest = job_output_dir / f"{file_base_name}_manifest.json"
+            timestamps = [f"00:00:00 - {episode_number} серия"]
+            timestamps_description = build_timestamps_description(timestamps)
+            delivery_summary = {
+                "s3": build_s3_summary(delivery["s3_enabled"], uploaded=False),
+                "vk": build_vk_summary(delivery["vk_enabled"], uploaded=False),
+            }
+            manifest = build_single_episode_manifest(
+                job=job,
+                season=season,
+                episode_number=episode_number,
+                source_file=episode_path,
+                pretty_base_name=pretty_base_name,
+                output_video=output_video,
+                output_txt=output_txt,
+                delivery_summary=delivery_summary,
+            )
+
+            set_runtime_stage(
+                runtime_status_path,
+                "episode_scan",
+                total_episodes=1,
+                total_chunks=None,
+                current_episode=episode_number,
+                current_episode_file=Path(episode_path).name,
+            )
+            set_runtime_stage(
+                runtime_status_path,
+                "final_render",
+                total_episodes=1,
+                current_episode=episode_number,
+                current_episode_file=Path(episode_path).name,
+                current_chunk_index=None,
+                total_chunks=None,
+                current_chunk_episode_range=None,
+            )
+            render_final(
+                concat_output=Path(episode_path),
+                watermark_path=watermark_path,
+                output_video=output_video,
+                encoding={**encoding, "audio_codec": "aac"},
+            )
+
+            write_outputs(output_txt, output_manifest, timestamps, manifest)
+
+            s3_prefix = f"animonster/{title_slug}/S{season}/"
+            s3_uploaded_files = {}
+            s3_manifest_pending = False
+            if delivery["s3_enabled"]:
+                set_runtime_stage(runtime_status_path, "delivery_s3", total_episodes=1)
+                print(f"[DELIVERY] S3 start: {pretty_base_name}")
+                try:
+                    if delivery.get("s3_upload_video", False):
+                        upload_file_to_s3(output_video, s3_prefix + output_video.name)
+                        s3_uploaded_files["video"] = s3_prefix + output_video.name
+                    if delivery.get("s3_upload_timestamps", False):
+                        upload_file_to_s3(output_txt, s3_prefix + output_txt.name)
+                        s3_uploaded_files["timestamps"] = s3_prefix + output_txt.name
+                    s3_manifest_pending = delivery.get("s3_upload_manifest", True)
+                    delivery_summary["s3"] = build_s3_summary(
+                        enabled=True,
+                        uploaded=bool(s3_uploaded_files) or s3_manifest_pending,
+                        uploaded_files=s3_uploaded_files,
+                    )
+                    print(f"[DELIVERY] S3 ok: {pretty_base_name}")
+                except Exception as exc:
+                    s3_error = repr(exc)
+                    print(f"[DELIVERY] S3 failed: {s3_error}")
+                    delivery_summary["s3"] = build_s3_summary(
+                        enabled=True,
+                        uploaded=False,
+                        error=s3_error,
+                        uploaded_files=s3_uploaded_files,
+                    )
+
+            if delivery["vk_enabled"]:
+                set_runtime_stage(runtime_status_path, "delivery_vk", total_episodes=1)
+                print(f"[DELIVERY] VK video start: {pretty_base_name}")
+                try:
+                    wall_post_text = (
+                        build_vk_wall_post_text(job, pretty_base_name)
+                        if delivery.get("vk_wall_post_enabled", True)
+                        else None
+                    )
+                    comment_text = (
+                        build_vk_comment_text(delivery.get("vk_comment_template", ""))
+                        if delivery.get("vk_comment_enabled", True)
+                        else None
+                    )
+                    if wall_post_text:
+                        print(f"[DELIVERY] VK post start: {pretty_base_name}")
+                    if comment_text:
+                        print(f"[DELIVERY] VK comment start: {pretty_base_name}")
+                    vk_result = publish_video_to_vk(
+                        output_video,
+                        pretty_base_name,
+                        timestamps_description,
+                        wall_post_text=wall_post_text,
+                        comment_text=comment_text,
+                        comment_banner_path=delivery.get("vk_comment_banner_path"),
+                    )
+                    delivery_summary["vk"] = build_vk_summary(
+                        enabled=True,
+                        uploaded=True,
+                        result=vk_result,
+                    )
+                    print(f"[DELIVERY] VK video ok: {pretty_base_name}")
+                except Exception as exc:
+                    print(f"[DELIVERY] VK video failed: {repr(exc)}")
+                    delivery_summary["vk"] = build_vk_summary(
+                        enabled=True,
+                        uploaded=False,
+                        error=repr(exc),
+                        result={
+                            "video_uploaded": False,
+                            "post_created": False,
+                            "comment_created": False,
+                            "video_title": pretty_base_name,
+                            "video_description": timestamps_description,
+                            "errors_by_stage": {"video_upload": repr(exc)},
+                        },
+                    )
+
+            manifest["delivery_summary"] = delivery_summary
+            write_outputs(output_txt, output_manifest, timestamps, manifest)
+
+            if delivery["s3_enabled"] and s3_manifest_pending:
+                try:
+                    upload_file_to_s3(output_manifest, s3_prefix + output_manifest.name)
+                    s3_uploaded_files["manifest"] = s3_prefix + output_manifest.name
+                    delivery_summary["s3"] = build_s3_summary(
+                        enabled=True,
+                        uploaded=True,
+                        uploaded_files=s3_uploaded_files,
+                    )
+                    manifest["delivery_summary"] = delivery_summary
+                    write_outputs(output_txt, output_manifest, timestamps, manifest)
+                    print(f"[DELIVERY] S3 manifest ok: {pretty_base_name}")
+                except Exception as exc:
+                    s3_error = repr(exc)
+                    print(f"[DELIVERY] S3 failed on manifest: {s3_error}")
+                    delivery_summary["s3"] = build_s3_summary(
+                        enabled=True,
+                        uploaded=False,
+                        error=s3_error,
+                        uploaded_files=s3_uploaded_files,
+                    )
+                    manifest["delivery_summary"] = delivery_summary
+                    write_outputs(output_txt, output_manifest, timestamps, manifest)
+
+            set_runtime_stage(runtime_status_path, "job_done", total_episodes=1)
+            success = True
+            print(f"\n=== JOB DONE: {title} ===")
+            print(output_video)
+            print(output_txt)
+            print(output_manifest)
+            return {
+                "output_video": str(output_video),
+                "output_timestamps": str(output_txt),
+                "output_manifest": str(output_manifest),
+                "delivery_summary": delivery_summary,
+                "quality_summary": {},
+                "output_display_name": pretty_base_name,
+                "timestamps_description": timestamps_description,
+            }
+
         episode_infos = build_episode_infos(episode_files)
         episode_chunks = split_episode_infos_into_chunks(
             episode_infos,

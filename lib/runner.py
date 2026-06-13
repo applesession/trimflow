@@ -3,9 +3,12 @@ from datetime import datetime, timezone
 from lib.config import (
     deep_merge,
     load_completed_jobs,
+    load_state,
     save_completed_jobs,
     save_jobs,
+    save_state,
 )
+from lib.autojobs import get_job_processing_mode, mark_ongoing_full_publish
 from lib.pipeline import process_job
 from lib.runtime import (
     append_runtime_error,
@@ -34,6 +37,7 @@ def build_job_identity(job):
         str(job.get("title", "")).strip().lower(),
         str(job.get("season", "")).strip(),
         str(job.get("episodes_range", "")).strip(),
+        get_job_processing_mode(job),
         source_type,
         source_signature,
     ])
@@ -81,6 +85,33 @@ def build_completed_job_entry(job, job_result):
     }
 
 
+def get_job_publish_strategy(job):
+    return str((job.get("automation") or {}).get("publish_strategy", "") or "").strip().lower()
+
+
+def get_job_ongoing_progress_key(job):
+    return str((job.get("automation") or {}).get("ongoing_progress_key", "") or "").strip()
+
+
+def is_ongoing_compilation_job(job):
+    automation = job.get("automation") or {}
+    return (
+        bool(automation.get("is_ongoing"))
+        and get_job_processing_mode(job) == "compilation"
+        and get_job_publish_strategy(job) in {"initial_full", "full_refresh"}
+    )
+
+
+def is_incremental_full_refresh_job(job):
+    return get_job_publish_strategy(job) == "full_refresh"
+
+
+def update_state_after_full_publish(config, job):
+    state = load_state(config)
+    updated_state = mark_ongoing_full_publish(state, job)
+    save_state(config, updated_state)
+
+
 def run_jobs(
     config,
     jobs,
@@ -111,6 +142,7 @@ def run_jobs(
     validate_required_files(config)
 
     completed_jobs = load_completed_jobs(config)
+    blocked_full_refresh_keys = set()
     summary = {
         "jobs_found": len(active_jobs),
         "jobs_processed": 0,
@@ -120,6 +152,11 @@ def run_jobs(
     }
 
     for index, merged_job in enumerate(merged_jobs, start=1):
+        if is_incremental_full_refresh_job(merged_job) and get_job_ongoing_progress_key(merged_job) in blocked_full_refresh_keys:
+            log(f"SKIP JOB {index}/{len(merged_jobs)} after failed single publish: {merged_job['title']}")
+            summary["jobs_skipped"] += 1
+            continue
+
         log("\n" + "=" * 80)
         log(f"START JOB {index}/{len(merged_jobs)}: {merged_job['title']}")
         log("=" * 80)
@@ -141,6 +178,8 @@ def run_jobs(
                     save_jobs(config, active_jobs)
                 completed_jobs.append(build_completed_job_entry(merged_job, job_result))
                 save_completed_jobs(config, completed_jobs)
+                if is_ongoing_compilation_job(merged_job):
+                    update_state_after_full_publish(config, merged_job)
 
             summary["jobs_processed"] += 1
             if runtime_status_path:
@@ -162,6 +201,10 @@ def run_jobs(
             log(repr(exc))
             summary["jobs_failed"] += 1
             summary["failed_titles"].append(merged_job.get("title"))
+            if get_job_processing_mode(merged_job) == "single_episode":
+                ongoing_progress_key = get_job_ongoing_progress_key(merged_job)
+                if ongoing_progress_key:
+                    blocked_full_refresh_keys.add(ongoing_progress_key)
             if runtime_status_path:
                 current_job = load_runtime_status(runtime_status_path).get("current_job") or {}
                 append_runtime_error(

@@ -594,6 +594,7 @@ def shorten_error_message(message, limit=280):
 def build_job_identity(job):
     source = job.get("source", {}) if isinstance(job, dict) else {}
     source_type = str(source.get("type", "")).strip().lower()
+    processing_mode = str(job.get("processing_mode", "compilation") if isinstance(job, dict) else "compilation").strip().lower()
     if source_type == "magnet":
         source_signature = str(source.get("magnet", "")).strip()
     elif source_type == "local":
@@ -605,6 +606,7 @@ def build_job_identity(job):
         str(job.get("title", "")).strip().lower(),
         str(job.get("season", "")).strip(),
         str(job.get("episodes_range", "")).strip(),
+        processing_mode,
         source_type,
         source_signature,
     ])

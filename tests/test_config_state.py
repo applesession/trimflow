@@ -11,7 +11,13 @@ from lib.anilibria import (
     get_anilibria_proxy_url,
     list_recent_releases,
 )
-from lib.autojobs import collect_release_episode_numbers, discover_jobs, format_episodes_range, merge_episode_ranges
+from lib.autojobs import (
+    build_ongoing_progress_key,
+    collect_release_episode_numbers,
+    discover_jobs,
+    format_episodes_range,
+    merge_episode_ranges,
+)
 from lib.config import build_default_state, load_completed_jobs, load_jobs, load_state
 
 
@@ -208,6 +214,7 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(len(first_result["jobs"]), 1)
         self.assertEqual(first_result["jobs"][0]["episodes_range"], "005-006")
+        self.assertEqual(first_result["jobs"][0]["processing_mode"], "compilation")
         self.assertEqual(first_result["jobs"][0]["title_ru"], "Тестовый релиз")
         self.assertEqual(first_result["summary"]["created_jobs"], 1)
         self.assertEqual(len(first_result["state"]["seen_release_episodes"]), 2)
@@ -322,6 +329,58 @@ class ConfigStateTests(unittest.TestCase):
         self.assertNotIn("mal_id", result["jobs"][0])
         self.assertEqual(result["jobs"][0]["episodes_range"], "001")
         self.assertEqual(result["summary"]["created_jobs"], 1)
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_creates_single_then_full_for_previously_published_ongoing(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [
+                {"id": 77, "alias": "ongoing-release", "is_ongoing": True},
+            ],
+            "request_urls": [],
+        }
+        magnet = "magnet:?xt=urn:btih:ongoing"
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 77,
+                "alias": "ongoing-release",
+                "is_ongoing": True,
+                "name": {"english": "Ongoing Release", "main": "Онгоинг"},
+                "torrent": {"magnet": magnet},
+                "episodes": [{"number": index} for index in range(1, 11)],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/ongoing-release",
+        }
+
+        state = build_default_state()
+        for episode_number in range(1, 10):
+            state["seen_release_episodes"][f"77:{episode_number:03d}"] = {
+                "release_id": 77,
+                "episode": episode_number,
+                "seen_at": "2026-06-13T00:00:00+00:00",
+            }
+        ongoing_key = build_ongoing_progress_key("Ongoing Release", 1, "magnet")
+        state["ongoing_progress"][ongoing_key] = {
+            "has_full_publish": True,
+            "last_full_episode": 9,
+            "last_full_range": "001-009",
+            "updated_at": "2026-06-13T00:00:00+00:00",
+        }
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], state)
+
+        self.assertEqual(len(result["jobs"]), 2)
+        self.assertEqual(result["jobs"][0]["processing_mode"], "single_episode")
+        self.assertEqual(result["jobs"][0]["episodes_range"], "010")
+        self.assertEqual(result["jobs"][0]["automation"]["publish_strategy"], "single_update")
+        self.assertEqual(result["jobs"][1]["processing_mode"], "compilation")
+        self.assertEqual(result["jobs"][1]["episodes_range"], "001-010")
+        self.assertEqual(result["jobs"][1]["automation"]["publish_strategy"], "full_refresh")
+        self.assertEqual(result["summary"]["created_jobs"], 2)
 
     def test_build_job_from_release_adds_title_ru_when_available(self):
         from lib.autojobs import build_job_from_release

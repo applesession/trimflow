@@ -270,6 +270,161 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("lib.runner.process_job")
     @patch("lib.runner.save_completed_jobs")
     @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_state")
+    @patch("lib.runner.load_state")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_updates_state_after_successful_ongoing_compilation(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_state,
+        mock_save_state,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [{
+            "title": "A",
+            "title_ru": "А",
+            "season": 1,
+            "episodes_range": "001-010",
+            "processing_mode": "compilation",
+            "source": {"type": "magnet", "magnet": "m1"},
+            "automation": {
+                "is_ongoing": True,
+                "publish_strategy": "full_refresh",
+                "ongoing_progress_key": "a|1|magnet",
+            },
+        }]
+        mock_load_completed_jobs.return_value = []
+        mock_load_state.return_value = {"ongoing_progress": {}}
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "A",
+            "delivery_summary": {
+                "vk": {"enabled": True, "video_uploaded": True},
+                "s3": {"enabled": False, "uploaded": False},
+            },
+        }
+
+        summary = run_jobs({"defaults": {}}, jobs)
+        self.assertEqual(summary["jobs_processed"], 1)
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args.args[1]
+        self.assertTrue(saved_state["ongoing_progress"]["a|1|magnet"]["has_full_publish"])
+        self.assertEqual(saved_state["ongoing_progress"]["a|1|magnet"]["last_full_range"], "001-010")
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_state")
+    @patch("lib.runner.load_state")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_does_not_update_state_after_single_episode_success(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_state,
+        mock_save_state,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [{
+            "title": "A",
+            "season": 1,
+            "episodes_range": "010",
+            "processing_mode": "single_episode",
+            "source": {"type": "magnet", "magnet": "m1"},
+            "automation": {
+                "is_ongoing": True,
+                "publish_strategy": "single_update",
+                "ongoing_progress_key": "a|1|magnet",
+            },
+        }]
+        mock_load_completed_jobs.return_value = []
+        mock_load_state.return_value = {"ongoing_progress": {}}
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "A",
+            "delivery_summary": {
+                "vk": {"enabled": True, "video_uploaded": True},
+                "s3": {"enabled": False, "uploaded": False},
+            },
+        }
+
+        summary = run_jobs({"defaults": {}}, jobs)
+
+        self.assertEqual(summary["jobs_processed"], 1)
+        mock_save_state.assert_not_called()
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_skips_full_refresh_after_single_episode_failure(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [
+            {
+                "title": "A",
+                "season": 1,
+                "episodes_range": "010",
+                "processing_mode": "single_episode",
+                "source": {"type": "magnet", "magnet": "m1"},
+                "automation": {
+                    "is_ongoing": True,
+                    "publish_strategy": "single_update",
+                    "ongoing_progress_key": "a|1|magnet",
+                },
+            },
+            {
+                "title": "A",
+                "season": 1,
+                "episodes_range": "001-010",
+                "processing_mode": "compilation",
+                "source": {"type": "magnet", "magnet": "m1"},
+                "automation": {
+                    "is_ongoing": True,
+                    "publish_strategy": "full_refresh",
+                    "ongoing_progress_key": "a|1|magnet",
+                },
+            },
+        ]
+        mock_load_completed_jobs.return_value = []
+        mock_process_job.side_effect = RuntimeError("boom")
+
+        summary = run_jobs({"defaults": {}}, jobs)
+
+        self.assertEqual(summary["jobs_failed"], 1)
+        self.assertEqual(summary["jobs_skipped"], 1)
+        self.assertEqual(mock_process_job.call_count, 1)
+        mock_save_jobs.assert_not_called()
+        mock_save_completed_jobs.assert_not_called()
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
     @patch("lib.runner.save_jobs")
     @patch("lib.runner.validate_required_files")
     @patch("lib.runner.validate_required_tools")

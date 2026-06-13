@@ -53,6 +53,12 @@ def build_compilation_display_name(job, season, episodes_range, suffix="[Без 
     return f"{display_title} - {season_number} Сезон {episodes_label} {suffix}".strip()
 
 
+def build_single_episode_display_name(job, season, episode_number) -> str:
+    display_title = get_display_title(job)
+    season_number = int(str(season))
+    return f"{display_title} - {season_number} Сезон {int(episode_number)} Серия".strip()
+
+
 def sanitize_filename(value: str) -> str:
     cleaned = str(value).replace("/", "-")
     cleaned = re.sub(r'[<>:"\\|?*]', "", cleaned)
