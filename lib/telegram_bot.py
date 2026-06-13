@@ -213,10 +213,23 @@ def _telegram_request(method, payload=None, timeout=60):
         }
     with telegram_ipv4_only():
         response = requests.post(url, **request_kwargs)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        description = None
+        try:
+            error_payload = response.json()
+            description = error_payload.get("description") or error_payload
+        except ValueError:
+            description = response.text.strip() or None
+        if description is not None:
+            raise RuntimeError(
+                f"Telegram API {method} HTTP {response.status_code}: {description}",
+            ) from exc
+        raise
     data = response.json()
     if not data.get("ok"):
-        raise RuntimeError(f"Telegram API {method} failed: {data}")
+        raise RuntimeError(f"Telegram API {method} failed: {data.get('description') or data}")
     return data
 
 
@@ -282,7 +295,13 @@ def send_message_to_allowed_chats(text, *, parse_mode=None, reply_markup=None):
     results = []
     for chat_id in sorted(parse_allowed_chat_ids()):
         if parse_mode:
-            results.append(send_formatted_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup))
+            try:
+                results.append(send_formatted_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup))
+            except RuntimeError as exc:
+                if parse_mode == "MarkdownV2" and telegram_markdown_retryable_error(exc):
+                    results.append(send_message(chat_id, demote_markdown_v2_to_plain_text(text), reply_markup=reply_markup))
+                else:
+                    raise
         else:
             results.append(send_message(chat_id, text, reply_markup=reply_markup))
     return results
@@ -671,6 +690,22 @@ def escape_markdown_v2(text):
     for char in ["\\", "_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
         value = value.replace(char, f"\\{char}")
     return value
+
+
+def demote_markdown_v2_to_plain_text(text):
+    value = str(text or "")
+    value = re.sub(r"\\([_*\[\]()~`>#+\-=|{}.!])", r"\1", value)
+    value = value.replace("*", "").replace("`", "")
+    return value
+
+
+def telegram_markdown_retryable_error(error):
+    message = str(error or "").lower()
+    return (
+        "can't parse entities" in message
+        or "cannot parse entities" in message
+        or "can't find end of" in message
+    )
 
 
 def sanitize_code_block_content(text):

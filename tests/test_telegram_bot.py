@@ -33,6 +33,7 @@ from lib.telegram_bot import (
     normalize_command_text,
     parse_add_command,
     save_telegram_state,
+    send_message_to_allowed_chats,
     get_telegram_proxy_url,
     _telegram_request,
     telegram_force_ipv4_enabled,
@@ -889,6 +890,50 @@ class TelegramBotTests(unittest.TestCase):
 
         kwargs = mock_post.call_args.kwargs
         self.assertNotIn("proxies", kwargs)
+
+    @patch("lib.telegram_bot.requests.post")
+    def test_telegram_request_includes_api_description_on_http_error(self, mock_post):
+        response = mock_post.return_value
+        response.raise_for_status.side_effect = __import__("requests").HTTPError("400 Client Error")
+        response.json.return_value = {
+            "ok": False,
+            "description": "Bad Request: can't parse entities",
+        }
+
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "token"}):
+            with self.assertRaises(RuntimeError) as context:
+                _telegram_request("sendMessage", payload={"text": "x"}, timeout=12)
+
+        self.assertIn("can't parse entities", str(context.exception))
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.send_formatted_message")
+    @patch("lib.telegram_bot.parse_allowed_chat_ids", return_value={"123"})
+    @patch("lib.telegram_bot.telegram_notifications_enabled", return_value=True)
+    def test_send_message_to_allowed_chats_falls_back_to_plain_text_on_markdown_parse_error(
+        self,
+        _mock_enabled,
+        _mock_parse_allowed_chat_ids,
+        mock_send_formatted_message,
+        mock_send_message,
+    ):
+        mock_send_formatted_message.side_effect = RuntimeError(
+            "Telegram API sendMessage HTTP 400: Bad Request: can't parse entities",
+        )
+        mock_send_message.return_value = {"ok": True}
+
+        result = send_message_to_allowed_chats(
+            "✅ *Видео опубликовано в VK*\n\n🎬 *Черный клевер*",
+            parse_mode="MarkdownV2",
+        )
+
+        self.assertEqual(result, [{"ok": True}])
+        mock_send_formatted_message.assert_called_once()
+        mock_send_message.assert_called_once_with(
+            "123",
+            "✅ Видео опубликовано в VK\n\n🎬 Черный клевер",
+            reply_markup=None,
+        )
 
 
 if __name__ == "__main__":
