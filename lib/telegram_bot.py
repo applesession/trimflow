@@ -274,6 +274,17 @@ def send_formatted_message(chat_id, text, *, parse_mode="MarkdownV2", reply_mark
     )
 
 
+def send_message_with_fallback(chat_id, text, *, parse_mode=None, reply_markup=None):
+    if parse_mode:
+        try:
+            return send_formatted_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except RuntimeError as exc:
+            if parse_mode == "MarkdownV2" and telegram_markdown_retryable_error(exc):
+                return send_message(chat_id, demote_markdown_v2_to_plain_text(text), reply_markup=reply_markup)
+            raise
+    return send_message(chat_id, text, reply_markup=reply_markup)
+
+
 def send_reply(chat_id, text, include_keyboard=True):
     reply_markup = build_main_keyboard() if include_keyboard else None
     return send_message(chat_id, text, reply_markup=reply_markup)
@@ -294,16 +305,7 @@ def send_message_to_allowed_chats(text, *, parse_mode=None, reply_markup=None):
 
     results = []
     for chat_id in sorted(parse_allowed_chat_ids()):
-        if parse_mode:
-            try:
-                results.append(send_formatted_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup))
-            except RuntimeError as exc:
-                if parse_mode == "MarkdownV2" and telegram_markdown_retryable_error(exc):
-                    results.append(send_message(chat_id, demote_markdown_v2_to_plain_text(text), reply_markup=reply_markup))
-                else:
-                    raise
-        else:
-            results.append(send_message(chat_id, text, reply_markup=reply_markup))
+        results.append(send_message_with_fallback(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup))
     return results
 
 
@@ -384,7 +386,7 @@ def format_skip_counts_line(quality_summary):
         return None
     return (
         f"✂️ OP: {format_markdown_code(f'{op_removed}/{episodes_count}')}"
-        f" | ED: {format_markdown_code(f'{ed_removed}/{episodes_count}')}"
+        f" • ED: {format_markdown_code(f'{ed_removed}/{episodes_count}')}"
     )
 
 
@@ -1479,7 +1481,7 @@ def handle_update(config, update):
                 return True
 
             if payload.get("type") == "job_result_details":
-                send_formatted_message(chat_id, format_job_details_message(payload), parse_mode="MarkdownV2")
+                send_message_with_fallback(chat_id, format_job_details_message(payload), parse_mode="MarkdownV2")
                 return True
 
             send_reply(chat_id, "Неизвестный тип деталей", include_keyboard=True)

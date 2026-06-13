@@ -138,7 +138,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("🔧 Этап: `cron_run`", error)
         self.assertIn("Причина: `boom`", error)
         self.assertIn("✅ *Обработка завершена*", success)
-        self.assertIn("✂️ OP: `3/3` | ED: `2/3`", success)
+        self.assertIn("✂️ OP: `3/3` • ED: `2/3`", success)
         self.assertIn("📦 Результат: `s3://bucket/file.mkv`", success)
         self.assertIn("🎬 *Тестовый тайтл*", success)
 
@@ -175,7 +175,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("✅ *Видео опубликовано в VK*", message)
         self.assertIn("🎬 *Токийский Гуль: Перерождение*", message)
         self.assertIn("📺 Эпизоды: `001-024`", message)
-        self.assertIn("✂️ OP: `24/24` | ED: `22/24`", message)
+        self.assertIn("✂️ OP: `24/24` • ED: `22/24`", message)
         self.assertIn("✔️ Пост на стене создан", message)
         self.assertIn("✖️ Первый комментарий не создан", message)
         self.assertIn("504 Gateway Time\\-out", message)
@@ -803,7 +803,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("ℹ️ *Подробно*", message)
         self.assertIn("🎬 *Токийский Гуль: Перерождение*", message)
         self.assertIn("📺 Эпизоды: `001-024`", message)
-        self.assertIn("✂️ OP: `24/24` | ED: `22/24`", message)
+        self.assertIn("✂️ OP: `24/24` • ED: `22/24`", message)
         self.assertIn("⚠️ Warnings: `1`", message)
         self.assertIn("🛠 Manual review: `1`", message)
         self.assertIn("• anilibria\\_only: `18`", message)
@@ -840,6 +840,68 @@ class TelegramBotTests(unittest.TestCase):
         mock_answer_callback_query.assert_called_once()
         self.assertEqual(mock_answer_callback_query.call_args.args[0], "callback-2")
         self.assertIn("Детали уже недоступны", mock_send_reply.call_args.args[1])
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.send_formatted_message")
+    @patch("lib.telegram_bot.answer_callback_query")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_notification_details_callback_falls_back_to_plain_text_on_markdown_error(
+        self,
+        _mock_allowed,
+        mock_answer_callback_query,
+        mock_send_formatted_message,
+        mock_send_message,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        job = {
+            "title": "Black Clover",
+            "title_ru": "Черный клевер",
+            "season": 1,
+            "episodes_range": "001-003",
+        }
+        result = {
+            "quality_summary": {
+                "episodes_count": 3,
+                "episodes_with_op_removed": 3,
+                "episodes_with_ed_removed": 0,
+            },
+            "delivery_summary": {
+                "vk": {
+                    "enabled": True,
+                    "video_uploaded": True,
+                    "post_created": True,
+                    "comment_created": True,
+                },
+            },
+        }
+        mock_send_formatted_message.side_effect = RuntimeError(
+            "Telegram API sendMessage HTTP 400: Bad Request: can't parse entities",
+        )
+        mock_send_message.return_value = {"ok": True}
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            reply_markup = build_notification_details_reply_markup(
+                build_notification_details_payload(job, result),
+            )
+            callback_data = reply_markup["inline_keyboard"][0][0]["callback_data"]
+            handled = handle_update(config, {
+                "update_id": 1,
+                "callback_query": {
+                    "id": "callback-3",
+                    "data": callback_data,
+                    "message": {"chat": {"id": 123}},
+                },
+            })
+
+        self.assertTrue(handled)
+        mock_answer_callback_query.assert_called_once()
+        mock_send_formatted_message.assert_called_once()
+        mock_send_message.assert_called_once()
+        fallback_message = mock_send_message.call_args.args[1]
+        self.assertIn("ℹ️ Подробно", fallback_message)
+        self.assertIn("Черный клевер", fallback_message)
 
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
