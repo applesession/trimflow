@@ -1099,6 +1099,7 @@ def process_job(job, runtime_status_path=None):
             "output_timestamps": str(output_txt),
             "output_manifest": str(output_manifest),
             "delivery_summary": delivery_summary,
+            "quality_summary": quality_summary,
             "output_display_name": pretty_base_name,
             "timestamps_description": timestamps_description,
         }

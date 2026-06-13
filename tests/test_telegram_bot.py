@@ -10,6 +10,8 @@ from lib.config import save_jobs, save_state
 from lib.telegram_bot import (
     add_job_from_command,
     build_main_keyboard,
+    build_notification_details_payload,
+    build_notification_details_reply_markup,
     build_help_message,
     format_current_message,
     format_discovery_message,
@@ -120,6 +122,11 @@ class TelegramBotTests(unittest.TestCase):
         success = format_publish_success_message(
             {"title": "Test Title", "title_ru": "Тестовый тайтл", "episodes_range": "001-003"},
             "s3://bucket/file.mkv",
+            quality_summary={
+                "episodes_count": 3,
+                "episodes_with_op_removed": 3,
+                "episodes_with_ed_removed": 2,
+            },
         )
 
         self.assertIn("Автодискавери завершён", discovery)
@@ -130,6 +137,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("🔧 Этап: `cron_run`", error)
         self.assertIn("Причина: `boom`", error)
         self.assertIn("✅ *Обработка завершена*", success)
+        self.assertIn("✂️ OP: `3/3` | ED: `2/3`", success)
         self.assertIn("📦 Результат: `s3://bucket/file.mkv`", success)
         self.assertIn("🎬 *Тестовый тайтл*", success)
 
@@ -156,11 +164,17 @@ class TelegramBotTests(unittest.TestCase):
                 "comment_created": False,
                 "error": "HTTPError('504 Server Error: Gateway Time-out for url: https://pu.vk.com/upload.php')",
             },
+            quality_summary={
+                "episodes_count": 24,
+                "episodes_with_op_removed": 24,
+                "episodes_with_ed_removed": 22,
+            },
         )
 
         self.assertIn("✅ *Видео опубликовано в VK*", message)
         self.assertIn("🎬 *Токийский Гуль: Перерождение*", message)
         self.assertIn("📺 Эпизоды: `001-024`", message)
+        self.assertIn("✂️ OP: `24/24` | ED: `22/24`", message)
         self.assertIn("✔️ Пост на стене создан", message)
         self.assertIn("✖️ Первый комментарий не создан", message)
         self.assertIn("504 Gateway Time\\-out", message)
@@ -721,6 +735,110 @@ class TelegramBotTests(unittest.TestCase):
         completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])
         self.assertEqual(len(completed_data), 1)
+
+    @patch("lib.telegram_bot.send_formatted_message")
+    @patch("lib.telegram_bot.answer_callback_query")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_notification_details_callback_sends_detailed_message(
+        self,
+        _mock_allowed,
+        mock_answer_callback_query,
+        mock_send_formatted_message,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        job = {
+            "title": "Tokyo Ghoul:re",
+            "title_ru": "Токийский Гуль: Перерождение",
+            "season": 2,
+            "episodes_range": "001-024",
+        }
+        result = {
+            "quality_summary": {
+                "episodes_count": 24,
+                "episodes_with_op_removed": 24,
+                "episodes_with_ed_removed": 22,
+                "episodes_manual_review": 1,
+                "episodes_anilibria_only": 18,
+                "episodes_anilibria_with_detector": 4,
+                "episodes_with_warnings": [{"episode": 8}],
+            },
+            "delivery_summary": {
+                "vk": {
+                    "enabled": True,
+                    "video_uploaded": True,
+                    "post_created": True,
+                    "comment_created": False,
+                    "error": "HTTPError('504 Server Error: Gateway Time-out for url: https://pu.vk.com/upload.php')",
+                },
+                "s3": {
+                    "enabled": False,
+                    "uploaded": False,
+                },
+            },
+        }
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            reply_markup = build_notification_details_reply_markup(
+                build_notification_details_payload(job, result),
+            )
+            callback_data = reply_markup["inline_keyboard"][0][0]["callback_data"]
+
+            handled = handle_update(config, {
+                "update_id": 1,
+                "callback_query": {
+                    "id": "callback-1",
+                    "data": callback_data,
+                    "message": {"chat": {"id": 123}},
+                },
+            })
+
+        self.assertTrue(handled)
+        mock_answer_callback_query.assert_called_once()
+        self.assertEqual(mock_answer_callback_query.call_args.args[0], "callback-1")
+        self.assertEqual(mock_send_formatted_message.call_args.args[0], 123)
+        message = mock_send_formatted_message.call_args.args[1]
+        self.assertIn("ℹ️ *Подробно*", message)
+        self.assertIn("🎬 *Токийский Гуль: Перерождение*", message)
+        self.assertIn("📺 Эпизоды: `001-024`", message)
+        self.assertIn("✂️ OP: `24/24` | ED: `22/24`", message)
+        self.assertIn("⚠️ Warnings: `1`", message)
+        self.assertIn("🛠 Manual review: `1`", message)
+        self.assertIn("• anilibria\\_only: `18`", message)
+        self.assertIn("• anilibria\\_with\\_detector: `4`", message)
+        self.assertIn("• VK video: `ok`", message)
+        self.assertIn("• VK comment: `failed`", message)
+        self.assertIn("Причина partial failure: `504 Gateway Time-out`", message)
+        self.assertEqual(mock_send_formatted_message.call_args.kwargs["parse_mode"], "MarkdownV2")
+
+    @patch("lib.telegram_bot.send_reply")
+    @patch("lib.telegram_bot.answer_callback_query")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_notification_details_callback_handles_missing_token(
+        self,
+        _mock_allowed,
+        mock_answer_callback_query,
+        mock_send_reply,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handled = handle_update(config, {
+                "update_id": 1,
+                "callback_query": {
+                    "id": "callback-2",
+                    "data": "details:missing-token",
+                    "message": {"chat": {"id": 123}},
+                },
+            })
+
+        self.assertTrue(handled)
+        mock_answer_callback_query.assert_called_once()
+        self.assertEqual(mock_answer_callback_query.call_args.args[0], "callback-2")
+        self.assertIn("Детали уже недоступны", mock_send_reply.call_args.args[1])
 
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)

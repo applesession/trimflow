@@ -23,6 +23,8 @@ from lib.runtime import (
     update_runtime_status,
 )  # noqa: E402
 from lib.telegram_bot import (  # noqa: E402
+    build_notification_details_payload,
+    build_notification_details_reply_markup,
     format_discovery_message,
     format_error_message,
     format_publish_success_message,
@@ -35,9 +37,9 @@ from lib.telegram_bot import (  # noqa: E402
 load_dotenv()
 
 
-def notify_best_effort(log_path, text, context, parse_mode=None):
+def notify_best_effort(log_path, text, context, parse_mode=None, reply_markup=None):
     try:
-        send_message_to_allowed_chats(text, parse_mode=parse_mode)
+        send_message_to_allowed_chats(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception as exc:
         log_line(log_path, f"warning telegram_notify_failed context={context} error={repr(exc)}")
 
@@ -148,7 +150,11 @@ def main():
             log=lambda message: log_line(log_path, message),
             on_job_success=lambda job, result: notify_best_effort(
                 log_path,
-                format_vk_publish_success_message(job, result["delivery_summary"]["vk"])
+                format_vk_publish_success_message(
+                    job,
+                    result["delivery_summary"]["vk"],
+                    result.get("quality_summary"),
+                )
                 if result.get("delivery_summary", {}).get("vk", {}).get("uploaded")
                 else format_vk_publish_error_message(
                     job,
@@ -158,9 +164,13 @@ def main():
                 else format_publish_success_message(
                     job,
                     result.get("output_video"),
+                    quality_summary=result.get("quality_summary"),
                 ),
                 f"job_success:{job.get('title')}",
                 parse_mode="MarkdownV2",
+                reply_markup=build_notification_details_reply_markup(
+                    build_notification_details_payload(job, result),
+                ),
             ),
             on_job_failure=lambda job, exc: notify_best_effort(
                 log_path,

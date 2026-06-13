@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 import socket
 from datetime import datetime
 from contextlib import contextmanager
@@ -84,6 +85,14 @@ def build_confirmation_keyboard(action_type):
     }
 
 
+def build_inline_details_keyboard(token):
+    return {
+        "inline_keyboard": [
+            [{"text": "Подробно", "callback_data": f"details:{token}"}],
+        ]
+    }
+
+
 def get_telegram_token():
     return (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 
@@ -145,6 +154,7 @@ def build_default_telegram_state():
         "last_handled_at": None,
         "pending_actions": {},
         "jobs_pagination": {},
+        "notification_details": {},
     }
 
 
@@ -163,6 +173,7 @@ def load_telegram_state():
     state.update(data)
     state.setdefault("pending_actions", {})
     state.setdefault("jobs_pagination", {})
+    state.setdefault("notification_details", {})
     return state
 
 
@@ -212,7 +223,7 @@ def _telegram_request(method, payload=None, timeout=60):
 def fetch_updates(offset=None, timeout=30):
     payload = {
         "timeout": timeout,
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
     }
     if offset is not None:
         payload["offset"] = offset
@@ -255,16 +266,25 @@ def send_reply(chat_id, text, include_keyboard=True):
     return send_message(chat_id, text, reply_markup=reply_markup)
 
 
-def send_message_to_allowed_chats(text, *, parse_mode=None):
+def answer_callback_query(callback_query_id, text=None):
+    payload = {
+        "callback_query_id": str(callback_query_id),
+    }
+    if text:
+        payload["text"] = text
+    return _telegram_request("answerCallbackQuery", payload=payload, timeout=20)
+
+
+def send_message_to_allowed_chats(text, *, parse_mode=None, reply_markup=None):
     if not telegram_notifications_enabled():
         return []
 
     results = []
     for chat_id in sorted(parse_allowed_chat_ids()):
         if parse_mode:
-            results.append(send_formatted_message(chat_id, text, parse_mode=parse_mode))
+            results.append(send_formatted_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup))
         else:
-            results.append(send_message(chat_id, text))
+            results.append(send_message(chat_id, text, reply_markup=reply_markup))
     return results
 
 
@@ -336,7 +356,138 @@ def format_markdown_code(text):
     return "`" + str(text or "").replace("\\", "\\\\").replace("`", "\\`") + "`"
 
 
-def format_publish_success_message(job, output_path_or_key=None):
+def format_skip_counts_line(quality_summary):
+    summary = quality_summary or {}
+    episodes_count = summary.get("episodes_count")
+    op_removed = summary.get("episodes_with_op_removed")
+    ed_removed = summary.get("episodes_with_ed_removed")
+    if episodes_count is None or op_removed is None or ed_removed is None:
+        return None
+    return (
+        f"✂️ OP: {format_markdown_code(f'{op_removed}/{episodes_count}')}"
+        f" | ED: {format_markdown_code(f'{ed_removed}/{episodes_count}')}"
+    )
+
+
+def _build_strategy_lines(quality_summary):
+    summary = quality_summary or {}
+    strategy_labels = {
+        "episodes_anilibria_only": "anilibria_only",
+        "episodes_anilibria_with_detector": "anilibria_with_detector",
+        "episodes_aniskip_only": "aniskip_only",
+        "episodes_aniskip_with_detector": "aniskip_with_detector",
+        "episodes_detector_only": "detector_only",
+        "episodes_manual_review": "manual_review",
+    }
+    lines = []
+    for key, label in strategy_labels.items():
+        value = int(summary.get(key, 0) or 0)
+        if value > 0:
+            lines.append(f"• {escape_markdown_v2(label)}: {format_markdown_code(value)}")
+    return lines
+
+
+def _format_delivery_status_line(label, value):
+    normalized = "ok" if value else "failed"
+    return f"• {escape_markdown_v2(label)}: {format_markdown_code(normalized)}"
+
+
+def format_job_details_message(payload):
+    job = payload.get("job") or {}
+    quality_summary = payload.get("quality_summary") or {}
+    delivery_summary = payload.get("delivery_summary") or {}
+    title = get_display_title(job)
+    episodes_range = job.get("episodes_range", "?")
+    lines = [
+        "ℹ️ *Подробно*",
+        "",
+        f"🎬 *{escape_markdown_v2(title)}*",
+        f"📺 Эпизоды: {format_markdown_code(episodes_range)}",
+    ]
+
+    skip_counts_line = format_skip_counts_line(quality_summary)
+    if skip_counts_line:
+        lines.extend(["", skip_counts_line])
+
+    warnings_count = len(quality_summary.get("episodes_with_warnings", []) or [])
+    manual_review_count = int(quality_summary.get("episodes_manual_review", 0) or 0)
+    lines.extend([
+        f"⚠️ Warnings: {format_markdown_code(warnings_count)}",
+        f"🛠 Manual review: {format_markdown_code(manual_review_count)}",
+    ])
+
+    strategy_lines = _build_strategy_lines(quality_summary)
+    if strategy_lines:
+        lines.extend(["", "🧭 *Стратегии:*", *strategy_lines])
+
+    delivery_lines = []
+    vk_summary = delivery_summary.get("vk", {})
+    s3_summary = delivery_summary.get("s3", {})
+    if vk_summary.get("enabled"):
+        delivery_lines.append(_format_delivery_status_line("VK video", vk_summary.get("video_uploaded")))
+        delivery_lines.append(_format_delivery_status_line("VK post", vk_summary.get("post_created")))
+        delivery_lines.append(_format_delivery_status_line("VK comment", vk_summary.get("comment_created")))
+    if s3_summary.get("enabled"):
+        delivery_lines.append(_format_delivery_status_line("S3 upload", s3_summary.get("uploaded")))
+    if delivery_lines:
+        lines.extend(["", "🚚 *Delivery:*", *delivery_lines])
+
+    error_reason = None
+    if vk_summary.get("error"):
+        error_reason = normalize_notification_error_reason(vk_summary.get("error"))
+    elif s3_summary.get("error"):
+        error_reason = normalize_notification_error_reason(s3_summary.get("error"))
+    if error_reason:
+        lines.extend(["", f"Причина partial failure: {format_markdown_code(error_reason)}"])
+
+    return "\n".join(lines)
+
+
+def build_notification_details_payload(job, result):
+    return {
+        "type": "job_result_details",
+        "created_at": datetime.now().astimezone().isoformat(),
+        "job": {
+            "title": job.get("title"),
+            "title_ru": job.get("title_ru"),
+            "season": job.get("season"),
+            "episodes_range": job.get("episodes_range"),
+        },
+        "quality_summary": result.get("quality_summary", {}),
+        "delivery_summary": result.get("delivery_summary", {}),
+    }
+
+
+def trim_notification_details(details_map, limit=50):
+    items = sorted(
+        details_map.items(),
+        key=lambda item: item[1].get("created_at", ""),
+        reverse=True,
+    )
+    return dict(items[:limit])
+
+
+def save_notification_details(payload):
+    state = load_telegram_state()
+    details = dict(state.get("notification_details", {}))
+    token = secrets.token_hex(8)
+    details[token] = payload
+    state["notification_details"] = trim_notification_details(details)
+    save_telegram_state(state)
+    return token
+
+
+def load_notification_details(token):
+    state = load_telegram_state()
+    return state.get("notification_details", {}).get(str(token))
+
+
+def build_notification_details_reply_markup(payload):
+    token = save_notification_details(payload)
+    return build_inline_details_keyboard(token)
+
+
+def format_publish_success_message(job, output_path_or_key=None, quality_summary=None):
     title = get_display_title(job)
     episodes_range = job.get("episodes_range", "?")
     lines = [
@@ -345,12 +496,15 @@ def format_publish_success_message(job, output_path_or_key=None):
         f"🎬 *{escape_markdown_v2(title)}*",
         f"📺 Эпизоды: {format_markdown_code(episodes_range)}",
     ]
+    skip_counts_line = format_skip_counts_line(quality_summary)
+    if skip_counts_line:
+        lines.extend(["", skip_counts_line])
     if output_path_or_key:
         lines.extend(["", f"📦 Результат: {format_markdown_code(output_path_or_key)}"])
     return "\n".join(lines)
 
 
-def format_vk_publish_success_message(job, vk_result):
+def format_vk_publish_success_message(job, vk_result, quality_summary=None):
     title = get_display_title(job)
     episodes_range = job.get("episodes_range", "?")
     comment_created = bool(vk_result.get("comment_created"))
@@ -362,6 +516,10 @@ def format_vk_publish_success_message(job, vk_result):
         f"📺 Эпизоды: {format_markdown_code(episodes_range)}",
         "",
     ]
+    skip_counts_line = format_skip_counts_line(quality_summary)
+    if skip_counts_line:
+        lines.append(skip_counts_line)
+        lines.append("")
     lines.append(
         "✔️ Пост на стене создан"
         if vk_result.get("post_created")
@@ -1261,6 +1419,38 @@ def maybe_handle_jobs_navigation(config, chat_id, text):
 
 
 def handle_update(config, update):
+    callback_query = update.get("callback_query") or {}
+    if callback_query:
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None or not is_allowed_chat(chat_id):
+            return False
+
+        data = str(callback_query.get("data") or "").strip()
+        callback_query_id = callback_query.get("id")
+        if data.startswith("details:"):
+            token = data.split(":", 1)[1].strip()
+            payload = load_notification_details(token)
+            if callback_query_id is not None:
+                answer_callback_query(
+                    callback_query_id,
+                    text="Открываю детали" if payload else "Детали уже недоступны",
+                )
+            if not payload:
+                send_reply(chat_id, "Детали уже недоступны", include_keyboard=True)
+                return True
+
+            if payload.get("type") == "job_result_details":
+                send_formatted_message(chat_id, format_job_details_message(payload), parse_mode="MarkdownV2")
+                return True
+
+            send_reply(chat_id, "Неизвестный тип деталей", include_keyboard=True)
+            return True
+        if callback_query_id is not None:
+            answer_callback_query(callback_query_id, text="Неизвестное действие")
+        return True
+
     message = update.get("message") or {}
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
