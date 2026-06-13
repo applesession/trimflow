@@ -112,7 +112,7 @@ def create_wall_comment(post_id, message, attachments=None):
         "owner_id": -group_id,
         "post_id": post_id,
         "message": message,
-        "from_group": 1,
+        "from_group": group_id,
     }
     if attachments:
         payload["attachments"] = attachments

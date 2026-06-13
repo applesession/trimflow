@@ -265,7 +265,7 @@ class DeliveryTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"VK_GROUP_ID": "236358467"})
     @patch("lib.vk._vk_request")
-    def test_create_wall_comment_uses_from_group_flag(self, mock_vk_request):
+    def test_create_wall_comment_uses_group_id_for_from_group(self, mock_vk_request):
         mock_vk_request.return_value = {"comment_id": 99}
 
         result = create_wall_comment(77, "comment text", attachments="photo-1_2")
@@ -277,7 +277,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(payload["post_id"], 77)
         self.assertEqual(payload["message"], "comment text")
         self.assertEqual(payload["attachments"], "photo-1_2")
-        self.assertEqual(payload["from_group"], 1)
+        self.assertEqual(payload["from_group"], 236358467)
 
 
 if __name__ == "__main__":
