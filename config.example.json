@@ -50,6 +50,7 @@
       "segment_video_codec": "h264_nvenc",
       "segment_preset": "fast",
       "segment_cut_mode": "copy",
+      "segment_max_render_seconds": 150,
       "segment_cq": 18,
       "segment_pixel_format": "yuv420p",
       "audio_codec": "aac"

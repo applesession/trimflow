@@ -120,6 +120,36 @@ def build_hybrid_subsegments(keep_segment, remove_segments, boundary_window):
     return [segment for segment in segments if segment["end"] - segment["start"] > 0]
 
 
+def cap_subsegment_durations(subsegments, max_duration_seconds):
+    if max_duration_seconds is None:
+        return list(subsegments)
+
+    max_duration_seconds = float(max_duration_seconds)
+    if max_duration_seconds <= 0:
+        raise RuntimeError("segment_max_render_seconds must be greater than 0")
+
+    capped = []
+    for subsegment in subsegments:
+        start = float(subsegment["start"])
+        end = float(subsegment["end"])
+        cut_mode = subsegment["cut_mode"]
+
+        if end <= start:
+            continue
+
+        current_start = start
+        while current_start < end:
+            current_end = min(end, current_start + max_duration_seconds)
+            capped.append({
+                "start": current_start,
+                "end": current_end,
+                "cut_mode": cut_mode,
+            })
+            current_start = current_end
+
+    return capped
+
+
 def render_segment_copy(ep_file, segment_output, start, end):
     cmd = [
         "ffmpeg",

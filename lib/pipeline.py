@@ -30,6 +30,7 @@ from lib.helpers import (
     run,
 )
 from lib.media import (
+    cap_subsegment_durations,
     build_hybrid_subsegments,
     build_keep_segments,
     ffprobe_duration,
@@ -209,6 +210,7 @@ def build_segment_encoding(encoding):
         "pixel_format": encoding.get("segment_pixel_format", default_pixel_format),
         "cut_mode": encoding.get("segment_cut_mode", "precise"),
         "boundary_reencode_seconds": float(encoding.get("boundary_reencode_seconds", 3.0)),
+        "max_render_seconds": float(encoding.get("segment_max_render_seconds", 150)),
     }
 
 
@@ -569,6 +571,7 @@ def process_episode(
     kept_segments_manifest = []
     segment_cut_mode = segment_encoding.get("cut_mode", "hybrid")
     boundary_window = segment_encoding.get("boundary_reencode_seconds", 3.0)
+    max_render_seconds = segment_encoding.get("max_render_seconds", 150.0)
 
     for seg_index, (start, end) in enumerate(keep_segments):
         if end <= start:
@@ -586,6 +589,8 @@ def process_episode(
                 "end": end,
                 "cut_mode": segment_cut_mode,
             }]
+
+        subsegments = cap_subsegment_durations(subsegments, max_render_seconds)
 
         for sub_index, subsegment in enumerate(subsegments):
             sub_start = subsegment["start"]

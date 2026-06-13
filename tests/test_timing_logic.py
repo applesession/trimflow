@@ -2,7 +2,7 @@ import unittest
 
 from lib.aniskip import build_quality_summary, summarize_skips
 from lib.detector import build_detector_cache_key, normalize_timing_detection_config
-from lib.media import build_hybrid_subsegments
+from lib.media import build_hybrid_subsegments, cap_subsegment_durations
 from lib.pipeline import build_type_info
 
 
@@ -239,6 +239,48 @@ class TimingLogicTests(unittest.TestCase):
             "end": 104.0,
             "cut_mode": "precise",
         }])
+
+    def test_cap_subsegment_durations_keeps_short_segment(self):
+        result = cap_subsegment_durations([{
+            "start": 100.0,
+            "end": 200.0,
+            "cut_mode": "copy",
+        }], 150.0)
+
+        self.assertEqual(result, [{
+            "start": 100.0,
+            "end": 200.0,
+            "cut_mode": "copy",
+        }])
+
+    def test_cap_subsegment_durations_splits_long_segment_and_preserves_cut_mode(self):
+        result = cap_subsegment_durations([{
+            "start": 0.0,
+            "end": 549.0,
+            "cut_mode": "precise",
+        }], 150.0)
+
+        self.assertEqual(result, [
+            {"start": 0.0, "end": 150.0, "cut_mode": "precise"},
+            {"start": 150.0, "end": 300.0, "cut_mode": "precise"},
+            {"start": 300.0, "end": 450.0, "cut_mode": "precise"},
+            {"start": 450.0, "end": 549.0, "cut_mode": "precise"},
+        ])
+
+    def test_cap_subsegment_durations_applies_after_hybrid_splitting(self):
+        hybrid_segments = build_hybrid_subsegments(
+            (100.0, 400.0),
+            [{"start": 0.0, "end": 100.0}],
+            3.0,
+        )
+
+        result = cap_subsegment_durations(hybrid_segments, 150.0)
+
+        self.assertEqual(result, [
+            {"start": 100.0, "end": 103.0, "cut_mode": "precise"},
+            {"start": 103.0, "end": 253.0, "cut_mode": "copy"},
+            {"start": 253.0, "end": 400.0, "cut_mode": "copy"},
+        ])
 
 
 if __name__ == "__main__":

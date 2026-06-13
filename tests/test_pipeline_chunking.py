@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lib.pipeline import process_job, split_episode_infos_into_chunks
+from lib.pipeline import process_episode, process_job, split_episode_infos_into_chunks
 
 
 class PipelineChunkingTests(unittest.TestCase):
@@ -246,6 +246,70 @@ class PipelineChunkingTests(unittest.TestCase):
         processing_metadata = mock_build_compact_manifest.call_args.kwargs["processing_metadata"]
         self.assertEqual(processing_metadata["chunk_size_episodes"], 2)
         self.assertEqual(processing_metadata["chunks_count"], 2)
+
+    @patch("lib.pipeline.render_segment")
+    @patch("lib.pipeline.print_skip_log")
+    @patch("lib.pipeline.summarize_skips")
+    def test_process_episode_caps_long_compilation_subsegments(
+        self,
+        mock_summarize_skips,
+        mock_print_skip_log,
+        mock_render_segment,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        episode_info = {
+            "episode": 1,
+            "path": "/tmp/ep1.mkv",
+            "duration": 549.0,
+        }
+        detector_context = {"enabled": False, "reason": "disabled"}
+        segment_encoding = {
+            "cut_mode": "copy",
+            "boundary_reencode_seconds": 3.0,
+            "max_render_seconds": 150.0,
+        }
+        anilibria_result = {"segments": [], "request_error": None, "request_urls": []}
+        aniskip_result = {
+            "segments": [],
+            "used_fallback": False,
+            "request_error": None,
+            "requested_episode_length": 549.0,
+            "fallback_from_episode_length": None,
+            "request_urls": [],
+        }
+        mock_summarize_skips.return_value = {"warnings": []}
+
+        cumulative_time, segment_outputs, manifest_episode, timestamp_line = process_episode(
+            episode_info,
+            ["op", "ed"],
+            tmp_dir,
+            0.0,
+            detector_context,
+            segment_encoding,
+            anilibria_result,
+            aniskip_result,
+        )
+
+        self.assertEqual(cumulative_time, 549.0)
+        self.assertEqual(len(segment_outputs), 4)
+        self.assertEqual(mock_render_segment.call_count, 4)
+        render_ranges = [
+            (call.args[2], call.args[3])
+            for call in mock_render_segment.call_args_list
+        ]
+        self.assertEqual(render_ranges, [
+            (0.0, 150.0),
+            (150.0, 300.0),
+            (300.0, 450.0),
+            (450.0, 549.0),
+        ])
+        self.assertEqual(manifest_episode["kept_segments"], [
+            {"start": 0.0, "end": 150.0, "cut_mode": "copy"},
+            {"start": 150.0, "end": 300.0, "cut_mode": "copy"},
+            {"start": 300.0, "end": 450.0, "cut_mode": "copy"},
+            {"start": 450.0, "end": 549.0, "cut_mode": "copy"},
+        ])
+        self.assertEqual(timestamp_line, "00:00:00 - 1 серия")
 
 
 if __name__ == "__main__":
