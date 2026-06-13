@@ -255,13 +255,16 @@ def send_reply(chat_id, text, include_keyboard=True):
     return send_message(chat_id, text, reply_markup=reply_markup)
 
 
-def send_message_to_allowed_chats(text):
+def send_message_to_allowed_chats(text, *, parse_mode=None):
     if not telegram_notifications_enabled():
         return []
 
     results = []
     for chat_id in sorted(parse_allowed_chat_ids()):
-        results.append(send_message(chat_id, text))
+        if parse_mode:
+            results.append(send_formatted_message(chat_id, text, parse_mode=parse_mode))
+        else:
+            results.append(send_message(chat_id, text))
     return results
 
 
@@ -288,6 +291,30 @@ def format_error_message(context, error):
     ])
 
 
+def normalize_notification_error_reason(error):
+    text = str(error or "").strip()
+    if not text:
+        return "неизвестная ошибка"
+
+    gateway_match = re.search(r"(\d{3})\s+Server Error:\s*([^']+?)\s+for url:", text)
+    if gateway_match:
+        return f"{gateway_match.group(1)} {gateway_match.group(2).strip()}"
+
+    http_match = re.search(r"(\d{3}\s+[A-Za-z][A-Za-z -]+)", text)
+    if http_match:
+        return http_match.group(1).strip()
+
+    runtime_vk_match = re.search(r"failed:\s*(.+)$", text)
+    if runtime_vk_match:
+        return runtime_vk_match.group(1).strip()
+
+    return text
+
+
+def format_markdown_code(text):
+    return "`" + str(text or "").replace("\\", "\\\\").replace("`", "\\`") + "`"
+
+
 def format_publish_success_message(job, output_path_or_key=None):
     title = get_display_title(job)
     episodes_range = job.get("episodes_range", "?")
@@ -305,19 +332,43 @@ def format_publish_success_message(job, output_path_or_key=None):
 def format_vk_publish_success_message(job, vk_result):
     title = get_display_title(job)
     episodes_range = job.get("episodes_range", "?")
+    comment_created = bool(vk_result.get("comment_created"))
+    warning_reason = normalize_notification_error_reason(vk_result.get("error")) if vk_result.get("error") else None
     lines = [
-        "Видео загружено в VK",
+        "✅ *Видео опубликовано в VK*",
         "",
-        f"Тайтл: {title}",
-        f"Эпизоды: {episodes_range}",
+        f"🎬 *{escape_markdown_v2(title)}*",
+        f"📺 Эпизоды: {format_markdown_code(episodes_range)}",
+        "",
     ]
-    if vk_result.get("post_created"):
-        lines.append("Пост на стене: создан")
-    if vk_result.get("comment_created"):
-        lines.append("Первый комментарий: создан")
+    lines.append(
+        "✔️ Пост на стене создан"
+        if vk_result.get("post_created")
+        else "✖️ Пост на стене не создан"
+    )
+    lines.append(
+        "✔️ Первый комментарий создан"
+        if comment_created
+        else "✖️ Первый комментарий не создан"
+    )
+    if warning_reason and not comment_created:
+        lines.append(f"└ {escape_markdown_v2(warning_reason)}")
     if vk_result.get("video_url"):
-        lines.append(f"Ссылка: {vk_result['video_url']}")
+        lines.extend(["", f"🔗 {escape_markdown_v2(vk_result['video_url'])}"])
     return "\n".join(lines)
+
+
+def format_vk_publish_error_message(job, error):
+    title = get_display_title(job)
+    reason = normalize_notification_error_reason(error)
+    return "\n".join([
+        "❌ *Ошибка публикации в VK*",
+        "",
+        f"🎬 *{escape_markdown_v2(title)}*",
+        "🔧 Этап: `vk_publish`",
+        "",
+        f"Причина: {format_markdown_code(reason)}",
+    ])
 
 
 def format_datetime_ru(iso_value):

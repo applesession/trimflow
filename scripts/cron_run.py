@@ -26,6 +26,7 @@ from lib.telegram_bot import (  # noqa: E402
     format_discovery_message,
     format_error_message,
     format_publish_success_message,
+    format_vk_publish_error_message,
     format_vk_publish_success_message,
     send_message_to_allowed_chats,
 )
@@ -34,9 +35,9 @@ from lib.telegram_bot import (  # noqa: E402
 load_dotenv()
 
 
-def notify_best_effort(log_path, text, context):
+def notify_best_effort(log_path, text, context, parse_mode=None):
     try:
-        send_message_to_allowed_chats(text)
+        send_message_to_allowed_chats(text, parse_mode=parse_mode)
     except Exception as exc:
         log_line(log_path, f"warning telegram_notify_failed context={context} error={repr(exc)}")
 
@@ -145,19 +146,19 @@ def main():
             log=lambda message: log_line(log_path, message),
             on_job_success=lambda job, result: notify_best_effort(
                 log_path,
-                format_error_message(
-                    f"vk_publish:{job.get('title')}",
+                format_vk_publish_success_message(job, result["delivery_summary"]["vk"])
+                if result.get("delivery_summary", {}).get("vk", {}).get("uploaded")
+                else format_vk_publish_error_message(
+                    job,
                     result.get("delivery_summary", {}).get("vk", {}).get("error"),
                 )
                 if result.get("delivery_summary", {}).get("vk", {}).get("enabled")
-                and result.get("delivery_summary", {}).get("vk", {}).get("error")
-                else format_vk_publish_success_message(job, result["delivery_summary"]["vk"])
-                if result.get("delivery_summary", {}).get("vk", {}).get("uploaded")
                 else format_publish_success_message(
                     job,
                     result.get("output_video"),
                 ),
                 f"job_success:{job.get('title')}",
+                parse_mode="MarkdownV2" if result.get("delivery_summary", {}).get("vk", {}).get("enabled") else None,
             ),
             on_job_failure=lambda job, exc: notify_best_effort(
                 log_path,

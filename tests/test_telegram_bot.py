@@ -20,6 +20,8 @@ from lib.telegram_bot import (
     format_jobs_message,
     format_publish_success_message,
     format_status_message,
+    format_vk_publish_error_message,
+    format_vk_publish_success_message,
     get_jobs_pagination_page,
     get_pending_action,
     get_display_title,
@@ -128,6 +130,41 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Обработка завершена", success)
         self.assertIn("s3://bucket/file.mkv", success)
         self.assertIn("Тестовый тайтл", success)
+
+    def test_vk_publish_success_message_formats_markdown_with_partial_warning(self):
+        message = format_vk_publish_success_message(
+            {
+                "title": "Tokyo Ghoul:re",
+                "title_ru": "Токийский Гуль: Перерождение",
+                "episodes_range": "001-024",
+            },
+            {
+                "post_created": True,
+                "comment_created": False,
+                "error": "HTTPError('504 Server Error: Gateway Time-out for url: https://pu.vk.com/upload.php')",
+            },
+        )
+
+        self.assertIn("✅ *Видео опубликовано в VK*", message)
+        self.assertIn("🎬 *Токийский Гуль: Перерождение*", message)
+        self.assertIn("📺 Эпизоды: `001-024`", message)
+        self.assertIn("✔️ Пост на стене создан", message)
+        self.assertIn("✖️ Первый комментарий не создан", message)
+        self.assertIn("504 Gateway Time\\-out", message)
+
+    def test_vk_publish_error_message_formats_markdown(self):
+        message = format_vk_publish_error_message(
+            {
+                "title": "The Rising of the Shield Hero",
+                "title_ru": "Восхождение героя щита",
+            },
+            "HTTPError('504 Server Error: Gateway Time-out for url: https://pu.vk.com/upload.php')",
+        )
+
+        self.assertIn("❌ *Ошибка публикации в VK*", message)
+        self.assertIn("🎬 *Восхождение героя щита*", message)
+        self.assertIn("🔧 Этап: `vk_publish`", message)
+        self.assertIn("Причина: `504 Gateway Time-out`", message)
 
     def test_status_command_reads_jobs_and_state(self):
         tmp_dir = self.make_workspace_temp_dir()
