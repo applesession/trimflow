@@ -155,8 +155,9 @@ def build_compact_manifest(
     delivery_summary,
     quality_summary,
     manifest_episodes,
+    processing_metadata=None,
 ):
-    return {
+    manifest = {
         "title": job["title"],
         "title_ru": job.get("title_ru"),
         "mal_id": job.get("mal_id"),
@@ -189,6 +190,9 @@ def build_compact_manifest(
             for episode in manifest_episodes
         ],
     }
+    if processing_metadata:
+        manifest["processing"] = processing_metadata
+    return manifest
 
 
 def build_segment_encoding(encoding):
@@ -205,6 +209,37 @@ def build_segment_encoding(encoding):
         "cut_mode": encoding.get("segment_cut_mode", "precise"),
         "boundary_reencode_seconds": float(encoding.get("boundary_reencode_seconds", 3.0)),
     }
+
+
+def normalize_processing_config(job):
+    processing = {
+        "chunk_size_episodes": 12,
+    }
+    processing.update(job.get("processing", {}))
+    try:
+        chunk_size = int(processing.get("chunk_size_episodes", 12))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("processing.chunk_size_episodes must be an integer") from exc
+    if chunk_size < 1:
+        raise RuntimeError("processing.chunk_size_episodes must be at least 1")
+    processing["chunk_size_episodes"] = chunk_size
+    return processing
+
+
+def split_episode_infos_into_chunks(episode_infos, chunk_size):
+    if chunk_size < 1:
+        raise RuntimeError("chunk_size must be at least 1")
+    return [
+        episode_infos[index:index + chunk_size]
+        for index in range(0, len(episode_infos), chunk_size)
+    ]
+
+
+def build_chunk_episode_range(chunk_episode_infos):
+    episodes = [episode_info["episode"] for episode_info in chunk_episode_infos]
+    if not episodes:
+        return None
+    return f"{min(episodes):03d}-{max(episodes):03d}"
 
 
 def build_episode_infos(episode_files):
@@ -682,6 +717,75 @@ def set_runtime_stage(runtime_status_path, stage, **current_job_updates):
     update_runtime_status(runtime_status_path, **payload)
 
 
+def process_episode_chunk(
+    chunk_episode_infos,
+    *,
+    chunk_index,
+    total_chunks,
+    skip_types,
+    temp_dir,
+    cumulative_time,
+    detector_context,
+    segment_encoding,
+    prefetched_anilibria_results,
+    prefetched_aniskip_results,
+    runtime_status_path=None,
+    total_episodes=None,
+):
+    chunk_dir = temp_dir / f"chunk_{chunk_index:03d}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunk_segments = []
+    chunk_manifest_episodes = []
+    chunk_timestamps = []
+    chunk_episode_range = build_chunk_episode_range(chunk_episode_infos)
+
+    for episode_info in chunk_episode_infos:
+        set_runtime_stage(
+            runtime_status_path,
+            "render_segments",
+            current_chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            current_chunk_episode_range=chunk_episode_range,
+            current_episode=episode_info["episode"],
+            total_episodes=total_episodes,
+            current_episode_file=Path(episode_info["path"]).name,
+        )
+        cumulative_time, segment_outputs, manifest_episode, timestamp_line = process_episode(
+            episode_info,
+            skip_types,
+            chunk_dir,
+            cumulative_time,
+            detector_context,
+            segment_encoding,
+            prefetched_anilibria_results[episode_info["episode"]],
+            prefetched_aniskip_results[episode_info["episode"]],
+        )
+        chunk_segments.extend(segment_outputs)
+        chunk_manifest_episodes.append(manifest_episode)
+        chunk_timestamps.append(timestamp_line)
+
+    chunk_concat_file = chunk_dir / "concat.txt"
+    chunk_concat_output = chunk_dir / "concat_output.mkv"
+    set_runtime_stage(
+        runtime_status_path,
+        "concat",
+        current_chunk_index=chunk_index,
+        total_chunks=total_chunks,
+        current_chunk_episode_range=chunk_episode_range,
+        total_episodes=total_episodes,
+        current_episode=None,
+        current_episode_file=None,
+    )
+    create_concat_file(chunk_segments, chunk_concat_file)
+    render_concat(chunk_concat_file, chunk_concat_output)
+    return {
+        "cumulative_time": cumulative_time,
+        "chunk_output": chunk_concat_output,
+        "manifest_episodes": chunk_manifest_episodes,
+        "timestamps": chunk_timestamps,
+    }
+
+
 def process_job(job, runtime_status_path=None):
     title = job["title"]
     title_ru = job.get("title_ru")
@@ -694,6 +798,7 @@ def process_job(job, runtime_status_path=None):
     skip_types = job.get("skip_types", ["op", "ed"])
     encoding = job.get("encoding", {})
     cleanup = job.get("cleanup", {"downloads": True, "temp": True})
+    processing = normalize_processing_config(job)
     timing_detection = normalize_timing_detection_config(job)
     segment_encoding = build_segment_encoding(encoding)
     delivery = build_delivery_config(job)
@@ -727,10 +832,15 @@ def process_job(job, runtime_status_path=None):
         excluded_files = ignored_files + excluded_out_of_range
         log_episode_selection(episode_files, excluded_files)
         episode_infos = build_episode_infos(episode_files)
+        episode_chunks = split_episode_infos_into_chunks(
+            episode_infos,
+            processing["chunk_size_episodes"],
+        )
         set_runtime_stage(
             runtime_status_path,
             "episode_scan",
             total_episodes=len(episode_infos),
+            total_chunks=len(episode_chunks),
         )
         if aniskip_enabled and mal_id:
             prefetched_aniskip_results = build_prefetched_aniskip_results(episode_infos, mal_id, skip_types)
@@ -773,35 +883,45 @@ def process_job(job, runtime_status_path=None):
 
         timestamps = []
         cumulative_time = 0.0
-        all_segments = []
+        chunk_outputs = []
         manifest_episodes = []
 
-        for episode_info in episode_infos:
-            set_runtime_stage(
-                runtime_status_path,
-                "render_segments",
-                current_episode=episode_info["episode"],
+        for chunk_index, chunk_episode_infos in enumerate(episode_chunks, start=1):
+            chunk_result = process_episode_chunk(
+                chunk_episode_infos,
+                chunk_index=chunk_index,
+                total_chunks=len(episode_chunks),
+                skip_types=skip_types,
+                temp_dir=temp_dir,
+                cumulative_time=cumulative_time,
+                detector_context=detector_context,
+                segment_encoding=segment_encoding,
+                prefetched_anilibria_results=prefetched_anilibria_results,
+                prefetched_aniskip_results=prefetched_aniskip_results,
+                runtime_status_path=runtime_status_path,
                 total_episodes=len(episode_infos),
-                current_episode_file=Path(episode_info["path"]).name,
             )
-            cumulative_time, segment_outputs, manifest_episode, timestamp_line = process_episode(
-                episode_info,
-                skip_types,
-                temp_dir,
-                cumulative_time,
-                detector_context,
-                segment_encoding,
-                prefetched_anilibria_results[episode_info["episode"]],
-                prefetched_aniskip_results[episode_info["episode"]],
-            )
-            all_segments.extend(segment_outputs)
-            manifest_episodes.append(manifest_episode)
-            timestamps.append(timestamp_line)
+            cumulative_time = chunk_result["cumulative_time"]
+            chunk_outputs.append(chunk_result["chunk_output"])
+            manifest_episodes.extend(chunk_result["manifest_episodes"])
+            timestamps.extend(chunk_result["timestamps"])
 
-        set_runtime_stage(runtime_status_path, "concat", total_episodes=len(episode_infos))
-        create_concat_file(all_segments, concat_file)
+        set_runtime_stage(
+            runtime_status_path,
+            "concat",
+            total_episodes=len(episode_infos),
+            current_chunk_index=None,
+            current_chunk_episode_range=None,
+        )
+        create_concat_file(chunk_outputs, concat_file)
         render_concat(concat_file, concat_output)
-        set_runtime_stage(runtime_status_path, "final_render", total_episodes=len(episode_infos))
+        set_runtime_stage(
+            runtime_status_path,
+            "final_render",
+            total_episodes=len(episode_infos),
+            current_chunk_index=None,
+            current_chunk_episode_range=None,
+        )
         render_final(
             concat_output=concat_output,
             watermark_path=watermark_path,
@@ -835,6 +955,10 @@ def process_job(job, runtime_status_path=None):
             delivery_summary=delivery_summary,
             quality_summary=quality_summary,
             manifest_episodes=manifest_episodes,
+            processing_metadata={
+                "chunk_size_episodes": processing["chunk_size_episodes"],
+                "chunks_count": len(episode_chunks),
+            },
         )
 
         print("\n[QUALITY SUMMARY]")

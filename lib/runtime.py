@@ -221,6 +221,9 @@ def mark_runtime_job_start(
             "current_episode": None,
             "total_episodes": None,
             "current_episode_file": None,
+            "current_chunk_index": None,
+            "total_chunks": None,
+            "current_chunk_episode_range": None,
         },
     )
 

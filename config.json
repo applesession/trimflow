@@ -8,6 +8,9 @@
       "temp": true,
       "output": true
     },
+    "processing": {
+      "chunk_size_episodes": 12
+    },
     "timing_detection": {
       "enabled": true,
       "mode": "audio_fingerprint",
