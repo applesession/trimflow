@@ -113,17 +113,17 @@ def build_photo_attachment(photo):
     return f"photo{owner_id}_{photo_id}"
 
 
-def create_wall_post(message, video_owner_id, video_id):
+def create_wall_post(message, video_owner_id, video_id, donut_paid_duration=None):
     group_id = int(os.getenv("VK_GROUP_ID"))
-    response = _vk_request(
-        "wall.post",
-        {
-            "owner_id": -group_id,
-            "from_group": 1,
-            "message": message,
-            "attachments": f"video{video_owner_id}_{video_id}",
-        },
-    )
+    params = {
+        "owner_id": -group_id,
+        "from_group": 1,
+        "message": message,
+        "attachments": f"video{video_owner_id}_{video_id}",
+    }
+    if donut_paid_duration is not None:
+        params["donut_paid_duration"] = donut_paid_duration
+    response = _vk_request("wall.post", params)
     if not isinstance(response, dict) or response.get("post_id") is None:
         raise RuntimeError("VK wall.post did not return post_id")
     return response
@@ -168,10 +168,12 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
 
     if wall_post_text:
         try:
+            donut_duration = 315360000 if privacy_view == 5 else None
             post_response = create_wall_post(
                 wall_post_text,
                 result["owner_id"],
                 result["video_id"],
+                donut_paid_duration=donut_duration,
             )
             result["post_created"] = True
             result["post_id"] = post_response.get("post_id")
