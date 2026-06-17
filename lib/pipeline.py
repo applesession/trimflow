@@ -137,6 +137,7 @@ def compact_manifest_episode(manifest_episode, skip_types):
         "cleaned_duration": _round_or_none(cleaned_duration),
         "removed_duration": _round_or_none(max(0.0, original_duration - cleaned_duration)),
         "segment_cut_mode": manifest_episode.get("segment_cut_mode"),
+        "keyframe_aligned": manifest_episode.get("keyframe_aligned", False),
         "timing_info": _compact_timing_info(manifest_episode.get("timing_info", {}), skip_types),
         "skip_summary": manifest_episode.get("skip_summary", {}),
     }
