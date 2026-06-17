@@ -366,7 +366,7 @@ def normalize_notification_error_reason(error):
     if http_match:
         return http_match.group(1).strip()
 
-    runtime_vk_match = re.search(r"failed:\s*(.+)$", text)
+    runtime_vk_match = re.search(r"failed:\s*(.+)", text, re.DOTALL)
     if runtime_vk_match:
         return runtime_vk_match.group(1).strip()
 
