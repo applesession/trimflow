@@ -577,7 +577,7 @@ def process_episode(
 
     ep_keyframes = None
     keyframe_aligned = False
-    if segment_cut_mode == "copy":
+    if segment_cut_mode in ("copy", "hybrid"):
         ep_keyframes = get_keyframes(ep_file)
 
     for seg_index, (start, end) in enumerate(keep_segments):
@@ -599,7 +599,7 @@ def process_episode(
 
         subsegments = cap_subsegment_durations(subsegments, max_render_seconds)
 
-        if segment_cut_mode == "copy" and ep_keyframes:
+        if ep_keyframes:
             subsegments = align_subsegments_to_keyframes(subsegments, ep_keyframes)
             keyframe_aligned = True
 

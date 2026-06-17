@@ -181,13 +181,22 @@ def get_keyframes(video_path):
 
 
 def align_subsegments_to_keyframes(subsegments, keyframes):
-    """Align subsegment boundaries to keyframes to prevent overlap in copy mode.
+    """Align copy-mode subsegment boundaries to keyframes to prevent overlap.
 
     With -c copy, -ss before -i seeks to the nearest keyframe *before* the
-    requested time, causing consecutive subsegments to overlap by up to the
-    keyframe interval. This adjusts each subsegment to start/end at keyframes,
-    so adjacent subsegments meet at the *same* keyframe boundary — no overlap,
-    no gap between them.
+    requested time, causing consecutive copy subsegments to overlap by up to
+    the keyframe interval.
+
+    This only touches subsegments with cut_mode="copy". Precise subsegments
+    (re-encoded) pass through unchanged.
+
+    Internal copy-to-copy boundaries are aligned so adjacent subsegments meet
+    at the *same* keyframe. Edges that touch a precise segment are preserved:
+    - first copy keeps its original start (interface with left precise)
+    - last copy keeps its original end   (interface with right precise)
+
+    This works for both pure-copy mode (all subsegments are "copy") and hybrid
+    mode (mix of "copy" and "precise").
     """
     if not keyframes or not subsegments:
         return subsegments
@@ -205,30 +214,37 @@ def align_subsegments_to_keyframes(subsegments, keyframes):
 
     aligned = []
 
-    for sub in subsegments:
+    for i, sub in enumerate(subsegments):
+        if sub["cut_mode"] != "copy":
+            aligned.append(sub)
+            continue
+
         start = sub["start"]
         end = sub["end"]
 
-        kf_start = kf_before(start)
-        kf_end = kf_before(end)
-
-        if kf_start is None:
-            kf_start = start
-        if kf_end is None:
-            kf_end = end
-
-        if aligned:
+        prev_is_copy = aligned and aligned[-1]["cut_mode"] == "copy"
+        if prev_is_copy:
+            kf_start = kf_before(start)
+            if kf_start is None:
+                kf_start = start
             prev_end = aligned[-1]["end"]
             kf_start = max(kf_start, prev_end)
+        else:
+            kf_start = start
 
-        if kf_end <= kf_start:
-            continue
+        next_is_copy = i + 1 < len(subsegments) and subsegments[i + 1]["cut_mode"] == "copy"
+        kf_end = end
+        if next_is_copy:
+            aligned_end = kf_before(end)
+            if aligned_end is not None:
+                kf_end = aligned_end
 
-        aligned.append({
-            "start": kf_start,
-            "end": kf_end,
-            "cut_mode": sub["cut_mode"],
-        })
+        if kf_end > kf_start:
+            aligned.append({
+                "start": kf_start,
+                "end": kf_end,
+                "cut_mode": sub["cut_mode"],
+            })
 
     return aligned
 
