@@ -55,7 +55,7 @@ def request_video_upload(title, description, privacy_view=0):
     privacy_value = PRIVACY_VIEW_MAP.get(privacy_view, "all")
     params["privacy_view"] = privacy_value
     if privacy_value == "donut":
-        params["donut_level_id"] = 2904
+        params["donut_level_id"] = 2925
     response = _vk_request("video.save", params)
     if not isinstance(response, dict) or not response.get("upload_url"):
         raise RuntimeError("VK video.save did not return upload_url")
