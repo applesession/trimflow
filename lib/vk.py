@@ -18,7 +18,11 @@ def _vk_request(method, params=None):
     data = response.json()
     if "error" in data:
         error = data["error"]
-        raise RuntimeError(f"VK API {method} failed: {error.get('error_code')} {error.get('error_msg')}")
+        import json
+        raise RuntimeError(
+            f"VK API {method} failed: {error.get('error_code')} {error.get('error_msg')}\n"
+            f"request_params: {json.dumps(error.get('request_params', []), indent=2, ensure_ascii=False)}"
+        )
     return data.get("response")
 
 
