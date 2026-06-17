@@ -1,5 +1,6 @@
 import os
 import re
+from urllib.parse import urlencode
 
 import requests
 
@@ -35,6 +36,13 @@ def _build_request_kwargs(timeout, params=None):
             "https": proxy_url,
         }
     return kwargs
+
+
+def _build_request_url(url, params=None):
+    if not params:
+        return url
+    query = urlencode(params, doseq=True)
+    return f"{url}?{query}"
 
 
 def _extract_names(payload):
@@ -140,15 +148,17 @@ def _match_title(payload, title, aliases):
 
 
 def _request(url, params=None):
+    request_url = _build_request_url(url, params)
     response = requests.get(url, **_build_request_kwargs(timeout=20, params=params))
     response.raise_for_status()
-    return response.json(), response.url
+    return response.json(), request_url
 
 
 def _request_text(url, params=None):
+    request_url = _build_request_url(url, params)
     response = requests.get(url, **_build_request_kwargs(timeout=30, params=params))
     response.raise_for_status()
-    return response.text, response.url
+    return response.text, request_url
 
 
 def _normalize_release_list(data):

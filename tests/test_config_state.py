@@ -625,6 +625,47 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["summary"]["created_jobs"], 0)
         self.assertEqual(result["state"]["skipped_items"][0]["reason"], "no_supported_torrent_variant")
 
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_does_not_duplicate_identical_skipped_items_between_runs(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 557, "alias": "broken-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 557,
+                "alias": "broken-release",
+                "is_ongoing": True,
+                "name": {"english": "Broken Release"},
+                "episodes": [{"number": index} for index in range(1, 12)],
+                "torrents": [
+                    {
+                        "label": "VP9 1080p",
+                        "codec": "vp9",
+                        "magnet": "magnet:?xt=urn:btih:vp9557",
+                        "episodes": [{"number": index} for index in range(1, 12)],
+                    }
+                ],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/broken-release",
+        }
+
+        first_result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], build_default_state())
+        second_result = discover_jobs(
+            {"automation": {"download_root": "./downloads"}},
+            [],
+            first_result["state"],
+        )
+
+        self.assertEqual(len(first_result["state"]["skipped_items"]), 1)
+        self.assertEqual(len(second_result["state"]["skipped_items"]), 1)
+        self.assertEqual(second_result["state"]["skipped_items"][0]["reason"], "no_supported_torrent_variant")
+
 
 if __name__ == "__main__":
     unittest.main()

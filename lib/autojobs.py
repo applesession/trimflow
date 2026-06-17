@@ -134,6 +134,36 @@ def build_discovery_job_context(*, provider, release_id, is_ongoing, ongoing_pro
     }
 
 
+def _normalize_skipped_episodes(episodes):
+    return [int(episode) for episode in episodes or []]
+
+
+def build_skipped_item_identity(item):
+    return (
+        str(item.get("release_id") or "").strip(),
+        str(item.get("alias") or "").strip(),
+        str(item.get("title") or "").strip(),
+        str(item.get("reason") or "").strip(),
+        tuple(_normalize_skipped_episodes(item.get("episodes"))),
+    )
+
+
+def record_skipped_item(state, item):
+    skipped_items = list(state.get("skipped_items", []))
+    identity = build_skipped_item_identity(item)
+
+    for index, existing_item in enumerate(skipped_items):
+        if build_skipped_item_identity(existing_item) == identity:
+            updated_item = dict(existing_item)
+            updated_item.update(item)
+            skipped_items[index] = updated_item
+            state["skipped_items"] = skipped_items
+            return
+
+    skipped_items.append(item)
+    state["skipped_items"] = skipped_items
+
+
 def queue_discovered_job(jobs, candidate_job):
     existing_job = find_matching_job(jobs, candidate_job)
     if existing_job is None:
@@ -196,7 +226,7 @@ def discover_jobs(config, jobs, state):
         try:
             selected_variant = select_release_source_variant(release_payload)
         except RuntimeError as exc:
-            updated_state["skipped_items"].append({
+            record_skipped_item(updated_state, {
                 "release_id": release_id,
                 "alias": release_payload.get("alias"),
                 "title": extract_release_title(release_payload),
@@ -225,7 +255,7 @@ def discover_jobs(config, jobs, state):
             )
         except RuntimeError as exc:
             mark_release_episodes_seen(updated_state, release_id, new_episode_numbers)
-            updated_state["skipped_items"].append({
+            record_skipped_item(updated_state, {
                 "release_id": release_id,
                 "alias": release_payload.get("alias"),
                 "title": extract_release_title(release_payload),
