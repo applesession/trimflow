@@ -22,7 +22,16 @@ def _vk_request(method, params=None):
     return data.get("response")
 
 
-def request_video_upload(title, description):
+def request_video_upload(title, description, privacy_view=0):
+    """Request video upload URL.
+
+    privacy_view controls who can view the uploaded video:
+        0 — all users
+        1 — group members only
+        2 — editors and admins only
+        3 — by link
+        5 — donut subscribers only
+    """
     group_id = int(os.getenv("VK_GROUP_ID"))
     response = _vk_request(
         "video.save",
@@ -31,7 +40,7 @@ def request_video_upload(title, description):
             "name": title,
             "description": description,
             "wallpost": 0,
-            "is_private": 0,
+            "privacy_view": int(privacy_view),
         },
     )
     if not isinstance(response, dict) or not response.get("upload_url"):
@@ -122,8 +131,8 @@ def create_wall_comment(post_id, message, attachments=None):
     return response
 
 
-def publish_video_to_vk(local_path, title, description, wall_post_text=None, comment_text=None, comment_banner_path=None):
-    save_response = request_video_upload(title, description)
+def publish_video_to_vk(local_path, title, description, wall_post_text=None, comment_text=None, comment_banner_path=None, privacy_view=0):
+    save_response = request_video_upload(title, description, privacy_view=privacy_view)
     upload_response = upload_video_file(save_response["upload_url"], local_path)
     result = {
         "enabled": True,

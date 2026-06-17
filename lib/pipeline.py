@@ -728,6 +728,7 @@ def build_delivery_config(job):
         "vk_enabled": True,
         "vk_wall_post_enabled": True,
         "vk_comment_enabled": True,
+        "vk_privacy_view": 0,
         "vk_comment_banner_path": "./assets/banner.png",
         "vk_comment_template": "",
     }
@@ -739,6 +740,7 @@ def build_delivery_config(job):
     delivery["vk_enabled"] = bool(delivery.get("vk_enabled", True))
     delivery["vk_wall_post_enabled"] = bool(delivery.get("vk_wall_post_enabled", True))
     delivery["vk_comment_enabled"] = bool(delivery.get("vk_comment_enabled", True))
+    delivery["vk_privacy_view"] = int(delivery.get("vk_privacy_view", 0))
     return delivery
 
 
@@ -1024,6 +1026,7 @@ def process_job(job, runtime_status_path=None):
                         wall_post_text=wall_post_text,
                         comment_text=comment_text,
                         comment_banner_path=delivery.get("vk_comment_banner_path"),
+                        privacy_view=delivery.get("vk_privacy_view", 0),
                     )
                     delivery_summary["vk"] = build_vk_summary(
                         enabled=True,
@@ -1283,6 +1286,7 @@ def process_job(job, runtime_status_path=None):
                     wall_post_text=wall_post_text,
                     comment_text=comment_text,
                     comment_banner_path=delivery.get("vk_comment_banner_path"),
+                    privacy_view=delivery.get("vk_privacy_view", 0),
                 )
                 delivery_summary["vk"] = build_vk_summary(
                     enabled=True,

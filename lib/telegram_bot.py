@@ -1270,17 +1270,21 @@ def normalize_command_text(text):
     return aliases.get(normalized, normalized)
 
 
+VALID_PRIVACY_VALUES = {0, 1, 2, 3, 5}
+
+
 def parse_add_command(text):
     if not text.startswith("/add "):
-        raise RuntimeError("Команда должна начинаться с /add ")
+        raise RuntimeError("Команда должна начинаться с /add")
 
     raw_payload = text[len("/add "):]
     parts = [part.strip() for part in re.split(r"\s*;\s*", raw_payload)]
-    if len(parts) not in {3, 4}:
-        raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; 2")
+    if len(parts) not in {3, 4, 5}:
+        raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; 1 ; 5")
 
     title, episodes_range, magnet = parts[:3]
-    season = parts[3] if len(parts) == 4 else "1"
+    season = parts[3] if len(parts) >= 4 else "1"
+    privacy_view = parts[4] if len(parts) == 5 else "0"
 
     if not title:
         raise RuntimeError("Нужно указать название тайтла")
@@ -1295,18 +1299,26 @@ def parse_add_command(text):
     if season_value < 1:
         raise RuntimeError("Сезон должен быть не меньше 1")
 
+    try:
+        privacy_value = int(str(privacy_view).strip())
+    except ValueError as exc:
+        raise RuntimeError("privacy_view должен быть целым числом") from exc
+    if privacy_value not in VALID_PRIVACY_VALUES:
+        raise RuntimeError(f"privacy_view должен быть одним из: {', '.join(map(str, sorted(VALID_PRIVACY_VALUES)))}")
+
     return {
         "title": title,
         "season": season_value,
         "episodes_range": format_episodes_range(validated_episodes),
         "magnet": magnet,
+        "privacy_view": privacy_value,
     }
 
 
 def build_manual_job(command_payload):
     title = command_payload["title"]
     slug = ensure_non_empty_slug(title)
-    return {
+    job = {
         "title": title,
         "season": command_payload["season"],
         "episodes_range": command_payload["episodes_range"],
@@ -1316,6 +1328,10 @@ def build_manual_job(command_payload):
             "download_dir": f"downloads/{slug}",
         },
     }
+    privacy_view = command_payload.get("privacy_view", 0)
+    if privacy_view != 0:
+        job["delivery"] = {"vk_privacy_view": privacy_view}
+    return job
 
 
 def add_job_from_command(config, text):
@@ -1350,13 +1366,17 @@ def format_add_result(result):
             f"Эпизоды: {job['episodes_range']}",
         ])
 
-    return "\n".join([
+    privacy_view = job.get("delivery", {}).get("vk_privacy_view", 0)
+    privacy_labels = {0: "всем", 1: "участникам", 2: "редакторам", 3: "по ссылке", 5: "донам"}
+    lines = [
         "Аниме добавлено",
         "",
         f"Тайтл: {get_display_title(job)}",
         f"Сезон: {job['season']}",
         f"Эпизоды: {job['episodes_range']}",
-    ])
+        f"VK доступ: {privacy_labels.get(privacy_view, privacy_view)}",
+    ]
+    return "\n".join(lines)
 
 
 def build_help_message():
@@ -1374,7 +1394,11 @@ def build_help_message():
         "/retry <номер> - повторно поставить аниме в очередь",
         "",
         "Пример:",
-        "/add Мой тайтл ; 001-003 ; magnet:?xt=urn:btih:... ; 1",
+        "/add Мой тайтл ; 001-003 ; magnet:?xt=urn:btih:... ; 1 ; 5",
+        "",
+        "Параметр privacy (опционально, 0 по умолчанию):",
+        "  0 — всем, 1 — участникам, 2 — редакторам,",
+        "  3 — по ссылке, 5 — донатам",
     ])
 
 
