@@ -30,10 +30,12 @@ from lib.helpers import (
     run,
 )
 from lib.media import (
+    align_subsegments_to_keyframes,
     cap_subsegment_durations,
     build_hybrid_subsegments,
     build_keep_segments,
     ffprobe_duration,
+    get_keyframes,
     render_concat,
     render_final,
     render_segment,
@@ -573,6 +575,11 @@ def process_episode(
     boundary_window = segment_encoding.get("boundary_reencode_seconds", 3.0)
     max_render_seconds = segment_encoding.get("max_render_seconds", 150.0)
 
+    ep_keyframes = None
+    keyframe_aligned = False
+    if segment_cut_mode == "copy":
+        ep_keyframes = get_keyframes(ep_file)
+
     for seg_index, (start, end) in enumerate(keep_segments):
         if end <= start:
             continue
@@ -591,6 +598,10 @@ def process_episode(
             }]
 
         subsegments = cap_subsegment_durations(subsegments, max_render_seconds)
+
+        if segment_cut_mode == "copy" and ep_keyframes:
+            subsegments = align_subsegments_to_keyframes(subsegments, ep_keyframes)
+            keyframe_aligned = True
 
         for sub_index, subsegment in enumerate(subsegments):
             sub_start = subsegment["start"]
@@ -615,6 +626,7 @@ def process_episode(
         "original_duration": duration,
         "cleaned_duration": cleaned_duration,
         "segment_cut_mode": segment_cut_mode,
+        "keyframe_aligned": keyframe_aligned,
         "boundary_reencode_seconds": boundary_window,
         "timing_info": {
             **timing_info,

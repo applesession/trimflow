@@ -150,6 +150,89 @@ def cap_subsegment_durations(subsegments, max_duration_seconds):
     return capped
 
 
+def get_keyframes(video_path):
+    """Get sorted list of keyframe PTS timestamps from a video file.
+
+    Uses ffprobe to detect all keyframes (I-frames). Empty list on error.
+    """
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time",
+            "-of", "csv=p=0",
+            "-skip_frame", "nokey",
+            str(video_path),
+        ]
+        result = subprocess.check_output(cmd, encoding="utf-8", errors="replace").strip()
+        if not result:
+            return []
+        times = []
+        for line in result.split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    times.append(float(line))
+                except ValueError:
+                    pass
+        return times
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return []
+
+
+def align_subsegments_to_keyframes(subsegments, keyframes):
+    """Align subsegment boundaries to keyframes to prevent overlap in copy mode.
+
+    With -c copy, -ss before -i seeks to the nearest keyframe *before* the
+    requested time, causing consecutive subsegments to overlap by up to the
+    keyframe interval. This adjusts each subsegment to start/end at keyframes,
+    so adjacent subsegments meet at the *same* keyframe boundary — no overlap,
+    no gap between them.
+    """
+    if not keyframes or not subsegments:
+        return subsegments
+
+    keyframes = sorted(set(keyframes))
+
+    def kf_before(time):
+        result = None
+        for kf in keyframes:
+            if kf <= time + 0.001:
+                result = kf
+            else:
+                break
+        return result
+
+    aligned = []
+
+    for sub in subsegments:
+        start = sub["start"]
+        end = sub["end"]
+
+        kf_start = kf_before(start)
+        kf_end = kf_before(end)
+
+        if kf_start is None:
+            kf_start = start
+        if kf_end is None:
+            kf_end = end
+
+        if aligned:
+            prev_end = aligned[-1]["end"]
+            kf_start = max(kf_start, prev_end)
+
+        if kf_end <= kf_start:
+            continue
+
+        aligned.append({
+            "start": kf_start,
+            "end": kf_end,
+            "cut_mode": sub["cut_mode"],
+        })
+
+    return aligned
+
+
 def render_segment_copy(ep_file, segment_output, start, end):
     cmd = [
         "ffmpeg",
