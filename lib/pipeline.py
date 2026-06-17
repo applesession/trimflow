@@ -30,8 +30,8 @@ from lib.helpers import (
     run,
 )
 from lib.media import (
-    align_subsegments_to_keyframes,
     cap_subsegment_durations,
+    snap_remove_segments_to_keyframes,
     build_hybrid_subsegments,
     build_keep_segments,
     ffprobe_duration,
@@ -568,10 +568,6 @@ def process_episode(
         review_required=timing_info["review_required"],
     )
 
-    keep_segments = build_keep_segments(duration, remove_segments)
-    cleaned_duration = 0.0
-    segment_outputs = []
-    kept_segments_manifest = []
     segment_cut_mode = segment_encoding.get("cut_mode", "hybrid")
     boundary_window = segment_encoding.get("boundary_reencode_seconds", 3.0)
     max_render_seconds = segment_encoding.get("max_render_seconds", 150.0)
@@ -580,6 +576,15 @@ def process_episode(
     keyframe_aligned = False
     if segment_cut_mode in ("copy", "hybrid"):
         ep_keyframes = get_keyframes(ep_file)
+
+        if ep_keyframes:
+            remove_segments = snap_remove_segments_to_keyframes(remove_segments, ep_keyframes)
+            keyframe_aligned = True
+
+    keep_segments = build_keep_segments(duration, remove_segments)
+    cleaned_duration = 0.0
+    segment_outputs = []
+    kept_segments_manifest = []
 
     for seg_index, (start, end) in enumerate(keep_segments):
         if end <= start:
@@ -598,11 +603,8 @@ def process_episode(
                 "cut_mode": segment_cut_mode,
             }]
 
-        subsegments = cap_subsegment_durations(subsegments, max_render_seconds)
-
-        if ep_keyframes:
-            subsegments = align_subsegments_to_keyframes(subsegments, ep_keyframes)
-            keyframe_aligned = True
+        if segment_cut_mode != "copy":
+            subsegments = cap_subsegment_durations(subsegments, max_render_seconds)
 
         for sub_index, subsegment in enumerate(subsegments):
             sub_start = subsegment["start"]

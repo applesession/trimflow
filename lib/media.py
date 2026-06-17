@@ -180,31 +180,24 @@ def get_keyframes(video_path):
         return []
 
 
-def align_subsegments_to_keyframes(subsegments, keyframes):
-    """Align copy-mode subsegment boundaries to keyframes to prevent overlap.
+def snap_remove_segments_to_keyframes(remove_segments, keyframes):
+    """Snap remove segment boundaries to nearest keyframes.
 
-    With -c copy, -ss before -i seeks to the nearest keyframe *before* the
-    requested time, causing consecutive copy subsegments to overlap by up to
-    the keyframe interval.
+    For each remove segment [s, e]:
+    - start rounds DOWN to nearest keyframe at or before s
+    - end rounds UP   to nearest keyframe at or after e
 
-    This only touches subsegments with cut_mode="copy". Precise subsegments
-    (re-encoded) pass through unchanged.
-
-    Internal copy-to-copy boundaries are aligned so adjacent subsegments meet
-    at the *same* keyframe. Edges that touch a precise segment are preserved:
-    - first copy keeps its original start (interface with left precise)
-    - last copy keeps its original end   (interface with right precise)
-
-    This works for both pure-copy mode (all subsegments are "copy") and hybrid
-    mode (mix of "copy" and "precise").
+    This ensures keep_segments between removes start and end on keyframes,
+    eliminating duplicates in -c copy mode at the cost of ~1 keyframe
+    interval of imprecision at each OP/ED boundary.
     """
-    if not keyframes or not subsegments:
-        return subsegments
+    if not keyframes or not remove_segments:
+        return list(remove_segments)
 
     keyframes = sorted(set(keyframes))
 
     def kf_before(time):
-        result = None
+        result = keyframes[0]
         for kf in keyframes:
             if kf <= time + 0.001:
                 result = kf
@@ -212,41 +205,23 @@ def align_subsegments_to_keyframes(subsegments, keyframes):
                 break
         return result
 
-    aligned = []
+    def kf_after(time):
+        for kf in keyframes:
+            if kf >= time - 0.001:
+                return kf
+        return keyframes[-1]
 
-    for i, sub in enumerate(subsegments):
-        if sub["cut_mode"] != "copy":
-            aligned.append(sub)
-            continue
-
-        start = sub["start"]
-        end = sub["end"]
-
-        prev_is_copy = aligned and aligned[-1]["cut_mode"] == "copy"
-        if prev_is_copy:
-            kf_start = kf_before(start)
-            if kf_start is None:
-                kf_start = start
-            prev_end = aligned[-1]["end"]
-            kf_start = max(kf_start, prev_end)
-        else:
-            kf_start = start
-
-        next_is_copy = i + 1 < len(subsegments) and subsegments[i + 1]["cut_mode"] == "copy"
-        kf_end = end
-        if next_is_copy:
-            aligned_end = kf_before(end)
-            if aligned_end is not None:
-                kf_end = aligned_end
-
-        if kf_end > kf_start:
-            aligned.append({
-                "start": kf_start,
-                "end": kf_end,
-                "cut_mode": sub["cut_mode"],
+    snapped = []
+    for seg in remove_segments:
+        snapped_start = kf_before(seg["start"])
+        snapped_end = kf_after(seg["end"])
+        if snapped_end > snapped_start:
+            snapped.append({
+                "start": snapped_start,
+                "end": snapped_end,
             })
 
-    return aligned
+    return snapped
 
 
 def render_segment_copy(ep_file, segment_output, start, end):
