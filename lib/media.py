@@ -9,34 +9,75 @@ def detect_audio_streams(video_path):
         cmd = [
             "ffprobe", "-v", "error",
             "-select_streams", "a",
-            "-show_entries", "stream=index:stream_tags=language",
+            "-show_entries", "stream=index:stream_tags=language,title,handler_name:stream_disposition=default",
             "-of", "json",
             str(video_path),
         ]
         result = subprocess.check_output(cmd, encoding="utf-8", errors="replace")
         data = json.loads(result)
         streams = []
-        for stream in data.get("streams", []):
+        for audio_index, stream in enumerate(data.get("streams", [])):
             index = stream.get("index", 0)
             tags = stream.get("tags", {}) or {}
-            language = tags.get("language")
-            streams.append((index, language))
+            disposition = stream.get("disposition", {}) or {}
+            streams.append({
+                "audio_index": audio_index,
+                "stream_index": index,
+                "language": tags.get("language"),
+                "title": tags.get("title"),
+                "handler_name": tags.get("handler_name"),
+                "is_default": bool(disposition.get("default", 0)),
+            })
         return streams
     except (subprocess.CalledProcessError, FileNotFoundError, OSError, json.JSONDecodeError):
         return []
+
+
+def _build_language_variants(preferred_language):
+    normalized = str(preferred_language or "").strip().lower()
+    alias_map = {
+        "rus": {"rus", "ru", "russian", "russkiy", "рус", "русский", "дубляж", "озвучка"},
+        "ru": {"rus", "ru", "russian", "russkiy", "рус", "русский", "дубляж", "озвучка"},
+        "russian": {"rus", "ru", "russian", "russkiy", "рус", "русский", "дубляж", "озвучка"},
+        "jpn": {"jpn", "jp", "japanese", "nihongo", "япон", "японский"},
+        "jp": {"jpn", "jp", "japanese", "nihongo", "япон", "японский"},
+        "japanese": {"jpn", "jp", "japanese", "nihongo", "япон", "японский"},
+    }
+    if normalized in alias_map:
+        return alias_map[normalized]
+    return {normalized} if normalized else set()
 
 
 def get_preferred_audio_stream(video_path, preferred_language="rus"):
     streams = detect_audio_streams(video_path)
     if not streams:
         return 0
-    preferred_variants = {preferred_language.lower()}
-    for variant in [preferred_language, "rus", "ru", "russian"]:
-        preferred_variants.add(variant.lower())
-    for index, lang in streams:
-        if lang and lang.strip().lower() in preferred_variants:
-            return index
-    return streams[0][0]
+
+    preferred_variants = _build_language_variants(preferred_language)
+    best_match = None
+
+    for stream in streams:
+        score = 0
+        language = str(stream.get("language") or "").strip().lower()
+        title = str(stream.get("title") or "").strip().lower()
+        handler_name = str(stream.get("handler_name") or "").strip().lower()
+        searchable_text = " ".join(part for part in [language, title, handler_name] if part)
+
+        if language in preferred_variants:
+            score += 100
+        elif any(variant and variant in searchable_text for variant in preferred_variants):
+            score += 60
+
+        if stream.get("is_default"):
+            score += 5
+
+        candidate = (score, -stream["audio_index"], stream["audio_index"])
+        if best_match is None or candidate > best_match:
+            best_match = candidate
+
+    if best_match and best_match[0] > 0:
+        return best_match[2]
+    return streams[0]["audio_index"]
 
 
 def ffprobe_duration(path):
