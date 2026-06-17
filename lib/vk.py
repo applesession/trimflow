@@ -22,6 +22,15 @@ def _vk_request(method, params=None):
     return data.get("response")
 
 
+PRIVACY_VIEW_MAP = {
+    0: "all",
+    1: "members",
+    2: "editors",
+    3: "by_link",
+    5: "donut",
+}
+
+
 def request_video_upload(title, description, privacy_view=0):
     """Request video upload URL.
 
@@ -33,16 +42,15 @@ def request_video_upload(title, description, privacy_view=0):
         5 — donut subscribers only
     """
     group_id = int(os.getenv("VK_GROUP_ID"))
-    response = _vk_request(
-        "video.save",
-        {
-            "group_id": group_id,
-            "name": title,
-            "description": description,
-            "wallpost": 0,
-            "privacy_view": int(privacy_view),
-        },
-    )
+    params = {
+        "group_id": group_id,
+        "name": title,
+        "description": description,
+        "wallpost": 0,
+        "is_private": 0,
+        "privacy_view": [PRIVACY_VIEW_MAP.get(privacy_view, "all")],
+    }
+    response = _vk_request("video.save", params)
     if not isinstance(response, dict) or not response.get("upload_url"):
         raise RuntimeError("VK video.save did not return upload_url")
     return response
