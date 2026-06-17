@@ -168,7 +168,7 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
 
     if wall_post_text:
         try:
-            donut_duration = 315360000 if privacy_view == 5 else None
+            donut_duration = -1 if privacy_view == 5 else None
             post_response = create_wall_post(
                 wall_post_text,
                 result["owner_id"],
