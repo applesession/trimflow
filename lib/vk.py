@@ -47,8 +47,7 @@ def request_video_upload(title, description, privacy_view=0):
         "name": title,
         "description": description,
         "wallpost": 0,
-        "is_private": 0,
-        "privacy_view": [PRIVACY_VIEW_MAP.get(privacy_view, "all")],
+        "privacy_view": PRIVACY_VIEW_MAP.get(privacy_view, "all"),
     }
     response = _vk_request("video.save", params)
     if not isinstance(response, dict) or not response.get("upload_url"):
