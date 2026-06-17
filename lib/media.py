@@ -1,6 +1,42 @@
+import json
 import subprocess
 
 from lib.helpers import run
+
+
+def detect_audio_streams(video_path):
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index:stream_tags=language",
+            "-of", "json",
+            str(video_path),
+        ]
+        result = subprocess.check_output(cmd, encoding="utf-8", errors="replace")
+        data = json.loads(result)
+        streams = []
+        for stream in data.get("streams", []):
+            index = stream.get("index", 0)
+            tags = stream.get("tags", {}) or {}
+            language = tags.get("language")
+            streams.append((index, language))
+        return streams
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, json.JSONDecodeError):
+        return []
+
+
+def get_preferred_audio_stream(video_path, preferred_language="rus"):
+    streams = detect_audio_streams(video_path)
+    if not streams:
+        return 0
+    preferred_variants = {preferred_language.lower()}
+    for variant in [preferred_language, "rus", "ru", "russian"]:
+        preferred_variants.add(variant.lower())
+    for index, lang in streams:
+        if lang and lang.strip().lower() in preferred_variants:
+            return index
+    return streams[0][0]
 
 
 def ffprobe_duration(path):
@@ -224,7 +260,7 @@ def snap_remove_segments_to_keyframes(remove_segments, keyframes):
     return snapped
 
 
-def render_segment_copy(ep_file, segment_output, start, end):
+def render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=0):
     cmd = [
         "ffmpeg",
         "-y",
@@ -232,7 +268,7 @@ def render_segment_copy(ep_file, segment_output, start, end):
         "-to", f"{end:.3f}",
         "-i", ep_file,
         "-map", "0:v:0",
-        "-map", "0:a:0?",
+        "-map", f"0:a:{audio_stream_index}?",
         "-map", "0:s?",
         "-c", "copy",
         "-c:s", "copy",
@@ -242,7 +278,7 @@ def render_segment_copy(ep_file, segment_output, start, end):
     run(cmd)
 
 
-def render_segment_precise(ep_file, segment_output, start, end, segment_encoding=None):
+def render_segment_precise(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
     duration = max(0.0, end - start)
     if duration <= 0:
         raise RuntimeError(f"Invalid precise segment duration for {ep_file}: {start} -> {end}")
@@ -262,7 +298,7 @@ def render_segment_precise(ep_file, segment_output, start, end, segment_encoding
         "-to", f"{end:.3f}",
         "-i", ep_file,
         "-map", "0:v:0",
-        "-map", "0:a:0?",
+        "-map", f"0:a:{audio_stream_index}?",
         "-map", "0:s?",
         "-c:v", video_codec,
     ]
@@ -285,20 +321,20 @@ def render_segment_precise(ep_file, segment_output, start, end, segment_encoding
     run(cmd)
 
 
-def render_segment(ep_file, segment_output, start, end, segment_encoding=None):
+def render_segment(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
     duration = max(0.0, end - start)
     if duration <= 0:
         raise RuntimeError(f"Invalid segment duration for {ep_file}: {start} -> {end}")
 
     cut_mode = (segment_encoding or {}).get("cut_mode", "hybrid")
     if cut_mode == "precise":
-        render_segment_precise(ep_file, segment_output, start, end, segment_encoding=segment_encoding)
+        render_segment_precise(ep_file, segment_output, start, end, segment_encoding=segment_encoding, audio_stream_index=audio_stream_index)
         return
 
-    render_segment_copy(ep_file, segment_output, start, end)
+    render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=audio_stream_index)
 
 
-def render_concat(concat_file, concat_output):
+def render_concat(concat_file, concat_output, audio_stream_index=0):
     fast_path = [
         "ffmpeg",
         "-y",
@@ -324,7 +360,7 @@ def render_concat(concat_file, concat_output):
         "-safe", "0",
         "-i", concat_file,
         "-map", "0:v?",
-        "-map", "0:a:0?",
+        "-map", f"0:a:{audio_stream_index}?",
         "-map", "0:s?",
         "-c:v", "libx264",
         "-preset", "ultrafast",
@@ -336,7 +372,7 @@ def render_concat(concat_file, concat_output):
     run(safe_path)
 
 
-def render_final(concat_output, watermark_path, output_video, encoding):
+def render_final(concat_output, watermark_path, output_video, encoding, audio_stream_index=0):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
     cq = str(encoding.get("cq", 23))
@@ -355,7 +391,7 @@ def render_final(concat_output, watermark_path, output_video, encoding):
         "-i", watermark_path,
         "-filter_complex", overlay_filter,
         "-map", "[v]",
-        "-map", "0:a:0?",
+        "-map", f"0:a:{audio_stream_index}?",
         "-map", "0:s?",
         "-c:v", video_codec,
     ]

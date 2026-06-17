@@ -31,6 +31,7 @@ from lib.helpers import (
 )
 from lib.media import (
     cap_subsegment_durations,
+    get_preferred_audio_stream,
     snap_remove_segments_to_keyframes,
     build_hybrid_subsegments,
     build_keep_segments,
@@ -533,6 +534,7 @@ def process_episode(
     segment_encoding,
     anilibria_result,
     aniskip_result,
+    preferred_language="rus",
 ):
     detected_ep = episode_info["episode"]
     ep_file = Path(episode_info["path"])
@@ -561,6 +563,7 @@ def process_episode(
         per_type,
         request_error=aniskip_result["request_error"],
     )
+    audio_stream_index = get_preferred_audio_stream(ep_file, preferred_language)
     print_skip_log(
         detected_ep,
         skip_summary,
@@ -611,7 +614,7 @@ def process_episode(
             sub_end = subsegment["end"]
             segment_output = temp_dir / f"ep{detected_ep:03d}_seg{seg_index:03d}_{sub_index:03d}.mkv"
             sub_encoding = {**segment_encoding, "cut_mode": subsegment["cut_mode"]}
-            render_segment(ep_file, segment_output, sub_start, sub_end, segment_encoding=sub_encoding)
+            render_segment(ep_file, segment_output, sub_start, sub_end, segment_encoding=sub_encoding, audio_stream_index=audio_stream_index)
 
             seg_duration = sub_end - sub_start
             cleaned_duration += seg_duration
@@ -816,6 +819,7 @@ def process_episode_chunk(
     prefetched_aniskip_results,
     runtime_status_path=None,
     total_episodes=None,
+    preferred_language="rus",
 ):
     chunk_dir = temp_dir / f"chunk_{chunk_index:03d}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -844,6 +848,7 @@ def process_episode_chunk(
             segment_encoding,
             prefetched_anilibria_results[episode_info["episode"]],
             prefetched_aniskip_results[episode_info["episode"]],
+            preferred_language=preferred_language,
         )
         chunk_segments.extend(segment_outputs)
         chunk_manifest_episodes.append(manifest_episode)
@@ -890,6 +895,7 @@ def process_job(job, runtime_status_path=None):
     timing_providers = job.get("timing_providers", {})
     anilibria_enabled = timing_providers.get("anilibria_enabled", True)
     aniskip_enabled = timing_providers.get("aniskip_enabled", False)
+    preferred_language = str(job.get("preferred_audio_language", "rus")).strip().lower() or "rus"
 
     title_slug = ensure_non_empty_slug(title)
     allowed_episodes = parse_episodes_range(episodes_range)
@@ -962,11 +968,13 @@ def process_job(job, runtime_status_path=None):
                 total_chunks=None,
                 current_chunk_episode_range=None,
             )
+            episode_audio_index = get_preferred_audio_stream(Path(episode_path), preferred_language)
             render_final(
                 concat_output=Path(episode_path),
                 watermark_path=watermark_path,
                 output_video=output_video,
                 encoding={**encoding, "audio_codec": "aac"},
+                audio_stream_index=episode_audio_index,
             )
 
             write_outputs(output_txt, output_manifest, timestamps, manifest)
@@ -1162,6 +1170,7 @@ def process_job(job, runtime_status_path=None):
                 prefetched_aniskip_results=prefetched_aniskip_results,
                 runtime_status_path=runtime_status_path,
                 total_episodes=len(episode_infos),
+                preferred_language=preferred_language,
             )
             cumulative_time = chunk_result["cumulative_time"]
             chunk_outputs.append(chunk_result["chunk_output"])
