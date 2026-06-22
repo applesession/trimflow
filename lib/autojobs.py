@@ -584,11 +584,12 @@ def _iter_release_variant_payloads(release_payload):
 def extract_release_source_variants(release_payload):
     variants = []
     deduped = set()
+    release_episodes = collect_release_episode_numbers(release_payload)
 
     for candidate in _iter_release_variant_payloads(release_payload):
         magnet = _find_magnet_value(candidate)
         codec = _extract_variant_codec(candidate)
-        episodes = collect_release_episode_numbers(candidate)
+        episodes = release_episodes
         label = _extract_variant_label(candidate)
         resolution = _parse_variant_resolution(candidate)
 
