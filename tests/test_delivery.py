@@ -330,11 +330,8 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(mock_request_upload.call_args.kwargs["privacy_view"], 3)
         self.assertEqual(mock_create_post.call_args.kwargs["group_id"], 236358467)
         self.assertEqual(mock_create_post.call_args.kwargs["donut_paid_duration"], -1)
-        self.assertNotIn("attachments", mock_create_post.call_args.kwargs)
-        self.assertEqual(
-            mock_create_post.call_args.args[0],
-            "Private Title\n\nhttps://vk.com/video-236358999_42",
-        )
+        self.assertEqual(mock_create_post.call_args.kwargs["attachments"], "video-236358999_42")
+        self.assertEqual(mock_create_post.call_args.args[0], "Private Title")
 
     @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467", "VK_PRIVATE_GROUP_ID": "239761756"})
     @patch("lib.vk.create_wall_post")
@@ -366,9 +363,10 @@ class DeliveryTests(unittest.TestCase):
 
         self.assertEqual(result["video_url"], "https://vk.ru/video-239761756_456239017")
         self.assertTrue(result["post_created"])
+        self.assertEqual(mock_create_post.call_args.args[0], "Fallback Title")
         self.assertEqual(
-            mock_create_post.call_args.args[0],
-            "Fallback Title\n\nhttps://vk.ru/video-239761756_456239017",
+            mock_create_post.call_args.kwargs["attachments"],
+            "video-239761756_456239017",
         )
 
 

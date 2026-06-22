@@ -67,6 +67,17 @@ def build_vk_video_url(owner_id, video_id, *, domain="vk.ru"):
     return f"https://{domain}/video{normalized_owner_id}_{normalized_video_id}"
 
 
+def build_vk_video_attachment(owner_id, video_id):
+    if owner_id is None or video_id is None:
+        return None
+    try:
+        normalized_owner_id = int(owner_id)
+        normalized_video_id = int(video_id)
+    except (TypeError, ValueError):
+        return None
+    return f"video{normalized_owner_id}_{normalized_video_id}"
+
+
 def request_video_upload(title, description, privacy_view=0, *, group_id=None):
     """Request video upload URL.
 
@@ -300,14 +311,16 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
         result["error"] = result["errors_by_stage"]["video_upload"]
         return result
 
-    post_message = "\n\n".join(part for part in [str(wall_post_text or "").strip(), str(video_url).strip()] if part)
+    post_message = str(wall_post_text or "").strip()
     result["post_message"] = post_message
+    video_attachment = build_vk_video_attachment(owner_id, video_id)
 
-    if post_message:
+    if post_message or video_url:
         try:
             post_response = create_wall_post(
                 post_message,
                 group_id=public_group_id,
+                attachments=video_attachment,
                 donut_paid_duration=-1,
             )
             result["post_created"] = True
