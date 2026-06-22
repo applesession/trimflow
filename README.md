@@ -60,7 +60,9 @@ pip install -r requirements.txt
 - `S3_REGION`
 - `S3_BUCKET_NAME`
 - `VK_ACCESS_TOKEN`
-- `VK_GROUP_ID`
+- `VK_PUBLIC_GROUP_ID`
+- `VK_PRIVATE_GROUP_ID` — обязателен для приватных/donut-релизов с `vk_privacy_view = 5`
+- `VK_DONUT_LEVEL_ID` — нужен только если используется `video.save` с `vk_privacy_view = 5`
 - `VK_API_VERSION`
 - `TELEGRAM_BOT_TOKEN` — токен бота для уведомлений и команд
 - `TELEGRAM_ALLOWED_CHAT_IDS` — список разрешённых `chat_id` через запятую
@@ -129,6 +131,15 @@ pip install -r requirements.txt
 - `s3_upload_timestamps`
 - `s3_upload_manifest`
 - `vk_enabled`
+- `vk_wall_post_enabled`
+- `vk_comment_enabled`
+- `vk_privacy_view`
+
+`vk_privacy_view` управляет режимом VK-публикации:
+- `0`, `1`, `2`, `3` — обычная публикация: видео и пост в основном паблике
+- `5` — приватный/donut-сценарий: видео загружается в приватный паблик с доступом `by_link`, а в основном паблике создаётся donut-пост с названием и ссылкой на это видео
+
+Для приватного сценария комментарий под постом не создаётся, даже если `vk_comment_enabled = true`.
 
 ## Запуск
 
@@ -208,6 +219,10 @@ python scripts/telegram_bot.py
 - manifest `.json` с данными по сериям и качеству вырезки
 
 По умолчанию в `S3` теперь уходит только `manifest`. Видео и `.txt` остаются локально и используются для публикации в `VK`.
+
+VK-доставка теперь поддерживает два сценария:
+- публичные релизы — видео + пост в основном паблике;
+- приватные/donut-релизы (`vk_privacy_view = 5`) — видео в приватном паблике, donut-пост со ссылкой в основном паблике.
 
 ## Примечания
 

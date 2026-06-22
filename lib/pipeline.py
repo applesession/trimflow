@@ -44,7 +44,7 @@ from lib.media import (
 from lib.runtime import update_runtime_status
 from lib.storage import upload_file_to_s3
 from lib.validation import reset_temp_dir
-from lib.vk import publish_video_to_vk
+from lib.vk import publish_private_video_link_to_vk, publish_video_to_vk
 
 
 def download_magnet(magnet: str, download_dir: Path):
@@ -770,11 +770,53 @@ def build_vk_summary(enabled, uploaded=False, error=None, result=None):
         "video_id": result.get("video_id"),
         "owner_id": result.get("owner_id"),
         "video_url": result.get("video_url"),
+        "video_group_id": result.get("video_group_id"),
+        "wall_group_id": result.get("wall_group_id"),
         "post_id": result.get("post_id"),
         "comment_id": result.get("comment_id"),
         "comment_attachment": result.get("comment_attachment"),
         "errors_by_stage": result.get("errors_by_stage", {}),
     }
+
+
+def is_private_vk_delivery(delivery):
+    return int(delivery.get("vk_privacy_view", 0)) == 5
+
+
+def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_description):
+    wall_post_text = (
+        build_vk_wall_post_text(job, pretty_base_name)
+        if delivery.get("vk_wall_post_enabled", True)
+        else None
+    )
+    comment_text = (
+        build_vk_comment_text(delivery.get("vk_comment_template", ""))
+        if delivery.get("vk_comment_enabled", True) and not is_private_vk_delivery(delivery)
+        else None
+    )
+
+    if wall_post_text:
+        print(f"[DELIVERY] VK post start: {pretty_base_name}")
+    if comment_text:
+        print(f"[DELIVERY] VK comment start: {pretty_base_name}")
+
+    if is_private_vk_delivery(delivery):
+        return publish_private_video_link_to_vk(
+            output_video,
+            pretty_base_name,
+            timestamps_description,
+            wall_post_text=wall_post_text,
+        )
+
+    return publish_video_to_vk(
+        output_video,
+        pretty_base_name,
+        timestamps_description,
+        wall_post_text=wall_post_text,
+        comment_text=comment_text,
+        comment_banner_path=delivery.get("vk_comment_banner_path"),
+        privacy_view=delivery.get("vk_privacy_view", 0),
+    )
 
 
 def cleanup_job_artifacts(cleanup, download_dir=None, temp_dir=None, job_output_dir=None, success=False):
@@ -1013,28 +1055,12 @@ def process_job(job, runtime_status_path=None):
                 set_runtime_stage(runtime_status_path, "delivery_vk", total_episodes=1)
                 print(f"[DELIVERY] VK video start: {pretty_base_name}")
                 try:
-                    wall_post_text = (
-                        build_vk_wall_post_text(job, pretty_base_name)
-                        if delivery.get("vk_wall_post_enabled", True)
-                        else None
-                    )
-                    comment_text = (
-                        build_vk_comment_text(delivery.get("vk_comment_template", ""))
-                        if delivery.get("vk_comment_enabled", True)
-                        else None
-                    )
-                    if wall_post_text:
-                        print(f"[DELIVERY] VK post start: {pretty_base_name}")
-                    if comment_text:
-                        print(f"[DELIVERY] VK comment start: {pretty_base_name}")
-                    vk_result = publish_video_to_vk(
+                    vk_result = deliver_to_vk(
+                        job,
+                        delivery,
                         output_video,
                         pretty_base_name,
                         timestamps_description,
-                        wall_post_text=wall_post_text,
-                        comment_text=comment_text,
-                        comment_banner_path=delivery.get("vk_comment_banner_path"),
-                        privacy_view=delivery.get("vk_privacy_view", 0),
                     )
                     delivery_summary["vk"] = build_vk_summary(
                         enabled=True,
@@ -1274,28 +1300,12 @@ def process_job(job, runtime_status_path=None):
             set_runtime_stage(runtime_status_path, "delivery_vk", total_episodes=len(episode_infos))
             print(f"[DELIVERY] VK video start: {pretty_base_name}")
             try:
-                wall_post_text = (
-                    build_vk_wall_post_text(job, pretty_base_name)
-                    if delivery.get("vk_wall_post_enabled", True)
-                    else None
-                )
-                comment_text = (
-                    build_vk_comment_text(delivery.get("vk_comment_template", ""))
-                    if delivery.get("vk_comment_enabled", True)
-                    else None
-                )
-                if wall_post_text:
-                    print(f"[DELIVERY] VK post start: {pretty_base_name}")
-                if comment_text:
-                    print(f"[DELIVERY] VK comment start: {pretty_base_name}")
-                vk_result = publish_video_to_vk(
+                vk_result = deliver_to_vk(
+                    job,
+                    delivery,
                     output_video,
                     pretty_base_name,
                     timestamps_description,
-                    wall_post_text=wall_post_text,
-                    comment_text=comment_text,
-                    comment_banner_path=delivery.get("vk_comment_banner_path"),
-                    privacy_view=delivery.get("vk_privacy_view", 0),
                 )
                 delivery_summary["vk"] = build_vk_summary(
                     enabled=True,
@@ -1303,12 +1313,12 @@ def process_job(job, runtime_status_path=None):
                     result=vk_result,
                 )
                 print(f"[DELIVERY] VK video ok: {pretty_base_name}")
-                if wall_post_text:
+                if delivery.get("vk_wall_post_enabled", True):
                     if vk_result.get("post_created"):
                         print(f"[DELIVERY] VK post ok: {pretty_base_name}")
                     else:
                         print(f"[DELIVERY] VK post failed: {vk_result.get('errors_by_stage', {}).get('wall_post')}")
-                if comment_text and vk_result.get("post_created"):
+                if delivery.get("vk_comment_enabled", True) and not is_private_vk_delivery(delivery) and vk_result.get("post_created"):
                     if vk_result.get("comment_created"):
                         print(f"[DELIVERY] VK comment ok: {pretty_base_name}")
                     else:

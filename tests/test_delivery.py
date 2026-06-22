@@ -13,7 +13,7 @@ from lib.helpers import (
     sanitize_filename,
 )
 from lib.pipeline import build_compact_manifest, build_delivery_config
-from lib.vk import create_wall_comment, publish_video_to_vk
+from lib.vk import create_wall_comment, publish_private_video_link_to_vk, publish_video_to_vk
 
 
 class DeliveryTests(unittest.TestCase):
@@ -79,6 +79,12 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(result["s3_upload_video"])
         self.assertFalse(result["s3_upload_timestamps"])
         self.assertTrue(result["s3_upload_manifest"])
+        self.assertEqual(result["vk_privacy_view"], 0)
+
+    def test_build_delivery_config_keeps_private_vk_privacy_view(self):
+        result = build_delivery_config({"delivery": {"vk_privacy_view": 5}})
+
+        self.assertEqual(result["vk_privacy_view"], 5)
 
     def test_build_compact_manifest_omits_heavy_debug_fields(self):
         result = build_compact_manifest(
@@ -152,6 +158,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertNotIn("kept_segments", result["episodes"][0])
         self.assertNotIn("request_urls", result["episodes"][0]["timing_info"])
 
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk.upload_video_file")
     @patch("lib.vk.request_video_upload")
     def test_publish_video_to_vk_normalizes_response(self, mock_request_upload, mock_upload_file):
@@ -174,7 +181,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result["video_id"], 42)
         self.assertEqual(result["owner_id"], -100)
         self.assertEqual(result["video_url"], "https://vk.com/video-100_42")
+        self.assertEqual(result["video_group_id"], 236358467)
+        self.assertEqual(result["wall_group_id"], 236358467)
 
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk.create_wall_comment")
     @patch("lib.vk.save_wall_photo")
     @patch("lib.vk.upload_wall_comment_photo")
@@ -225,7 +235,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result["post_id"], 77)
         self.assertEqual(result["comment_id"], 99)
         self.assertEqual(result["comment_attachment"], "photo-200_55")
+        self.assertEqual(mock_create_post.call_args.kwargs["group_id"], 236358467)
+        self.assertEqual(mock_create_post.call_args.kwargs["attachments"], "video-100_42")
 
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk.create_wall_comment")
     @patch("lib.vk.create_wall_post")
     @patch("lib.vk.upload_video_file")
@@ -263,7 +276,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertIn("comment_photo", result["errors_by_stage"])
         self.assertIsNone(result["comment_attachment"])
 
-    @patch.dict("os.environ", {"VK_GROUP_ID": "236358467"})
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk._vk_request")
     def test_create_wall_comment_uses_group_id_for_from_group(self, mock_vk_request):
         mock_vk_request.return_value = {"comment_id": 99}
@@ -278,6 +291,50 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(payload["message"], "comment text")
         self.assertEqual(payload["attachments"], "photo-1_2")
         self.assertEqual(payload["from_group"], 236358467)
+
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467", "VK_PRIVATE_GROUP_ID": "236358999"})
+    @patch("lib.vk.create_wall_post")
+    @patch("lib.vk.upload_video_file")
+    @patch("lib.vk.request_video_upload")
+    def test_publish_private_video_link_to_vk_uploads_to_private_and_posts_link_in_public(
+        self,
+        mock_request_upload,
+        mock_upload_file,
+        mock_create_post,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        video_path = tmp_dir / "private.mkv"
+        video_path.write_bytes(b"video")
+        mock_request_upload.return_value = {
+            "upload_url": "https://upload.vk.test",
+            "video_id": 42,
+            "owner_id": -236358999,
+            "player": "https://vk.com/video-236358999_42",
+        }
+        mock_upload_file.return_value = {"ok": 1}
+        mock_create_post.return_value = {"post_id": 77}
+
+        result = publish_private_video_link_to_vk(
+            video_path,
+            "Private Title",
+            "desc",
+            wall_post_text="Private Title",
+        )
+
+        self.assertTrue(result["video_uploaded"])
+        self.assertTrue(result["post_created"])
+        self.assertFalse(result["comment_created"])
+        self.assertEqual(result["video_group_id"], 236358999)
+        self.assertEqual(result["wall_group_id"], 236358467)
+        self.assertEqual(mock_request_upload.call_args.kwargs["group_id"], 236358999)
+        self.assertEqual(mock_request_upload.call_args.kwargs["privacy_view"], 3)
+        self.assertEqual(mock_create_post.call_args.kwargs["group_id"], 236358467)
+        self.assertEqual(mock_create_post.call_args.kwargs["donut_paid_duration"], -1)
+        self.assertNotIn("attachments", mock_create_post.call_args.kwargs)
+        self.assertEqual(
+            mock_create_post.call_args.args[0],
+            "Private Title\n\nhttps://vk.com/video-236358999_42",
+        )
 
 
 if __name__ == "__main__":

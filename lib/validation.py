@@ -2,23 +2,36 @@ import os
 import shutil
 from pathlib import Path
 
-from lib.constants import BASE_REQUIRED_TOOLS, REQUIRED_ENV_VARS, TEMP_ROOT, VK_REQUIRED_ENV_VARS
+from lib.constants import (
+    BASE_REQUIRED_TOOLS,
+    REQUIRED_ENV_VARS,
+    TEMP_ROOT,
+    VK_PRIVATE_ENV_VARS,
+    VK_PUBLIC_ENV_VARS,
+    VK_REQUIRED_ENV_VARS,
+)
 
 
 def validate_required_env(config, jobs):
     delivery_enabled = {"s3": False, "vk": False}
+    requires_private_vk_delivery = False
     for job in jobs:
         delivery = job.get("delivery", {})
         if delivery.get("s3_enabled", True):
             delivery_enabled["s3"] = True
         if delivery.get("vk_enabled", False):
             delivery_enabled["vk"] = True
+            if int(delivery.get("vk_privacy_view", 0)) == 5:
+                requires_private_vk_delivery = True
 
     required_vars = []
     if delivery_enabled["s3"]:
         required_vars.extend(REQUIRED_ENV_VARS)
     if delivery_enabled["vk"]:
         required_vars.extend(VK_REQUIRED_ENV_VARS)
+        required_vars.extend(VK_PUBLIC_ENV_VARS)
+        if requires_private_vk_delivery:
+            required_vars.extend(VK_PRIVATE_ENV_VARS)
 
     missing = [name for name in required_vars if not os.getenv(name)]
     if missing:

@@ -40,6 +40,7 @@
       "vk_enabled": true,
       "vk_wall_post_enabled": true,
       "vk_comment_enabled": true,
+      "vk_privacy_view": 0,
       "vk_comment_banner_path": "./assets/banner.png",
       "vk_comment_template": "2202 2088 8598 1325 - Поддержать монетой (Сбер)❤️\n\nhttps://www.donationalerts.com/r/animemonstrs - Поддержать монетой (СБП)✨\n\nhttps://vk.com/donut/animonster - Платная подписка🔥"
     },

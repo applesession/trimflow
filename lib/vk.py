@@ -35,7 +35,28 @@ PRIVACY_VIEW_MAP = {
 }
 
 
-def request_video_upload(title, description, privacy_view=0):
+def _get_group_id(env_name, fallback_env_name=None):
+    value = os.getenv(env_name)
+    if not value and fallback_env_name:
+        value = os.getenv(fallback_env_name)
+    if not value:
+        raise RuntimeError(f"{env_name} is not configured")
+    return int(value)
+
+
+def get_vk_public_group_id():
+    return _get_group_id("VK_PUBLIC_GROUP_ID", fallback_env_name="VK_GROUP_ID")
+
+
+def get_vk_private_group_id():
+    return _get_group_id("VK_PRIVATE_GROUP_ID")
+
+
+def get_vk_donut_level_id():
+    return _get_group_id("VK_DONUT_LEVEL_ID")
+
+
+def request_video_upload(title, description, privacy_view=0, *, group_id=None):
     """Request video upload URL.
 
     privacy_view controls who can view the uploaded video:
@@ -45,7 +66,7 @@ def request_video_upload(title, description, privacy_view=0):
         3 — by link
         5 — donut subscribers only
     """
-    group_id = int(os.getenv("VK_GROUP_ID"))
+    group_id = int(group_id if group_id is not None else get_vk_public_group_id())
     params = {
         "group_id": group_id,
         "name": title,
@@ -55,7 +76,7 @@ def request_video_upload(title, description, privacy_view=0):
     privacy_value = PRIVACY_VIEW_MAP.get(privacy_view, "all")
     params["privacy_view"] = privacy_value
     if privacy_value == "donut":
-        params["donut_level_id"] = 2925
+        params["donut_level_id"] = get_vk_donut_level_id()
     response = _vk_request("video.save", params)
     if not isinstance(response, dict) or not response.get("upload_url"):
         raise RuntimeError("VK video.save did not return upload_url")
@@ -69,8 +90,8 @@ def upload_video_file(upload_url, local_path):
     return response.json()
 
 
-def request_wall_photo_upload_server():
-    group_id = int(os.getenv("VK_GROUP_ID"))
+def request_wall_photo_upload_server(*, group_id=None):
+    group_id = int(group_id if group_id is not None else get_vk_public_group_id())
     response = _vk_request(
         "photos.getWallUploadServer",
         {
@@ -89,8 +110,8 @@ def upload_wall_comment_photo(upload_url, local_path):
     return response.json()
 
 
-def save_wall_photo(upload_response):
-    group_id = int(os.getenv("VK_GROUP_ID"))
+def save_wall_photo(upload_response, *, group_id=None):
+    group_id = int(group_id if group_id is not None else get_vk_public_group_id())
     response = _vk_request(
         "photos.saveWallPhoto",
         {
@@ -113,14 +134,15 @@ def build_photo_attachment(photo):
     return f"photo{owner_id}_{photo_id}"
 
 
-def create_wall_post(message, video_owner_id, video_id, donut_paid_duration=None):
-    group_id = int(os.getenv("VK_GROUP_ID"))
+def create_wall_post(message, *, group_id=None, attachments=None, donut_paid_duration=None):
+    group_id = int(group_id if group_id is not None else get_vk_public_group_id())
     params = {
         "owner_id": -group_id,
         "from_group": 1,
         "message": message,
-        "attachments": f"video{video_owner_id}_{video_id}",
     }
+    if attachments:
+        params["attachments"] = attachments
     if donut_paid_duration is not None:
         params["donut_paid_duration"] = donut_paid_duration
     response = _vk_request("wall.post", params)
@@ -129,8 +151,8 @@ def create_wall_post(message, video_owner_id, video_id, donut_paid_duration=None
     return response
 
 
-def create_wall_comment(post_id, message, attachments=None):
-    group_id = int(os.getenv("VK_GROUP_ID"))
+def create_wall_comment(post_id, message, attachments=None, *, group_id=None):
+    group_id = int(group_id if group_id is not None else get_vk_public_group_id())
     payload = {
         "owner_id": -group_id,
         "post_id": post_id,
@@ -145,8 +167,17 @@ def create_wall_comment(post_id, message, attachments=None):
     return response
 
 
-def publish_video_to_vk(local_path, title, description, wall_post_text=None, comment_text=None, comment_banner_path=None, privacy_view=0):
-    save_response = request_video_upload(title, description, privacy_view=privacy_view)
+def publish_video_to_vk(
+    local_path,
+    title,
+    description,
+    wall_post_text=None,
+    comment_text=None,
+    comment_banner_path=None,
+    privacy_view=0,
+):
+    public_group_id = get_vk_public_group_id()
+    save_response = request_video_upload(title, description, privacy_view=privacy_view, group_id=public_group_id)
     upload_response = upload_video_file(save_response["upload_url"], local_path)
     result = {
         "enabled": True,
@@ -160,6 +191,8 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
         "video_id": save_response.get("video_id") or upload_response.get("video_id"),
         "owner_id": save_response.get("owner_id") or upload_response.get("owner_id"),
         "video_url": save_response.get("player") or upload_response.get("video_url") or upload_response.get("link"),
+        "video_group_id": public_group_id,
+        "wall_group_id": public_group_id,
         "post_id": None,
         "comment_id": None,
         "comment_attachment": None,
@@ -171,8 +204,8 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
             donut_duration = -1 if privacy_view == 5 else None
             post_response = create_wall_post(
                 wall_post_text,
-                result["owner_id"],
-                result["video_id"],
+                group_id=public_group_id,
+                attachments=f"video{result['owner_id']}_{result['video_id']}",
                 donut_paid_duration=donut_duration,
             )
             result["post_created"] = True
@@ -188,9 +221,9 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
         banner_path = Path(comment_banner_path) if comment_banner_path else None
         if banner_path and banner_path.is_file():
             try:
-                upload_server = request_wall_photo_upload_server()
+                upload_server = request_wall_photo_upload_server(group_id=public_group_id)
                 uploaded_photo = upload_wall_comment_photo(upload_server["upload_url"], banner_path)
-                saved_photo = save_wall_photo(uploaded_photo)
+                saved_photo = save_wall_photo(uploaded_photo, group_id=public_group_id)
                 attachments.append(build_photo_attachment(saved_photo))
                 result["comment_attachment"] = attachments[0]
             except Exception as exc:
@@ -203,6 +236,7 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
                 result["post_id"],
                 normalized_comment_text,
                 attachments=",".join(attachments) if attachments else None,
+                group_id=public_group_id,
             )
             result["comment_created"] = True
             result["comment_id"] = comment_response.get("comment_id")
@@ -210,4 +244,57 @@ def publish_video_to_vk(local_path, title, description, wall_post_text=None, com
             result["errors_by_stage"]["wall_comment"] = repr(exc)
 
     result["error"] = "; ".join(result["errors_by_stage"].values()) or None
+    return result
+
+
+def publish_private_video_link_to_vk(local_path, title, description, wall_post_text):
+    private_group_id = get_vk_private_group_id()
+    public_group_id = get_vk_public_group_id()
+
+    save_response = request_video_upload(title, description, privacy_view=3, group_id=private_group_id)
+    upload_response = upload_video_file(save_response["upload_url"], local_path)
+    video_url = save_response.get("player") or upload_response.get("video_url") or upload_response.get("link")
+
+    result = {
+        "enabled": True,
+        "uploaded": True,
+        "error": None,
+        "video_uploaded": True,
+        "post_created": False,
+        "comment_created": False,
+        "video_title": title,
+        "video_description": description,
+        "video_id": save_response.get("video_id") or upload_response.get("video_id"),
+        "owner_id": save_response.get("owner_id") or upload_response.get("owner_id"),
+        "video_url": video_url,
+        "video_group_id": private_group_id,
+        "wall_group_id": public_group_id,
+        "post_id": None,
+        "comment_id": None,
+        "comment_attachment": None,
+        "errors_by_stage": {},
+    }
+
+    if not video_url:
+        result["errors_by_stage"]["video_upload"] = "private_video_url_missing"
+        result["error"] = result["errors_by_stage"]["video_upload"]
+        return result
+
+    post_message = "\n\n".join(part for part in [str(wall_post_text or "").strip(), str(video_url).strip()] if part)
+
+    if post_message:
+        try:
+            post_response = create_wall_post(
+                post_message,
+                group_id=public_group_id,
+                donut_paid_duration=-1,
+            )
+            result["post_created"] = True
+            result["post_id"] = post_response.get("post_id")
+        except Exception as exc:
+            result["errors_by_stage"]["wall_post"] = repr(exc)
+            result["error"] = "; ".join(result["errors_by_stage"].values())
+            return result
+
+    result["error"] = None
     return result
