@@ -1343,8 +1343,10 @@ def process_job(job, runtime_status_path=None):
                 if delivery.get("vk_wall_post_enabled", True):
                     if vk_result.get("post_created"):
                         print(f"[DELIVERY] VK post ok: {pretty_base_name}")
-                    else:
+                    elif vk_result.get("errors_by_stage", {}).get("wall_post"):
                         print(f"[DELIVERY] VK post failed: {vk_result.get('errors_by_stage', {}).get('wall_post')}")
+                    else:
+                        print(f"[DELIVERY] VK post skipped: {vk_result.get('error') or 'no_post_attempt'}")
                 if delivery.get("vk_comment_enabled", True) and not is_private_vk_delivery(delivery) and vk_result.get("post_created"):
                     if vk_result.get("comment_created"):
                         print(f"[DELIVERY] VK comment ok: {pretty_base_name}")

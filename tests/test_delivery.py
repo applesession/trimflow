@@ -336,6 +336,41 @@ class DeliveryTests(unittest.TestCase):
             "Private Title\n\nhttps://vk.com/video-236358999_42",
         )
 
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467", "VK_PRIVATE_GROUP_ID": "239761756"})
+    @patch("lib.vk.create_wall_post")
+    @patch("lib.vk.upload_video_file")
+    @patch("lib.vk.request_video_upload")
+    def test_publish_private_video_link_to_vk_builds_fallback_url_from_owner_and_video_id(
+        self,
+        mock_request_upload,
+        mock_upload_file,
+        mock_create_post,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        video_path = tmp_dir / "private-no-player.mkv"
+        video_path.write_bytes(b"video")
+        mock_request_upload.return_value = {
+            "upload_url": "https://upload.vk.test",
+            "video_id": 456239017,
+            "owner_id": -239761756,
+        }
+        mock_upload_file.return_value = {"ok": 1}
+        mock_create_post.return_value = {"post_id": 88}
+
+        result = publish_private_video_link_to_vk(
+            video_path,
+            "Fallback Title",
+            "desc",
+            wall_post_text="Fallback Title",
+        )
+
+        self.assertEqual(result["video_url"], "https://vk.ru/video-239761756_456239017")
+        self.assertTrue(result["post_created"])
+        self.assertEqual(
+            mock_create_post.call_args.args[0],
+            "Fallback Title\n\nhttps://vk.ru/video-239761756_456239017",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

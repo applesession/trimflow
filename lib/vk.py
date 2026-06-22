@@ -56,6 +56,17 @@ def get_vk_donut_level_id():
     return _get_group_id("VK_DONUT_LEVEL_ID")
 
 
+def build_vk_video_url(owner_id, video_id, *, domain="vk.ru"):
+    if owner_id is None or video_id is None:
+        return None
+    try:
+        normalized_owner_id = int(owner_id)
+        normalized_video_id = int(video_id)
+    except (TypeError, ValueError):
+        return None
+    return f"https://{domain}/video{normalized_owner_id}_{normalized_video_id}"
+
+
 def request_video_upload(title, description, privacy_view=0, *, group_id=None):
     """Request video upload URL.
 
@@ -253,7 +264,14 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
 
     save_response = request_video_upload(title, description, privacy_view=3, group_id=private_group_id)
     upload_response = upload_video_file(save_response["upload_url"], local_path)
-    video_url = save_response.get("player") or upload_response.get("video_url") or upload_response.get("link")
+    owner_id = save_response.get("owner_id") or upload_response.get("owner_id") or -private_group_id
+    video_id = save_response.get("video_id") or upload_response.get("video_id")
+    video_url = (
+        save_response.get("player")
+        or upload_response.get("video_url")
+        or upload_response.get("link")
+        or build_vk_video_url(owner_id, video_id)
+    )
 
     result = {
         "enabled": True,
@@ -264,8 +282,8 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
         "comment_created": False,
         "video_title": title,
         "video_description": description,
-        "video_id": save_response.get("video_id") or upload_response.get("video_id"),
-        "owner_id": save_response.get("owner_id") or upload_response.get("owner_id"),
+        "video_id": video_id,
+        "owner_id": owner_id,
         "video_url": video_url,
         "video_group_id": private_group_id,
         "wall_group_id": public_group_id,
