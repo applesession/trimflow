@@ -819,6 +819,31 @@ def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_desc
     )
 
 
+def log_vk_delivery_result(pretty_base_name, delivery, vk_result):
+    if not isinstance(vk_result, dict):
+        print(f"[DELIVERY] VK debug unexpected_result_type: {type(vk_result).__name__}")
+        return
+
+    debug_payload = {
+        "title": pretty_base_name,
+        "private_mode": is_private_vk_delivery(delivery),
+        "video_uploaded": vk_result.get("video_uploaded"),
+        "post_created": vk_result.get("post_created"),
+        "comment_created": vk_result.get("comment_created"),
+        "video_group_id": vk_result.get("video_group_id"),
+        "wall_group_id": vk_result.get("wall_group_id"),
+        "video_url": vk_result.get("video_url"),
+        "post_id": vk_result.get("post_id"),
+        "error": vk_result.get("error"),
+        "errors_by_stage": vk_result.get("errors_by_stage", {}),
+    }
+    if is_private_vk_delivery(delivery):
+        debug_payload["post_mode"] = vk_result.get("post_mode")
+        debug_payload["post_message"] = vk_result.get("post_message")
+
+    print("[DELIVERY] VK debug " + json.dumps(debug_payload, ensure_ascii=False))
+
+
 def cleanup_job_artifacts(cleanup, download_dir=None, temp_dir=None, job_output_dir=None, success=False):
     cleanup = cleanup or {}
 
@@ -1068,6 +1093,7 @@ def process_job(job, runtime_status_path=None):
                         result=vk_result,
                     )
                     print(f"[DELIVERY] VK video ok: {pretty_base_name}")
+                    log_vk_delivery_result(pretty_base_name, delivery, vk_result)
                 except Exception as exc:
                     print(f"[DELIVERY] VK video failed: {repr(exc)}")
                     delivery_summary["vk"] = build_vk_summary(
@@ -1313,6 +1339,7 @@ def process_job(job, runtime_status_path=None):
                     result=vk_result,
                 )
                 print(f"[DELIVERY] VK video ok: {pretty_base_name}")
+                log_vk_delivery_result(pretty_base_name, delivery, vk_result)
                 if delivery.get("vk_wall_post_enabled", True):
                     if vk_result.get("post_created"):
                         print(f"[DELIVERY] VK post ok: {pretty_base_name}")

@@ -269,9 +269,11 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
         "video_url": video_url,
         "video_group_id": private_group_id,
         "wall_group_id": public_group_id,
+        "post_mode": "private_donut_link",
         "post_id": None,
         "comment_id": None,
         "comment_attachment": None,
+        "post_message": None,
         "errors_by_stage": {},
     }
 
@@ -281,6 +283,7 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
         return result
 
     post_message = "\n\n".join(part for part in [str(wall_post_text or "").strip(), str(video_url).strip()] if part)
+    result["post_message"] = post_message
 
     if post_message:
         try:
