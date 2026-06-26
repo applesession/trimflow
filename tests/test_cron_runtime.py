@@ -371,6 +371,62 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("lib.runner.process_job")
     @patch("lib.runner.save_completed_jobs")
     @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_state")
+    @patch("lib.runner.load_state")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_moves_release_episodes_from_queued_to_completed_after_success(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_state,
+        mock_save_state,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [{
+            "title": "A",
+            "season": 1,
+            "episodes_range": "001-002",
+            "processing_mode": "compilation",
+            "source": {"type": "magnet", "magnet": "m1"},
+            "automation": {"release_id": 42},
+        }]
+        mock_load_completed_jobs.return_value = []
+        mock_load_state.return_value = {
+            "queued_release_episodes": {
+                "42:001": {"release_id": 42, "episode": 1},
+                "42:002": {"release_id": 42, "episode": 2},
+            },
+            "completed_release_episodes": {},
+            "ongoing_progress": {},
+        }
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "A",
+            "delivery_summary": {
+                "vk": {"enabled": True, "video_uploaded": True},
+                "s3": {"enabled": False, "uploaded": False},
+            },
+        }
+
+        summary = run_jobs({"defaults": {}}, jobs)
+
+        self.assertEqual(summary["jobs_processed"], 1)
+        mock_save_state.assert_called_once()
+        saved_state = mock_save_state.call_args.args[1]
+        self.assertEqual(saved_state["queued_release_episodes"], {})
+        self.assertIn("42:001", saved_state["completed_release_episodes"])
+        self.assertIn("42:002", saved_state["completed_release_episodes"])
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
     @patch("lib.runner.save_jobs")
     @patch("lib.runner.validate_required_files")
     @patch("lib.runner.validate_required_tools")

@@ -8,7 +8,7 @@ from lib.config import (
     save_jobs,
     save_state,
 )
-from lib.autojobs import get_job_processing_mode, mark_ongoing_full_publish
+from lib.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
 from lib.pipeline import process_job
 from lib.runtime import (
     append_runtime_error,
@@ -106,9 +106,13 @@ def is_incremental_full_refresh_job(job):
     return get_job_publish_strategy(job) == "full_refresh"
 
 
-def update_state_after_full_publish(config, job):
+def update_state_after_successful_job(config, job):
+    if get_job_release_id(job) is None and not is_ongoing_compilation_job(job):
+        return
     state = load_state(config)
-    updated_state = mark_ongoing_full_publish(state, job)
+    updated_state = mark_job_episodes_completed(state, job)
+    if is_ongoing_compilation_job(job):
+        updated_state = mark_ongoing_full_publish(updated_state, job)
     save_state(config, updated_state)
 
 
@@ -178,8 +182,7 @@ def run_jobs(
                     save_jobs(config, active_jobs)
                 completed_jobs.append(build_completed_job_entry(merged_job, job_result))
                 save_completed_jobs(config, completed_jobs)
-                if is_ongoing_compilation_job(merged_job):
-                    update_state_after_full_publish(config, merged_job)
+                update_state_after_successful_job(config, merged_job)
 
             summary["jobs_processed"] += 1
             if runtime_status_path:

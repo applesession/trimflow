@@ -10,8 +10,14 @@ from pathlib import Path
 import requests
 from urllib3.util import connection as urllib3_connection
 
-from lib.autojobs import find_matching_job, format_episodes_range
-from lib.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs
+from lib.autojobs import (
+    find_matching_job,
+    format_episodes_range,
+    mark_job_episodes_completed,
+    mark_job_episodes_queued,
+    unmark_job_episodes_queued,
+)
+from lib.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
 from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
 from lib.helpers import ensure_non_empty_slug, parse_episodes_range
 from lib.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -758,7 +764,8 @@ def format_status_message(config):
         f"Активная задача: {active_title or 'сейчас ничего не обрабатывается'}",
         f"Аниме в очереди: {len(jobs)}",
         f"Последнее обновление очереди: {format_datetime_ru(state.get('last_discovery_at'))}",
-        f"Зафиксировано эпизодов: {len(state.get('seen_release_episodes', {}))}",
+        f"Эпизодов в очереди: {len(state.get('queued_release_episodes', {}))}",
+        f"Завершённых эпизодов: {len(state.get('completed_release_episodes', {}))}",
     ]
     return "\n".join(lines)
 
@@ -1161,6 +1168,9 @@ def remove_job_by_identity(config, job_identity):
     if not removed_job:
         raise RuntimeError("Актуальная запись для удаления не найдена")
     save_jobs(config, remaining)
+    state = load_state(config)
+    updated_state = unmark_job_episodes_queued(state, removed_job)
+    save_state(config, updated_state)
     return removed_job
 
 
@@ -1170,6 +1180,9 @@ def archive_job_to_completed(config, job, source="telegram_complete"):
     for item in completed_jobs:
         archived_job = item.get("job") or {}
         if build_job_identity(archived_job) == job_identity:
+            state = load_state(config)
+            updated_state = mark_job_episodes_completed(state, job)
+            save_state(config, updated_state)
             return True
 
     completed_jobs.append({
@@ -1186,6 +1199,9 @@ def archive_job_to_completed(config, job, source="telegram_complete"):
         "completion_note": "Manually archived from Telegram bot",
     })
     save_completed_jobs(config, completed_jobs)
+    state = load_state(config)
+    updated_state = mark_job_episodes_completed(state, job)
+    save_state(config, updated_state)
     return False
 
 
@@ -1195,6 +1211,9 @@ def retry_job_to_queue(config, job):
         return False
     jobs.append(job)
     save_jobs(config, jobs)
+    state = load_state(config)
+    updated_state = mark_job_episodes_queued(state, job)
+    save_state(config, updated_state)
     return True
 
 

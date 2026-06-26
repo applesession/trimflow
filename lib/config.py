@@ -40,9 +40,10 @@ def get_completed_jobs_path(config):
 
 def build_default_state():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "last_discovery_at": None,
-        "seen_release_episodes": {},
+        "queued_release_episodes": {},
+        "completed_release_episodes": {},
         "job_index": {},
         "skipped_items": [],
         "ongoing_progress": {},
@@ -75,11 +76,17 @@ def load_state(config):
         raise RuntimeError(f"{state_path} must contain a JSON object")
 
     state = build_default_state()
+    legacy_seen_release_episodes = data.get("seen_release_episodes", {})
     state.update(data)
-    state.setdefault("seen_release_episodes", {})
+    state.setdefault("queued_release_episodes", {})
+    state.setdefault("completed_release_episodes", {})
+    if not state.get("completed_release_episodes") and isinstance(legacy_seen_release_episodes, dict):
+        state["completed_release_episodes"] = legacy_seen_release_episodes
+    state["schema_version"] = max(int(state.get("schema_version", 1)), 2)
     state.setdefault("job_index", {})
     state.setdefault("skipped_items", [])
     state.setdefault("ongoing_progress", {})
+    state.pop("seen_release_episodes", None)
     return state
 
 

@@ -12,6 +12,82 @@ def build_seen_episode_key(release_id, episode_number):
     return f"{release_id}:{int(episode_number):03d}"
 
 
+def _get_episode_tracking_maps(state):
+    queued_release_episodes = state.setdefault("queued_release_episodes", {})
+    completed_release_episodes = state.setdefault("completed_release_episodes", {})
+    if not completed_release_episodes:
+        legacy_seen_release_episodes = state.pop("seen_release_episodes", {})
+        if isinstance(legacy_seen_release_episodes, dict):
+            completed_release_episodes.update(legacy_seen_release_episodes)
+    else:
+        state.pop("seen_release_episodes", None)
+    return queued_release_episodes, completed_release_episodes
+
+
+def get_job_release_id(job):
+    automation = job.get("automation") or {}
+    release_id = automation.get("release_id")
+    return _parse_positive_int(release_id)
+
+
+def get_job_episode_numbers(job):
+    return sorted(parse_episodes_range(job.get("episodes_range", "")))
+
+
+def mark_release_episodes_queued(state, release_id, episode_numbers):
+    queued_release_episodes, _completed_release_episodes = _get_episode_tracking_maps(state)
+    recorded_at = utc_now_iso()
+    for episode_number in episode_numbers:
+        queued_release_episodes[build_seen_episode_key(release_id, episode_number)] = {
+            "release_id": release_id,
+            "episode": int(episode_number),
+            "queued_at": recorded_at,
+        }
+
+
+def unmark_release_episodes_queued(state, release_id, episode_numbers):
+    queued_release_episodes, _completed_release_episodes = _get_episode_tracking_maps(state)
+    for episode_number in episode_numbers:
+        queued_release_episodes.pop(build_seen_episode_key(release_id, episode_number), None)
+
+
+def mark_release_episodes_completed(state, release_id, episode_numbers):
+    queued_release_episodes, completed_release_episodes = _get_episode_tracking_maps(state)
+    recorded_at = utc_now_iso()
+    for episode_number in episode_numbers:
+        key = build_seen_episode_key(release_id, episode_number)
+        queued_release_episodes.pop(key, None)
+        completed_release_episodes[key] = {
+            "release_id": release_id,
+            "episode": int(episode_number),
+            "completed_at": recorded_at,
+        }
+
+
+def mark_job_episodes_queued(state, job):
+    release_id = get_job_release_id(job)
+    if release_id is None:
+        return state
+    mark_release_episodes_queued(state, release_id, get_job_episode_numbers(job))
+    return state
+
+
+def unmark_job_episodes_queued(state, job):
+    release_id = get_job_release_id(job)
+    if release_id is None:
+        return state
+    unmark_release_episodes_queued(state, release_id, get_job_episode_numbers(job))
+    return state
+
+
+def mark_job_episodes_completed(state, job):
+    release_id = get_job_release_id(job)
+    if release_id is None:
+        return state
+    mark_release_episodes_completed(state, release_id, get_job_episode_numbers(job))
+    return state
+
+
 def format_episodes_range(episodes):
     normalized = sorted({int(episode) for episode in episodes})
     if not normalized:
@@ -183,11 +259,11 @@ def discover_jobs(config, jobs, state):
     automation = normalize_automation_config(config)
     updated_jobs = deepcopy(jobs)
     updated_state = deepcopy(state)
-    updated_state.setdefault("schema_version", 1)
-    updated_state.setdefault("seen_release_episodes", {})
+    updated_state.setdefault("schema_version", 2)
     updated_state.setdefault("job_index", {})
     updated_state.setdefault("skipped_items", [])
     updated_state.setdefault("ongoing_progress", {})
+    _get_episode_tracking_maps(updated_state)
 
     if not automation.get("enabled", True):
         updated_state["job_index"] = build_default_job_index(updated_jobs)
@@ -198,7 +274,8 @@ def discover_jobs(config, jobs, state):
                 "created_jobs": 0,
                 "updated_jobs": 0,
                 "skipped_items": len(updated_state["skipped_items"]),
-                "seen_release_episodes": len(updated_state["seen_release_episodes"]),
+                "queued_release_episodes": len(updated_state["queued_release_episodes"]),
+                "completed_release_episodes": len(updated_state["completed_release_episodes"]),
                 "request_urls": [],
                 "status": "disabled",
             },
@@ -238,10 +315,12 @@ def discover_jobs(config, jobs, state):
             continue
 
         episode_numbers = list(selected_variant["available_episodes"])
+        queued_release_episodes, completed_release_episodes = _get_episode_tracking_maps(updated_state)
+        tracked_episode_keys = set(queued_release_episodes).union(completed_release_episodes)
         new_episode_numbers = [
             episode_number
             for episode_number in episode_numbers
-            if build_seen_episode_key(release_id, episode_number) not in updated_state["seen_release_episodes"]
+            if build_seen_episode_key(release_id, episode_number) not in tracked_episode_keys
         ]
 
         if not new_episode_numbers:
@@ -335,8 +414,7 @@ def discover_jobs(config, jobs, state):
                 created_jobs += 1
             elif queue_result == "updated":
                 updated_jobs_count += 1
-
-        mark_release_episodes_seen(updated_state, release_id, new_episode_numbers)
+            mark_job_episodes_queued(updated_state, candidate_job)
 
     updated_state["last_discovery_at"] = utc_now_iso()
     updated_state["job_index"] = build_default_job_index(updated_jobs)
@@ -347,7 +425,8 @@ def discover_jobs(config, jobs, state):
             "created_jobs": created_jobs,
             "updated_jobs": updated_jobs_count,
             "skipped_items": len(updated_state["skipped_items"]),
-            "seen_release_episodes": len(updated_state["seen_release_episodes"]),
+            "queued_release_episodes": len(updated_state["queued_release_episodes"]),
+            "completed_release_episodes": len(updated_state["completed_release_episodes"]),
             "request_urls": releases_result.get("request_urls", []),
         },
     }
@@ -380,16 +459,6 @@ def find_matching_job(jobs, candidate_job):
         ):
             return job
     return None
-
-
-def mark_release_episodes_seen(state, release_id, episode_numbers):
-    for episode_number in episode_numbers:
-        state["seen_release_episodes"][build_seen_episode_key(release_id, episode_number)] = {
-            "release_id": release_id,
-            "episode": int(episode_number),
-            "seen_at": utc_now_iso(),
-        }
-
 
 def build_job_from_release(
     release_payload,

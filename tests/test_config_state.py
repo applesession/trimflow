@@ -55,6 +55,31 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(load_state(config), build_default_state())
 
+    def test_load_state_migrates_legacy_seen_release_episodes_to_completed(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        state_path = tmp_dir / "state.json"
+        state_path.write_text(
+            """{
+  "schema_version": 1,
+  "seen_release_episodes": {
+    "1:001": {"release_id": 1, "episode": 1}
+  }
+}""",
+            encoding="utf-8",
+        )
+        config = {
+            "automation": {
+                "jobs_path": str(tmp_dir / "jobs.json"),
+                "state_path": str(state_path),
+            }
+        }
+
+        state = load_state(config)
+
+        self.assertEqual(state["queued_release_episodes"], {})
+        self.assertEqual(state["completed_release_episodes"]["1:001"]["episode"], 1)
+        self.assertNotIn("seen_release_episodes", state)
+
     def test_load_completed_jobs_returns_empty_list_when_file_is_missing(self):
         tmp_dir = self.make_workspace_temp_dir()
         config = {
@@ -317,7 +342,8 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(first_result["jobs"][0]["title_ru"], "Тестовый релиз")
         self.assertEqual(first_result["jobs"][0]["source"]["variant_codec"], "avc")
         self.assertEqual(first_result["summary"]["created_jobs"], 1)
-        self.assertEqual(len(first_result["state"]["seen_release_episodes"]), 6)
+        self.assertEqual(len(first_result["state"]["queued_release_episodes"]), 6)
+        self.assertEqual(len(first_result["state"]["completed_release_episodes"]), 0)
 
         second_result = discover_jobs(config, first_result["jobs"], first_result["state"])
         self.assertEqual(len(second_result["jobs"]), 1)
@@ -474,10 +500,10 @@ class ConfigStateTests(unittest.TestCase):
 
         state = build_default_state()
         for episode_number in range(1, 10):
-            state["seen_release_episodes"][f"77:{episode_number:03d}"] = {
+            state["completed_release_episodes"][f"77:{episode_number:03d}"] = {
                 "release_id": 77,
                 "episode": episode_number,
-                "seen_at": "2026-06-13T00:00:00+00:00",
+                "completed_at": "2026-06-13T00:00:00+00:00",
             }
         ongoing_key = build_ongoing_progress_key("Ongoing Release", 1, "magnet")
         state["ongoing_progress"][ongoing_key] = {
@@ -530,10 +556,10 @@ class ConfigStateTests(unittest.TestCase):
 
         state = build_default_state()
         for episode_number in range(1, 11):
-            state["seen_release_episodes"][f"10175:{episode_number:03d}"] = {
+            state["completed_release_episodes"][f"10175:{episode_number:03d}"] = {
                 "release_id": 10175,
                 "episode": episode_number,
-                "seen_at": "2026-06-13T00:00:00+00:00",
+                "completed_at": "2026-06-13T00:00:00+00:00",
             }
         ongoing_key = build_ongoing_progress_key("Otaku ni Yasashii Gal wa Inai!?", 1, "magnet")
         state["ongoing_progress"][ongoing_key] = {
@@ -551,7 +577,8 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["jobs"][1]["episodes_range"], "001-011")
         self.assertEqual(result["jobs"][1]["automation"]["publish_strategy"], "full_refresh")
         self.assertEqual(result["summary"]["created_jobs"], 2)
-        self.assertEqual(len(result["state"]["seen_release_episodes"]), 11)
+        self.assertEqual(len(result["state"]["queued_release_episodes"]), 11)
+        self.assertEqual(len(result["state"]["completed_release_episodes"]), 10)
 
     def test_build_job_from_release_adds_title_ru_when_available(self):
         from lib.autojobs import build_job_from_release
@@ -614,7 +641,8 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["jobs"][0]["episodes_range"], "001-011")
         self.assertEqual(result["jobs"][0]["source"]["magnet"], "magnet:?xt=urn:btih:avc555")
         self.assertEqual(result["jobs"][0]["source"]["variant_codec"], "avc")
-        self.assertEqual(len(result["state"]["seen_release_episodes"]), 11)
+        self.assertEqual(len(result["state"]["queued_release_episodes"]), 11)
+        self.assertEqual(len(result["state"]["completed_release_episodes"]), 0)
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
@@ -655,7 +683,8 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["jobs"][0]["episodes_range"], "001-011")
         self.assertEqual(result["jobs"][0]["source"]["magnet"], "magnet:?xt=urn:btih:hevc556")
         self.assertEqual(result["jobs"][0]["source"]["variant_codec"], "hevc")
-        self.assertEqual(len(result["state"]["seen_release_episodes"]), 11)
+        self.assertEqual(len(result["state"]["queued_release_episodes"]), 11)
+        self.assertEqual(len(result["state"]["completed_release_episodes"]), 0)
 
     def test_filter_episode_files_error_includes_requested_and_found_episodes(self):
         episode_files = [

@@ -199,9 +199,10 @@ class TelegramBotTests(unittest.TestCase):
         config = self.make_config(tmp_dir)
         save_jobs(config, [{"title": "A", "season": 1, "episodes_range": "001"}])
         save_state(config, {
-            "schema_version": 1,
+            "schema_version": 2,
             "last_discovery_at": "2026-06-07T10:00:00+00:00",
-            "seen_release_episodes": {"1:1": True, "1:2": True},
+            "queued_release_episodes": {"1:001": True},
+            "completed_release_episodes": {"1:001": True, "1:002": True},
             "job_index": {},
             "skipped_items": [],
         })
@@ -225,7 +226,8 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Активная задача: A", message)
         self.assertIn("Аниме в очереди: 1", message)
         self.assertIn("Последнее обновление очереди: ", message)
-        self.assertIn("Зафиксировано эпизодов: 2", message)
+        self.assertIn("Эпизодов в очереди: 1", message)
+        self.assertIn("Завершённых эпизодов: 2", message)
         self.assertNotIn("Последний discovery", message)
 
     def test_jobs_message_prefers_title_ru(self):
@@ -470,7 +472,21 @@ class TelegramBotTests(unittest.TestCase):
         tmp_dir = self.make_workspace_temp_dir()
         config = self.make_config(tmp_dir)
         state_path = (tmp_dir / "telegram_state.json").resolve()
-        save_jobs(config, [{"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001"}])
+        save_jobs(config, [{
+            "title": "A",
+            "title_ru": "А",
+            "season": 1,
+            "episodes_range": "001",
+            "automation": {"release_id": 1},
+        }])
+        save_state(config, {
+            "schema_version": 2,
+            "queued_release_episodes": {"1:001": {"release_id": 1, "episode": 1}},
+            "completed_release_episodes": {},
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
 
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
             update = {
@@ -493,7 +509,9 @@ class TelegramBotTests(unittest.TestCase):
             self.assertEqual(len(load_telegram_state()["pending_actions"]), 0)
 
         jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])
+        self.assertEqual(state_data["queued_release_episodes"], {})
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -565,6 +583,9 @@ class TelegramBotTests(unittest.TestCase):
         "type": "magnet",
         "magnet": "magnet:?xt=urn:btih:testhash",
         "download_dir": "downloads/A"
+      },
+      "automation": {
+        "release_id": 1
       }
     }
   }
@@ -573,6 +594,14 @@ class TelegramBotTests(unittest.TestCase):
         )
         config["automation"]["completed_jobs_path"] = str(completed_path.resolve())
         save_jobs(config, [])
+        save_state(config, {
+            "schema_version": 2,
+            "queued_release_episodes": {},
+            "completed_release_episodes": {},
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
 
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
             list_update = {
@@ -597,8 +626,10 @@ class TelegramBotTests(unittest.TestCase):
             handle_update(config, confirm_update)
 
         jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(len(jobs_data), 1)
         self.assertEqual(jobs_data[0]["title_ru"], "А")
+        self.assertIn("1:001", state_data["queued_release_episodes"])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -618,7 +649,16 @@ class TelegramBotTests(unittest.TestCase):
                 "magnet": "magnet:?xt=urn:btih:testhash",
                 "download_dir": "downloads/A",
             },
+            "automation": {"release_id": 1},
         }])
+        save_state(config, {
+            "schema_version": 2,
+            "queued_release_episodes": {"1:001": {"release_id": 1, "episode": 1}},
+            "completed_release_episodes": {},
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
 
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
             update = {
@@ -640,8 +680,11 @@ class TelegramBotTests(unittest.TestCase):
 
         jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
         completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
+        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])
         self.assertEqual(len(completed_data), 1)
+        self.assertEqual(state_data["queued_release_episodes"], {})
+        self.assertIn("1:001", state_data["completed_release_episodes"])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -708,8 +751,17 @@ class TelegramBotTests(unittest.TestCase):
                 "magnet": "magnet:?xt=urn:btih:testhash",
                 "download_dir": "downloads/A",
             },
+            "automation": {"release_id": 1},
         }
         save_jobs(config, [job])
+        save_state(config, {
+            "schema_version": 2,
+            "queued_release_episodes": {"1:001": {"release_id": 1, "episode": 1}},
+            "completed_release_episodes": {"1:001": {"release_id": 1, "episode": 1}},
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
         completed_path.write_text(
             json.dumps([
                 {
@@ -734,8 +786,11 @@ class TelegramBotTests(unittest.TestCase):
 
         jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
         completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
+        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])
         self.assertEqual(len(completed_data), 1)
+        self.assertEqual(state_data["queued_release_episodes"], {})
+        self.assertIn("1:001", state_data["completed_release_episodes"])
 
     @patch("lib.telegram_bot.send_formatted_message")
     @patch("lib.telegram_bot.answer_callback_query")
