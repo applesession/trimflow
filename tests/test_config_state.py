@@ -12,6 +12,7 @@ from lib.anilibria import (
     list_recent_releases,
 )
 from lib.autojobs import (
+    _extract_variant_label_episode_numbers,
     build_ongoing_progress_key,
     collect_release_episode_numbers,
     discover_jobs,
@@ -21,6 +22,7 @@ from lib.autojobs import (
     select_release_source_variant,
 )
 from lib.config import build_default_state, load_completed_jobs, load_jobs, load_state
+from lib.discovery import filter_episode_files
 
 
 class ConfigStateTests(unittest.TestCase):
@@ -180,6 +182,13 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(collect_release_episode_numbers(release_payload), [1, 2])
 
+    def test_extract_variant_label_episode_numbers_supports_expected_formats(self):
+        self.assertEqual(_extract_variant_label_episode_numbers("AniLiberty [1-11]"), list(range(1, 12)))
+        self.assertEqual(_extract_variant_label_episode_numbers("AniLiberty [01-11]"), list(range(1, 12)))
+        self.assertEqual(_extract_variant_label_episode_numbers("AniLiberty [1 - 11]"), list(range(1, 12)))
+        self.assertEqual(_extract_variant_label_episode_numbers("AniLiberty [12]"), [12])
+        self.assertIsNone(_extract_variant_label_episode_numbers("AniLiberty AVC 1080p"))
+
     def test_extract_release_source_variants_prefers_explicit_variants(self):
         release_payload = {
             "episodes": [{"number": index} for index in range(1, 12)],
@@ -203,6 +212,23 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual([variant["codec"] for variant in variants], ["hevc", "avc", "avc"])
         self.assertEqual(variants[0]["available_episodes"], list(range(1, 12)))
         self.assertEqual(variants[1]["available_episodes"], list(range(1, 12)))
+
+    def test_extract_release_source_variants_caps_available_episodes_by_variant_label(self):
+        release_payload = {
+            "episodes": [{"number": index} for index in range(1, 13)],
+            "torrents": [
+                {
+                    "label": "Otaku ni Yasashii Gal wa Inai!- - AniLiberty.TOP [WEB-DL 1080p][AVC][1-11]",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:avc",
+                },
+            ],
+        }
+
+        variants = extract_release_source_variants(release_payload)
+
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0]["available_episodes"], list(range(1, 12)))
 
     def test_select_release_source_variant_prefers_avc_then_falls_back_to_hevc(self):
         release_payload = {
@@ -472,6 +498,61 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["jobs"][1]["automation"]["publish_strategy"], "full_refresh")
         self.assertEqual(result["summary"]["created_jobs"], 2)
 
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_caps_jobs_to_variant_label_episode_range(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [
+                {"id": 10175, "alias": "otaku-ni-yasashii-gal-wa-inai", "is_ongoing": True},
+            ],
+            "request_urls": [],
+        }
+        magnet = "magnet:?xt=urn:btih:otaku"
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 10175,
+                "alias": "otaku-ni-yasashii-gal-wa-inai",
+                "is_ongoing": True,
+                "name": {"english": "Otaku ni Yasashii Gal wa Inai!?"},
+                "episodes": [{"number": index} for index in range(1, 13)],
+                "torrents": [{
+                    "label": "Otaku ni Yasashii Gal wa Inai!- - AniLiberty.TOP [WEB-DL 1080p][AVC][1-11]",
+                    "codec": "x264",
+                    "magnet": magnet,
+                }],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/otaku-ni-yasashii-gal-wa-inai",
+        }
+
+        state = build_default_state()
+        for episode_number in range(1, 11):
+            state["seen_release_episodes"][f"10175:{episode_number:03d}"] = {
+                "release_id": 10175,
+                "episode": episode_number,
+                "seen_at": "2026-06-13T00:00:00+00:00",
+            }
+        ongoing_key = build_ongoing_progress_key("Otaku ni Yasashii Gal wa Inai!?", 1, "magnet")
+        state["ongoing_progress"][ongoing_key] = {
+            "has_full_publish": True,
+            "last_full_episode": 10,
+            "last_full_range": "001-010",
+            "updated_at": "2026-06-13T00:00:00+00:00",
+        }
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], state)
+
+        self.assertEqual(len(result["jobs"]), 2)
+        self.assertEqual(result["jobs"][0]["episodes_range"], "011")
+        self.assertEqual(result["jobs"][0]["automation"]["publish_strategy"], "single_update")
+        self.assertEqual(result["jobs"][1]["episodes_range"], "001-011")
+        self.assertEqual(result["jobs"][1]["automation"]["publish_strategy"], "full_refresh")
+        self.assertEqual(result["summary"]["created_jobs"], 2)
+        self.assertEqual(len(result["state"]["seen_release_episodes"]), 11)
+
     def test_build_job_from_release_adds_title_ru_when_available(self):
         from lib.autojobs import build_job_from_release
 
@@ -575,6 +656,20 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["jobs"][0]["source"]["magnet"], "magnet:?xt=urn:btih:hevc556")
         self.assertEqual(result["jobs"][0]["source"]["variant_codec"], "hevc")
         self.assertEqual(len(result["state"]["seen_release_episodes"]), 11)
+
+    def test_filter_episode_files_error_includes_requested_and_found_episodes(self):
+        episode_files = [
+            (episode_number, Path(f"episode_{episode_number:02d}.mkv"))
+            for episode_number in range(1, 12)
+        ]
+
+        with self.assertRaises(RuntimeError) as error:
+            filter_episode_files(episode_files, {12})
+
+        self.assertEqual(
+            str(error.exception),
+            "No episodes remained after applying episodes_range; requested=[12]; found=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]",
+        )
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")

@@ -1,3 +1,4 @@
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -527,6 +528,25 @@ def _extract_variant_codec(payload):
     return None
 
 
+def _extract_variant_label_episode_numbers(label):
+    text = str(label or "").strip()
+    if not text:
+        return None
+
+    matches = re.findall(r"\[(\d{1,3})(?:\s*-\s*(\d{1,3}))?\]", text)
+    if not matches:
+        return None
+
+    for start_raw, end_raw in reversed(matches):
+        start = int(start_raw)
+        end = int(end_raw) if end_raw else start
+        if start <= 0 or end <= 0 or start > end:
+            continue
+        return list(range(start, end + 1))
+
+    return None
+
+
 def _iter_release_variant_payloads(release_payload):
     variants = []
     seen = set()
@@ -589,8 +609,16 @@ def extract_release_source_variants(release_payload):
     for candidate in _iter_release_variant_payloads(release_payload):
         magnet = _find_magnet_value(candidate)
         codec = _extract_variant_codec(candidate)
-        episodes = release_episodes
         label = _extract_variant_label(candidate)
+        label_episodes = _extract_variant_label_episode_numbers(label)
+        episodes = release_episodes
+        if label_episodes:
+            label_episode_set = set(label_episodes)
+            episodes = [
+                episode_number
+                for episode_number in release_episodes
+                if episode_number in label_episode_set
+            ]
         resolution = _parse_variant_resolution(candidate)
 
         if not magnet or not codec or not episodes:

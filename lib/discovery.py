@@ -47,8 +47,10 @@ def find_episode_files(source_dir: Path):
 def filter_episode_files(episode_files, allowed_episodes):
     filtered = []
     excluded = []
+    detected_episode_numbers = []
 
     for episode_number, path in episode_files:
+        detected_episode_numbers.append(int(episode_number))
         if episode_number in allowed_episodes:
             filtered.append((episode_number, path))
         else:
@@ -59,6 +61,10 @@ def filter_episode_files(episode_files, allowed_episodes):
             })
 
     if not filtered:
-        raise RuntimeError("No episodes remained after applying episodes_range")
+        requested = sorted(int(episode_number) for episode_number in allowed_episodes)
+        raise RuntimeError(
+            "No episodes remained after applying episodes_range; "
+            f"requested={requested}; found={detected_episode_numbers}"
+        )
 
     return filtered, excluded
