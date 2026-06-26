@@ -20,6 +20,7 @@ from lib.telegram_bot import (
     format_log_message,
     format_log_message_markdown,
     format_jobs_message,
+    format_next_message,
     format_publish_success_message,
     format_status_message,
     format_vk_publish_error_message,
@@ -239,12 +240,13 @@ class TelegramBotTests(unittest.TestCase):
             "title_ru": "Русский тайтл",
             "season": 1,
             "episodes_range": "001",
+            "automation": {"is_ongoing": True},
         }])
 
         message = format_jobs_message(config)
 
         self.assertIn("Очередь аниме", message)
-        self.assertIn("Русский тайтл", message)
+        self.assertIn("Русский тайтл [ongoing]", message)
         self.assertNotIn("English Title |", message)
         self.assertIn("Сезон: 1", message)
         self.assertIn("Эпизоды: 001", message)
@@ -259,8 +261,10 @@ class TelegramBotTests(unittest.TestCase):
         self.assertNotIn("/help - показать команды", message)
         self.assertNotIn("Кнопки:", message)
         self.assertNotIn("Статус, Очередь, Помощь", message)
+        self.assertIn("/next - показать ближайший runtime-порядок выполнения", message)
         self.assertIn("/blacklist - показать discovery blacklist", message)
         self.assertIn("/unblacklist <номер> - убрать тайтл из discovery blacklist", message)
+        self.assertIn("Фактическое выполнение может давать приоритет ongoing", message)
 
     def test_build_main_keyboard_returns_reply_markup(self):
         keyboard = build_main_keyboard()
@@ -405,6 +409,25 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("1. А", message)
         self.assertIn("2. Б", message)
 
+    def test_jobs_message_keeps_storage_order_even_for_ongoing_items(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [
+            {"title": "Manual", "title_ru": "Ручной", "season": 1, "episodes_range": "001"},
+            {
+                "title": "Ongoing",
+                "title_ru": "Онгоинг",
+                "season": 1,
+                "episodes_range": "010",
+                "automation": {"is_ongoing": True},
+            },
+        ])
+
+        message = format_jobs_message(config)
+
+        self.assertIn("1. Ручной", message)
+        self.assertIn("2. Онгоинг [ongoing]", message)
+
     def test_jobs_message_uses_absolute_indexes_on_requested_page(self):
         tmp_dir = self.make_workspace_temp_dir()
         config = self.make_config(tmp_dir)
@@ -425,6 +448,44 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("16. Тайтл 16", message)
         self.assertIn("28. Тайтл 28", message)
         self.assertNotIn("1. Тайтл 16", message)
+
+    def test_next_message_uses_execution_order_with_ongoing_priority(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [
+            {"title": "Manual", "title_ru": "Ручной", "season": 1, "episodes_range": "001"},
+            {
+                "title": "Ongoing Full",
+                "title_ru": "Онгоинг фулл",
+                "season": 1,
+                "episodes_range": "001-010",
+                "processing_mode": "compilation",
+                "automation": {"is_ongoing": True, "publish_strategy": "full_refresh"},
+            },
+            {
+                "title": "Ongoing Single",
+                "title_ru": "Онгоинг сингл",
+                "season": 1,
+                "episodes_range": "010",
+                "processing_mode": "single_episode",
+                "automation": {"is_ongoing": True},
+            },
+        ])
+
+        jobs_message = format_jobs_message(config)
+        next_message = format_next_message(config)
+
+        self.assertIn("1. Ручной", jobs_message)
+        self.assertIn("2. Онгоинг фулл [ongoing]", jobs_message)
+        self.assertIn("3. Онгоинг сингл [ongoing]", jobs_message)
+        self.assertLess(next_message.index("1. Онгоинг сингл [ongoing]"), next_message.index("2. Онгоинг фулл [ongoing]"))
+        self.assertLess(next_message.index("2. Онгоинг фулл [ongoing]"), next_message.index("3. Ручной"))
+
+    def test_next_message_returns_empty_queue_message(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+
+        self.assertEqual(format_next_message(config), "Очередь пуста")
 
     def test_log_message_reads_tail_and_handles_missing_file(self):
         tmp_dir = self.make_workspace_temp_dir()

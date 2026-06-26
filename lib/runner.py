@@ -106,6 +106,36 @@ def is_incremental_full_refresh_job(job):
     return get_job_publish_strategy(job) == "full_refresh"
 
 
+def build_execution_priority(job):
+    automation = job.get("automation") or {}
+    is_ongoing = bool(automation.get("is_ongoing"))
+    processing_mode = get_job_processing_mode(job)
+    publish_strategy = get_job_publish_strategy(job)
+
+    if is_ongoing and processing_mode == "single_episode":
+        return 0
+    if is_ongoing and publish_strategy == "full_refresh":
+        return 1
+    if is_ongoing:
+        return 2
+    return 3
+
+
+def build_execution_order(jobs, defaults=None):
+    defaults = defaults or {}
+    merged_jobs = [deep_merge(defaults, job) for job in list(jobs or [])]
+    return [
+        item[2]
+        for item in sorted(
+            (
+                (build_execution_priority(job), index, job)
+                for index, job in enumerate(merged_jobs)
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+    ]
+
+
 def update_state_after_successful_job(config, job):
     if get_job_release_id(job) is None and not is_ongoing_compilation_job(job):
         return
@@ -139,7 +169,7 @@ def run_jobs(
         }
 
     defaults = config.get("defaults", {})
-    merged_jobs = [deep_merge(defaults, job) for job in active_jobs]
+    merged_jobs = build_execution_order(active_jobs, defaults=defaults)
 
     validate_required_env(config, merged_jobs)
     validate_required_tools(config, merged_jobs)

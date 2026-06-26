@@ -431,6 +431,126 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("lib.runner.validate_required_files")
     @patch("lib.runner.validate_required_tools")
     @patch("lib.runner.validate_required_env")
+    def test_run_jobs_prioritizes_ongoing_before_manual(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [
+            {"title": "Manual", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}},
+            {
+                "title": "Ongoing",
+                "season": 1,
+                "episodes_range": "010",
+                "processing_mode": "single_episode",
+                "source": {"type": "magnet", "magnet": "m2"},
+                "automation": {"is_ongoing": True, "publish_strategy": "single_update"},
+            },
+        ]
+        mock_load_completed_jobs.return_value = []
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "ok",
+            "delivery_summary": {"vk": {"enabled": False}, "s3": {"enabled": False, "uploaded": False}},
+        }
+
+        run_jobs({"defaults": {}}, jobs)
+
+        self.assertEqual(mock_process_job.call_args_list[0].args[0]["title"], "Ongoing")
+        self.assertEqual(mock_process_job.call_args_list[1].args[0]["title"], "Manual")
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_prioritizes_ongoing_single_before_full_refresh(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [
+            {
+                "title": "Refresh",
+                "season": 1,
+                "episodes_range": "001-010",
+                "processing_mode": "compilation",
+                "source": {"type": "magnet", "magnet": "m1"},
+                "automation": {"is_ongoing": True, "publish_strategy": "full_refresh"},
+            },
+            {
+                "title": "Single",
+                "season": 1,
+                "episodes_range": "010",
+                "processing_mode": "single_episode",
+                "source": {"type": "magnet", "magnet": "m2"},
+                "automation": {"is_ongoing": True, "publish_strategy": "single_update"},
+            },
+        ]
+        mock_load_completed_jobs.return_value = []
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "ok",
+            "delivery_summary": {"vk": {"enabled": False}, "s3": {"enabled": False, "uploaded": False}},
+        }
+
+        run_jobs({"defaults": {}}, jobs)
+
+        self.assertEqual(mock_process_job.call_args_list[0].args[0]["title"], "Single")
+        self.assertEqual(mock_process_job.call_args_list[1].args[0]["title"], "Refresh")
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    def test_run_jobs_preserves_original_order_for_equal_priority(
+        self,
+        mock_validate_env,
+        mock_validate_tools,
+        mock_validate_files,
+        mock_save_jobs,
+        mock_load_completed_jobs,
+        mock_save_completed_jobs,
+        mock_process_job,
+    ):
+        jobs = [
+            {"title": "Manual A", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}},
+            {"title": "Manual B", "season": 1, "episodes_range": "002", "source": {"type": "magnet", "magnet": "m2"}},
+        ]
+        mock_load_completed_jobs.return_value = []
+        mock_process_job.return_value = {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "ok",
+            "delivery_summary": {"vk": {"enabled": False}, "s3": {"enabled": False, "uploaded": False}},
+        }
+
+        run_jobs({"defaults": {}}, jobs)
+
+        self.assertEqual(mock_process_job.call_args_list[0].args[0]["title"], "Manual A")
+        self.assertEqual(mock_process_job.call_args_list[1].args[0]["title"], "Manual B")
+
+    @patch("lib.runner.process_job")
+    @patch("lib.runner.save_completed_jobs")
+    @patch("lib.runner.load_completed_jobs")
+    @patch("lib.runner.save_jobs")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
     def test_run_jobs_skips_full_refresh_after_single_episode_failure(
         self,
         mock_validate_env,

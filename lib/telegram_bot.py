@@ -25,6 +25,7 @@ from lib.autojobs import (
 from lib.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
 from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
 from lib.helpers import ensure_non_empty_slug, parse_episodes_range
+from lib.runner import build_execution_order
 from lib.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
 
 
@@ -776,6 +777,7 @@ def format_status_message(config):
         f"Эпизодов в очереди: {len(state.get('queued_release_episodes', {}))}",
         f"Завершённых эпизодов: {len(state.get('completed_release_episodes', {}))}",
         f"В blacklist discovery: {len(state.get('discovery_blacklist', []))}",
+        "Выполнение может идти с приоритетом ongoing, даже если порядок в /jobs другой",
     ]
     return "\n".join(lines)
 
@@ -909,9 +911,37 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True):
     ]
     for index, job in enumerate(page_data["jobs"], start=page_data["start_index"] + 1):
         prefix = f"{index}. " if numbered else "- "
-        lines.append(f"{prefix}{get_display_title(job)}")
+        ongoing_marker = " [ongoing]" if (job.get("automation") or {}).get("is_ongoing") else ""
+        lines.append(f"{prefix}{get_display_title(job)}{ongoing_marker}")
         lines.append(f"  Сезон: {job.get('season', 1)}")
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
+    return "\n".join(lines)
+
+
+def format_next_message(config, limit=10):
+    jobs = load_jobs(config)
+    if not jobs:
+        return "Очередь пуста"
+
+    normalized_limit = max(1, int(limit))
+    execution_jobs = build_execution_order(jobs, defaults=config.get("defaults", {}))
+    visible_jobs = execution_jobs[:normalized_limit]
+    lines = [
+        "Следующие к выполнению",
+        "",
+        "Порядок показан с учётом приоритета ongoing.",
+        "",
+    ]
+    for index, job in enumerate(visible_jobs, start=1):
+        ongoing_marker = " [ongoing]" if (job.get("automation") or {}).get("is_ongoing") else ""
+        lines.append(f"{index}. {get_display_title(job)}{ongoing_marker}")
+        lines.append(f"  Сезон: {job.get('season', 1)}")
+        lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
+    if len(execution_jobs) > normalized_limit:
+        lines.extend([
+            "",
+            f"Показано: {len(visible_jobs)} из {len(execution_jobs)}",
+        ])
     return "\n".join(lines)
 
 
@@ -1553,6 +1583,7 @@ def build_help_message():
         "/start - краткая справка",
         "/status - статус очереди и runtime",
         "/current - текущее или последнее выполнение",
+        "/next - показать ближайший runtime-порядок выполнения",
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
         "/jobs - показать последние аниме в очереди",
@@ -1562,6 +1593,8 @@ def build_help_message():
         "/blacklist - показать discovery blacklist",
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
         "/unblacklist <номер> - убрать тайтл из discovery blacklist",
+        "",
+        "Порядок в /jobs — операторский. Фактическое выполнение может давать приоритет ongoing.",
         "",
         "Пример:",
         "/add Название тайтла ; Серия (001-012) ; magnet-ссылка ; сезон (1/2/3) ; тип приватности (0 - для всех; 5 - для донов)",
@@ -1578,6 +1611,17 @@ def handle_command(config, text):
         return format_status_message(config)
     if text.startswith("/current"):
         return format_current_message()
+    if text.startswith("/next"):
+        parts = text.split(maxsplit=1)
+        limit = 10
+        if len(parts) == 2:
+            try:
+                limit = int(parts[1].strip())
+            except ValueError as exc:
+                raise RuntimeError("Формат: /next или /next <количество>") from exc
+            if limit < 1:
+                raise RuntimeError("Количество должно быть не меньше 1")
+        return format_next_message(config, limit=limit)
     if text.startswith("/errors"):
         return format_errors_message()
     if text.startswith("/log"):
