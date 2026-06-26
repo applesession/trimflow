@@ -241,6 +241,63 @@ def record_skipped_item(state, item):
     state["skipped_items"] = skipped_items
 
 
+def get_discovery_blacklist(state):
+    blacklist = state.setdefault("discovery_blacklist", [])
+    return blacklist if isinstance(blacklist, list) else []
+
+
+def build_blacklist_item(release_id, *, title, title_ru=None, season=1, source="telegram"):
+    return {
+        "release_id": int(release_id),
+        "title": str(title or "").strip(),
+        "title_ru": str(title_ru or "").strip() or None,
+        "season": int(season or 1),
+        "added_at": utc_now_iso(),
+        "source": str(source or "telegram").strip() or "telegram",
+    }
+
+
+def find_blacklist_item(state, release_id):
+    release_id = _parse_positive_int(release_id)
+    if release_id is None:
+        return None
+    for item in get_discovery_blacklist(state):
+        if _parse_positive_int(item.get("release_id")) == release_id:
+            return item
+    return None
+
+
+def add_release_to_blacklist(state, blacklist_item):
+    release_id = _parse_positive_int((blacklist_item or {}).get("release_id"))
+    if release_id is None:
+        raise RuntimeError("missing_release_id_for_blacklist")
+    blacklist = get_discovery_blacklist(state)
+    existing = find_blacklist_item(state, release_id)
+    if existing is not None:
+        return state, True
+    blacklist.append(dict(blacklist_item))
+    state["discovery_blacklist"] = blacklist
+    return state, False
+
+
+def remove_release_from_blacklist(state, release_id):
+    release_id = _parse_positive_int(release_id)
+    if release_id is None:
+        raise RuntimeError("missing_release_id_for_blacklist")
+    blacklist = get_discovery_blacklist(state)
+    remaining = []
+    removed_item = None
+    for item in blacklist:
+        if removed_item is None and _parse_positive_int(item.get("release_id")) == release_id:
+            removed_item = item
+            continue
+        remaining.append(item)
+    if removed_item is None:
+        raise RuntimeError("blacklist_entry_not_found")
+    state["discovery_blacklist"] = remaining
+    return state, removed_item
+
+
 def queue_discovered_job(jobs, candidate_job):
     existing_job = find_matching_job(jobs, candidate_job)
     if existing_job is None:
@@ -259,10 +316,11 @@ def discover_jobs(config, jobs, state):
     automation = normalize_automation_config(config)
     updated_jobs = deepcopy(jobs)
     updated_state = deepcopy(state)
-    updated_state.setdefault("schema_version", 2)
+    updated_state.setdefault("schema_version", 3)
     updated_state.setdefault("job_index", {})
     updated_state.setdefault("skipped_items", [])
     updated_state.setdefault("ongoing_progress", {})
+    updated_state.setdefault("discovery_blacklist", [])
     _get_episode_tracking_maps(updated_state)
 
     if not automation.get("enabled", True):
@@ -276,6 +334,7 @@ def discover_jobs(config, jobs, state):
                 "skipped_items": len(updated_state["skipped_items"]),
                 "queued_release_episodes": len(updated_state["queued_release_episodes"]),
                 "completed_release_episodes": len(updated_state["completed_release_episodes"]),
+                "blacklisted_releases": len(updated_state["discovery_blacklist"]),
                 "request_urls": [],
                 "status": "disabled",
             },
@@ -299,6 +358,16 @@ def discover_jobs(config, jobs, state):
         release_payload = release_details["release"]
         release_id = release_payload.get("id") or release_stub.get("id") or release_stub.get("release_id")
         if release_id is None:
+            continue
+        if find_blacklist_item(updated_state, release_id) is not None:
+            record_skipped_item(updated_state, {
+                "release_id": release_id,
+                "alias": release_payload.get("alias"),
+                "title": extract_release_title(release_payload),
+                "episodes": [],
+                "reason": "blacklisted_release",
+                "recorded_at": utc_now_iso(),
+            })
             continue
 
         try:
@@ -334,7 +403,6 @@ def discover_jobs(config, jobs, state):
                 selected_variant=selected_variant,
             )
         except RuntimeError as exc:
-            mark_release_episodes_seen(updated_state, release_id, new_episode_numbers)
             record_skipped_item(updated_state, {
                 "release_id": release_id,
                 "alias": release_payload.get("alias"),
@@ -427,6 +495,7 @@ def discover_jobs(config, jobs, state):
             "skipped_items": len(updated_state["skipped_items"]),
             "queued_release_episodes": len(updated_state["queued_release_episodes"]),
             "completed_release_episodes": len(updated_state["completed_release_episodes"]),
+            "blacklisted_releases": len(updated_state["discovery_blacklist"]),
             "request_urls": releases_result.get("request_urls", []),
         },
     }

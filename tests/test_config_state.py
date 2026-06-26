@@ -78,6 +78,7 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(state["queued_release_episodes"], {})
         self.assertEqual(state["completed_release_episodes"]["1:001"]["episode"], 1)
+        self.assertEqual(state["discovery_blacklist"], [])
         self.assertNotIn("seen_release_episodes", state)
 
     def test_load_completed_jobs_returns_empty_list_when_file_is_missing(self):
@@ -467,6 +468,45 @@ class ConfigStateTests(unittest.TestCase):
         self.assertNotIn("mal_id", result["jobs"][0])
         self.assertEqual(result["jobs"][0]["episodes_range"], "001")
         self.assertEqual(result["summary"]["created_jobs"], 1)
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discover_jobs_skips_blacklisted_release(self, mock_list_recent_releases, mock_get_release_details):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 999, "alias": "blocked-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 999,
+                "alias": "blocked-release",
+                "is_ongoing": True,
+                "name": {"english": "Blocked Release"},
+                "episodes": [{"number": 1}],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:blocked",
+                }],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/blocked-release",
+        }
+
+        state = build_default_state()
+        state["discovery_blacklist"].append({
+            "release_id": 999,
+            "title": "Blocked Release",
+            "title_ru": None,
+            "season": 1,
+            "added_at": "2026-06-27T00:00:00+00:00",
+            "source": "telegram",
+        })
+
+        result = discover_jobs({}, [], state)
+
+        self.assertEqual(result["jobs"], [])
+        self.assertEqual(result["summary"]["created_jobs"], 0)
+        self.assertEqual(result["state"]["skipped_items"][0]["reason"], "blacklisted_release")
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")

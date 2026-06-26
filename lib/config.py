@@ -40,10 +40,11 @@ def get_completed_jobs_path(config):
 
 def build_default_state():
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "last_discovery_at": None,
         "queued_release_episodes": {},
         "completed_release_episodes": {},
+        "discovery_blacklist": [],
         "job_index": {},
         "skipped_items": [],
         "ongoing_progress": {},
@@ -80,9 +81,10 @@ def load_state(config):
     state.update(data)
     state.setdefault("queued_release_episodes", {})
     state.setdefault("completed_release_episodes", {})
+    state.setdefault("discovery_blacklist", [])
     if not state.get("completed_release_episodes") and isinstance(legacy_seen_release_episodes, dict):
         state["completed_release_episodes"] = legacy_seen_release_episodes
-    state["schema_version"] = max(int(state.get("schema_version", 1)), 2)
+    state["schema_version"] = max(int(state.get("schema_version", 1)), 3)
     state.setdefault("job_index", {})
     state.setdefault("skipped_items", [])
     state.setdefault("ongoing_progress", {})

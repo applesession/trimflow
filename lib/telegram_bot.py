@@ -11,10 +11,15 @@ import requests
 from urllib3.util import connection as urllib3_connection
 
 from lib.autojobs import (
+    add_release_to_blacklist,
+    build_blacklist_item,
     find_matching_job,
+    find_blacklist_item,
     format_episodes_range,
+    get_job_release_id,
     mark_job_episodes_completed,
     mark_job_episodes_queued,
+    remove_release_from_blacklist,
     unmark_job_episodes_queued,
 )
 from lib.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
@@ -82,6 +87,10 @@ def build_confirmation_keyboard(action_type):
         buttons = [[{"text": "Подтвердить удаление"}, {"text": "Отменить удаление"}]]
     elif action_type == "complete":
         buttons = [[{"text": "Подтвердить завершение"}, {"text": "Отменить завершение"}]]
+    elif action_type == "blacklist":
+        buttons = [[{"text": "Подтвердить blacklist"}, {"text": "Отменить blacklist"}]]
+    elif action_type == "unblacklist":
+        buttons = [[{"text": "Подтвердить снятие blacklist"}, {"text": "Отменить снятие blacklist"}]]
     else:
         buttons = [[{"text": "Подтвердить повтор"}, {"text": "Отменить повтор"}]]
     return {
@@ -766,6 +775,7 @@ def format_status_message(config):
         f"Последнее обновление очереди: {format_datetime_ru(state.get('last_discovery_at'))}",
         f"Эпизодов в очереди: {len(state.get('queued_release_episodes', {}))}",
         f"Завершённых эпизодов: {len(state.get('completed_release_episodes', {}))}",
+        f"В blacklist discovery: {len(state.get('discovery_blacklist', []))}",
     ]
     return "\n".join(lines)
 
@@ -1064,6 +1074,27 @@ def build_pending_action_payload(action_type, source, index, job_snapshot):
     }
 
 
+def get_blacklist_entries(config):
+    state = load_state(config)
+    entries = list(state.get("discovery_blacklist", []))
+    entries.sort(key=lambda item: (
+        str(item.get("title_ru") or item.get("title") or "").strip().lower(),
+        int(item.get("season") or 1),
+        int(item.get("release_id") or 0),
+    ))
+    return entries
+
+
+def build_blacklist_pending_action_payload(action_type, index, blacklist_item):
+    return {
+        "type": action_type,
+        "source": "blacklist",
+        "index": index,
+        "created_at": datetime.now().astimezone().isoformat(),
+        "blacklist_item": dict(blacklist_item or {}),
+    }
+
+
 def format_remove_confirmation(job, index):
     return "\n".join([
         "Подтверждение удаления",
@@ -1134,6 +1165,74 @@ def format_retry_result(job, already_exists=False):
     ])
 
 
+def format_blacklist_confirmation(job, index):
+    return "\n".join([
+        "Подтверждение blacklist",
+        "",
+        f"Номер: {index}",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+        f"Эпизоды: {job.get('episodes_range', '?')}",
+        "",
+        "Тайтл будет добавлен в discovery blacklist и удалён из активной очереди",
+        "Подтверди действие кнопкой ниже",
+    ])
+
+
+def format_blacklist_list(config):
+    entries = get_blacklist_entries(config)
+    if not entries:
+        return "Discovery blacklist пуст"
+
+    lines = [
+        "Discovery blacklist",
+        "",
+        f"Всего: {len(entries)}",
+        "",
+    ]
+    for index, item in enumerate(entries, start=1):
+        title = item.get("title_ru") or item.get("title") or "Без названия"
+        lines.append(f"{index}. {title}")
+        lines.append(f"  Release ID: {item.get('release_id')}")
+        lines.append(f"  Сезон: {item.get('season', 1)}")
+    lines.extend(["", "Формат: /unblacklist <номер>"])
+    return "\n".join(lines)
+
+
+def format_blacklist_result(job, already_blacklisted=False):
+    lines = [
+        "Тайтл добавлен в discovery blacklist" if not already_blacklisted else "Тайтл уже был в discovery blacklist",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job.get('season', 1)}",
+    ]
+    return "\n".join(lines)
+
+
+def format_unblacklist_confirmation(item, index):
+    title = item.get("title_ru") or item.get("title") or "Без названия"
+    return "\n".join([
+        "Подтверждение снятия blacklist",
+        "",
+        f"Номер: {index}",
+        f"Тайтл: {title}",
+        f"Release ID: {item.get('release_id')}",
+        "",
+        "После снятия blacklist autodiscovery снова сможет добавить релиз в очередь",
+        "Подтверди действие кнопкой ниже",
+    ])
+
+
+def format_unblacklist_result(item):
+    title = item.get("title_ru") or item.get("title") or "Без названия"
+    return "\n".join([
+        "Тайтл убран из discovery blacklist",
+        "",
+        f"Тайтл: {title}",
+        f"Release ID: {item.get('release_id')}",
+    ])
+
+
 def format_complete_result(job, already_archived=False):
     if already_archived:
         return "\n".join([
@@ -1152,6 +1251,35 @@ def format_complete_result(job, already_archived=False):
         f"Сезон: {job.get('season', 1)}",
         f"Эпизоды: {job.get('episodes_range', '?')}",
     ])
+
+
+def add_job_to_blacklist(config, job):
+    release_id = get_job_release_id(job)
+    if release_id is None:
+        raise RuntimeError("Этот job нельзя добавить в discovery blacklist: отсутствует release_id")
+
+    state = load_state(config)
+    blacklist_item = build_blacklist_item(
+        release_id,
+        title=job.get("title"),
+        title_ru=job.get("title_ru"),
+        season=job.get("season", 1),
+        source="telegram",
+    )
+    updated_state, already_blacklisted = add_release_to_blacklist(state, blacklist_item)
+    save_state(config, updated_state)
+
+    jobs = load_jobs(config)
+    if find_matching_job(jobs, job) is not None:
+        remove_job_by_identity(config, build_job_identity(job))
+    return already_blacklisted
+
+
+def get_blacklist_entry_by_index(config, index):
+    entries = get_blacklist_entries(config)
+    if index > len(entries):
+        raise RuntimeError(f"Запись blacklist с номером {index} не найдена")
+    return entries[index - 1]
 
 
 def remove_job_by_identity(config, job_identity):
@@ -1232,6 +1360,10 @@ def confirm_pending_action(config, chat_id, text):
         "Отменить завершение",
         "Подтвердить повтор",
         "Отменить повтор",
+        "Подтвердить blacklist",
+        "Отменить blacklist",
+        "Подтвердить снятие blacklist",
+        "Отменить снятие blacklist",
     }
     if text not in actionable_texts:
         return None
@@ -1244,11 +1376,15 @@ def confirm_pending_action(config, chat_id, text):
         "remove": "Подтвердить удаление",
         "complete": "Подтвердить завершение",
         "retry": "Подтвердить повтор",
+        "blacklist": "Подтвердить blacklist",
+        "unblacklist": "Подтвердить снятие blacklist",
     }
     cancel_map = {
         "remove": "Отменить удаление",
         "complete": "Отменить завершение",
         "retry": "Отменить повтор",
+        "blacklist": "Отменить blacklist",
+        "unblacklist": "Отменить снятие blacklist",
     }
     action_type = pending.get("type")
     if text == cancel_map.get(action_type):
@@ -1272,6 +1408,18 @@ def confirm_pending_action(config, chat_id, text):
         job = pending.get("job_snapshot") or {}
         added = retry_job_to_queue(config, job)
         return format_retry_result(job, already_exists=not added)
+
+    if action_type == "blacklist":
+        job = pending.get("job_snapshot") or {}
+        already_blacklisted = add_job_to_blacklist(config, job)
+        return format_blacklist_result(job, already_blacklisted=already_blacklisted)
+
+    if action_type == "unblacklist":
+        blacklist_item = pending.get("blacklist_item") or {}
+        state = load_state(config)
+        updated_state, removed_item = remove_release_from_blacklist(state, blacklist_item.get("release_id"))
+        save_state(config, updated_state)
+        return format_unblacklist_result(removed_item)
 
     return "Неизвестное действие"
 
@@ -1411,6 +1559,9 @@ def build_help_message():
         "/remove <номер> - удалить аниме из очереди",
         "/complete <номер> - убрать аниме из очереди и вручную пометить завершённым",
         "/retry <номер> - повторно поставить аниме в очередь",
+        "/blacklist - показать discovery blacklist",
+        "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
+        "/unblacklist <номер> - убрать тайтл из discovery blacklist",
         "",
         "Пример:",
         "/add Название тайтла ; Серия (001-012) ; magnet-ссылка ; сезон (1/2/3) ; тип приватности (0 - для всех; 5 - для донов)",
@@ -1462,6 +1613,27 @@ def handle_command(config, text):
             "text": format_complete_confirmation(job, index),
             "reply_markup": build_confirmation_keyboard("complete"),
             "pending_action": build_pending_action_payload("complete", "jobs", index, job),
+        }
+    if text == "/blacklist":
+        return format_blacklist_list(config)
+    if text.startswith("/blacklist "):
+        index = parse_index_command(text, "blacklist")
+        job, _jobs = get_job_by_index(config, index)
+        release_id = get_job_release_id(job)
+        if release_id is None:
+            raise RuntimeError("Этот job нельзя добавить в discovery blacklist: отсутствует release_id")
+        return {
+            "text": format_blacklist_confirmation(job, index),
+            "reply_markup": build_confirmation_keyboard("blacklist"),
+            "pending_action": build_pending_action_payload("blacklist", "jobs", index, job),
+        }
+    if text.startswith("/unblacklist"):
+        index = parse_index_command(text, "unblacklist")
+        item = get_blacklist_entry_by_index(config, index)
+        return {
+            "text": format_unblacklist_confirmation(item, index),
+            "reply_markup": build_confirmation_keyboard("unblacklist"),
+            "pending_action": build_blacklist_pending_action_payload("unblacklist", index, item),
         }
     if text == "/retry":
         return format_retry_candidates_message(config)

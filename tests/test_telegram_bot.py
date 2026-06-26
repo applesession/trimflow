@@ -228,6 +228,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Последнее обновление очереди: ", message)
         self.assertIn("Эпизодов в очереди: 1", message)
         self.assertIn("Завершённых эпизодов: 2", message)
+        self.assertIn("В blacklist discovery: 0", message)
         self.assertNotIn("Последний discovery", message)
 
     def test_jobs_message_prefers_title_ru(self):
@@ -258,6 +259,8 @@ class TelegramBotTests(unittest.TestCase):
         self.assertNotIn("/help - показать команды", message)
         self.assertNotIn("Кнопки:", message)
         self.assertNotIn("Статус, Очередь, Помощь", message)
+        self.assertIn("/blacklist - показать discovery blacklist", message)
+        self.assertIn("/unblacklist <номер> - убрать тайтл из discovery blacklist", message)
 
     def test_build_main_keyboard_returns_reply_markup(self):
         keyboard = build_main_keyboard()
@@ -512,6 +515,139 @@ class TelegramBotTests(unittest.TestCase):
         state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(jobs_data, [])
         self.assertEqual(state_data["queued_release_episodes"], {})
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_blacklist_flow_adds_release_and_removes_job(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_jobs(config, [{
+            "title": "A",
+            "title_ru": "А",
+            "season": 1,
+            "episodes_range": "001",
+            "automation": {"release_id": 42},
+        }])
+        save_state(config, {
+            "schema_version": 3,
+            "queued_release_episodes": {"42:001": {"release_id": 42, "episode": 1}},
+            "completed_release_episodes": {},
+            "discovery_blacklist": [],
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handled = handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/blacklist 1"},
+            })
+            self.assertTrue(handled)
+            pending = get_pending_action(123)
+            self.assertEqual(pending["type"], "blacklist")
+
+            handle_update(config, {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить blacklist"},
+            })
+
+        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
+        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(jobs_data, [])
+        self.assertEqual(state_data["queued_release_episodes"], {})
+        self.assertEqual(len(state_data["discovery_blacklist"]), 1)
+        self.assertEqual(state_data["discovery_blacklist"][0]["release_id"], 42)
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_blacklist_command_rejects_job_without_release_id(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_jobs(config, [{"title": "Manual", "season": 1, "episodes_range": "001"}])
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handled = handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/blacklist 1"},
+            })
+
+        self.assertTrue(handled)
+        self.assertIn("отсутствует release_id", mock_send_message.call_args.args[1])
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_unblacklist_flow_removes_blacklist_entry(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_state(config, {
+            "schema_version": 3,
+            "queued_release_episodes": {},
+            "completed_release_episodes": {},
+            "discovery_blacklist": [{
+                "release_id": 42,
+                "title": "A",
+                "title_ru": "А",
+                "season": 1,
+                "added_at": "2026-06-27T00:00:00+00:00",
+                "source": "telegram",
+            }],
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handled = handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/unblacklist 1"},
+            })
+            self.assertTrue(handled)
+            pending = get_pending_action(123)
+            self.assertEqual(pending["type"], "unblacklist")
+
+            handle_update(config, {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить снятие blacklist"},
+            })
+
+        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state_data["discovery_blacklist"], [])
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_blacklist_list_command_shows_entries(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_state(config, {
+            "schema_version": 3,
+            "queued_release_episodes": {},
+            "completed_release_episodes": {},
+            "discovery_blacklist": [{
+                "release_id": 42,
+                "title": "A",
+                "title_ru": "А",
+                "season": 1,
+                "added_at": "2026-06-27T00:00:00+00:00",
+                "source": "telegram",
+            }],
+            "job_index": {},
+            "skipped_items": [],
+            "ongoing_progress": {},
+        })
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/blacklist"},
+            })
+
+        self.assertIn("Discovery blacklist", mock_send_message.call_args.args[1])
+        self.assertIn("Release ID: 42", mock_send_message.call_args.args[1])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
