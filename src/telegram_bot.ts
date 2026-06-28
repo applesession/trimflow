@@ -1,6 +1,6 @@
 import { initDb, getTelegramState, saveTelegramState } from "./shared/db";
 import { ensureRuntimePaths, logLine } from "./shared/runtime";
-import { fetchUpdates, sendMessage, isAllowedChat } from "./api/telegram";
+import { fetchUpdates, sendMessage, sendFormattedMessage, isAllowedChat } from "./api/telegram";
 import { handleCommand, buildMainKeyboard } from "./modules/bot";
 
 const paths = ensureRuntimePaths();
@@ -53,7 +53,13 @@ while (true) {
         }
 
         const replyText = typeof response === "string" ? response : (response as Record<string, string>).text ?? String(response);
-        sendMessage(chatId, replyText, buildMainKeyboard());
+        const parseMode = typeof response === "object" ? (response as Record<string, string>).parseMode : undefined;
+
+        if (parseMode) {
+          sendFormattedMessage(chatId, replyText, parseMode, buildMainKeyboard());
+        } else {
+          sendMessage(chatId, replyText, buildMainKeyboard());
+        }
       }
 
       const updateId = upd.update_id as number;

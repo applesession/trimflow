@@ -126,7 +126,9 @@ export function formatLogMessage(): string {
   if (tail.length === 0) return "Лог пока пуст";
   let content = tail.join("\n");
   if (content.length > 3500) content = content.slice(-3500);
-  return `Хвост лога (${Math.min(20, lines.length)} строк)\n\n${content}`;
+  // Escape triple backticks inside the code block
+  const safe = content.replace(/```/g, "``\\u200b`");
+  return `Хвост лога \\(${Math.min(20, lines.length)} строк\\)\n\n\`\`\`\n${safe}\n\`\`\``;
 }
 
 // ============================================================================
@@ -184,7 +186,7 @@ export function handleCommand(text: string): string | Record<string, unknown> {
   if (text === "/status") return formatStatusMessage();
   if (text === "/current") return formatCurrentMessage();
   if (text === "/errors") return formatErrorsMessage();
-  if (text === "/log") return formatLogMessage();
+  if (text === "/log") return { text: formatLogMessage(), parseMode: "MarkdownV2" };
 
   if (text.startsWith("/add ")) return formatAddResult(addJobFromCommand(text));
 
