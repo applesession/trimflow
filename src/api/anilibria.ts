@@ -18,22 +18,18 @@ function getProxyUrl(): string | undefined {
 }
 
 async function requestJson(url: string, timeout = 20): Promise<{ data: unknown; requestUrl: string }> {
-  const proxy = getProxyUrl();
   const response = await fetch(url, {
     headers: DEFAULT_HEADERS,
     signal: AbortSignal.timeout(timeout * 1000),
-    ...(proxy ? { proxy } : {}),
   });
   if (!response.ok) throw new Error(`AniLibria HTTP ${response.status} for ${url}`);
   return { data: await response.json(), requestUrl: url };
 }
 
 async function requestText(url: string, timeout = 30): Promise<{ text: string; requestUrl: string }> {
-  const proxy = getProxyUrl();
   const response = await fetch(url, {
     headers: DEFAULT_HEADERS,
     signal: AbortSignal.timeout(timeout * 1000),
-    ...(proxy ? { proxy } : {}),
   });
   if (!response.ok) throw new Error(`AniLibria HTTP ${response.status} for ${url}`);
   return { text: await response.text(), requestUrl: url };

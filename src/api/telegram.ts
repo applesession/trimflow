@@ -47,14 +47,12 @@ async function telegramRequest(
   if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
 
   const url = `${TELEGRAM_API_BASE}/bot${token}/${method}`;
-  const proxy = getTelegramProxyUrl();
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(timeout),
-    ...(proxy ? { proxy } : {}),
   });
 
   if (!response.ok) {
