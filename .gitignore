@@ -1,13 +1,32 @@
+# Secrets
 .env
-.venv/
-venv/
+config.json
+
+# Bun / Node
+node_modules/
+bun.lock
+
+# SQLite database
+*.db
+*.db-journal
+*.db-wal
+
+# Python (detector only)
+__pycache__/
+*.py[cod]
+
+# Legacy JSON state (migrated to SQLite)
 jobs.json
 state.json
 completed_jobs.json
 telegram_state.json
-__pycache__/
-*.py[cod]
+
+# Runtime artifacts
 .runtime/
 logs/
 .test_tmp/
-config.json
+data/
+downloads/
+input/
+output/
+temp/

@@ -1052,3 +1052,44 @@ def build_detector_context(episode_infos, config, temp_dir: Path, detector_input
 
 def get_detector_type_result(detector_context, episode_number, skip_type):
     return detector_context.get("results", {}).get(skip_type, {}).get(episode_number)
+
+
+if __name__ == "__main__":
+    import sys, json
+    from pathlib import Path
+
+    raw = sys.stdin.read()
+    input_data = json.loads(raw)
+
+    episode_infos = []
+    for ep in input_data["episode_infos"]:
+        episode_infos.append({
+            "episode": int(ep["episode"]),
+            "path": str(ep["path"]),
+            "duration": float(ep["duration"]),
+        })
+
+    config = input_data["config"]
+    temp_dir = Path(input_data["temp_dir"])
+    detector_inputs = input_data.get("detector_inputs", {})
+
+    # Deserialize provider results
+    aniskip_by_episode = {}
+    for ep, result in detector_inputs.get("aniskip_by_episode", {}).items():
+        aniskip_by_episode[int(ep)] = result
+    anilibria_by_episode = {}
+    for ep, result in detector_inputs.get("anilibria_by_episode", {}).items():
+        anilibria_by_episode[int(ep)] = result
+
+    context = build_detector_context(
+        episode_infos=episode_infos,
+        config=config,
+        temp_dir=temp_dir,
+        detector_inputs={
+            "aniskip_by_episode": aniskip_by_episode,
+            "anilibria_by_episode": anilibria_by_episode,
+        },
+    )
+
+    result = _serialize_context_for_cache(context)
+    print(json.dumps(result, ensure_ascii=False))
