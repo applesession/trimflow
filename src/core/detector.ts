@@ -77,8 +77,10 @@ export function buildDetectorContext(
     },
   };
 
+  const pythonPath = Bun.env.PYTHON_PATH || "python3";
+
   const proc = Bun.spawnSync(
-    ["python", "src/detector.py"],
+    [pythonPath, "src/detector.py"],
     {
       stdin: Buffer.from(JSON.stringify(inputPayload)),
       stdout: "pipe",
