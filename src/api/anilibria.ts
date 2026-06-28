@@ -6,33 +6,31 @@ const TORRENTS_PAGE_URLS = [
   "https://aniliberty.top/anime/torrents",
   "https://anilibria.top/anime/torrents",
 ];
-const DEFAULT_HEADERS = {
-  "User-Agent": "workspace-gojo-satoru/2.0 (+https://aniliberty.top)",
-  "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
-};
 
-function getProxyUrl(): string | undefined {
-  const raw = Bun.env.ANILIBERTY_PROXY_URL?.trim();
-  if (!raw) return undefined;
-  return raw.replace(/^socks5h:\/\//, "socks5://");
+// ============================================================================
+// Curl subprocess helpers (proxychains-compatible)
+// ============================================================================
+
+function curlGet(url: string, timeout = 20): string {
+  const proc = Bun.spawnSync(
+    ["curl", "-s", "--connect-timeout", String(timeout), "--max-time", String(timeout), url],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const stdout = new TextDecoder().decode(proc.stdout);
+  if (proc.exitCode !== 0) {
+    const stderr = new TextDecoder().decode(proc.stderr);
+    throw new Error(`curl HTTP failed for ${url} (exit ${proc.exitCode}): ${stderr || stdout}`);
+  }
+  return stdout;
 }
 
-async function requestJson(url: string, timeout = 20): Promise<{ data: unknown; requestUrl: string }> {
-  const response = await fetch(url, {
-    headers: DEFAULT_HEADERS,
-    signal: AbortSignal.timeout(timeout * 1000),
-  });
-  if (!response.ok) throw new Error(`AniLibria HTTP ${response.status} for ${url}`);
-  return { data: await response.json(), requestUrl: url };
+function curlGetJson(url: string, timeout = 20): { data: unknown; requestUrl: string } {
+  const text = curlGet(url, timeout);
+  return { data: JSON.parse(text), requestUrl: url };
 }
 
-async function requestText(url: string, timeout = 30): Promise<{ text: string; requestUrl: string }> {
-  const response = await fetch(url, {
-    headers: DEFAULT_HEADERS,
-    signal: AbortSignal.timeout(timeout * 1000),
-  });
-  if (!response.ok) throw new Error(`AniLibria HTTP ${response.status} for ${url}`);
-  return { text: await response.text(), requestUrl: url };
+function curlGetText(url: string, timeout = 30): { text: string; requestUrl: string } {
+  return { text: curlGet(url, timeout), requestUrl: url };
 }
 
 // ============================================================================
@@ -60,7 +58,7 @@ async function buildRecentReleasesFromApi(limit: number, urls: string[], errors:
   for (const [path, query] of attempts) {
     try {
       const url = query ? `${path}?${query}` : path;
-      const { data, requestUrl } = await requestJson(url);
+      const { data, requestUrl } = curlGetJson(url);
       urls.push(requestUrl);
       const releases = normalizeReleaseList(data);
       if (releases.length > 0) return releases;
@@ -88,7 +86,7 @@ async function buildRecentReleasesFromPage(limit: number, urls: string[], errors
   let aliases: string[] = [];
   for (const pageUrl of TORRENTS_PAGE_URLS) {
     try {
-      const { text, requestUrl } = await requestText(pageUrl);
+      const { text, requestUrl } = curlGetText(pageUrl);
       urls.push(requestUrl);
       aliases = extractReleaseAliasesFromPage(text);
       if (aliases.length > 0) break;
@@ -143,12 +141,8 @@ export async function listRecentReleases(limit = 50) {
 // Release details
 // ============================================================================
 
-async function getReleasePayload(idOrAlias: string | number): Promise<{ data: unknown; requestUrl: string }> {
-  return requestJson(`${API_BASE_URL}/anime/releases/${idOrAlias}`);
-}
-
 export async function getReleaseDetails(idOrAlias: string | number) {
-  const { data, requestUrl } = await getReleasePayload(idOrAlias);
+  const { data, requestUrl } = curlGetJson(`${API_BASE_URL}/anime/releases/${idOrAlias}`);
   return { release: data as ReleasePayload, request_url: requestUrl };
 }
 
@@ -193,7 +187,7 @@ async function findRelease(title: string, season: number | null, aliases: string
 
   for (const [path, query] of searchAttempts) {
     try {
-      const { data, requestUrl } = await requestJson(`${path}?${query}`);
+      const { data, requestUrl } = curlGetJson(`${path}?${query}`);
       urls.push(requestUrl);
       candidates.push(...normalizeReleaseList(data));
     } catch (err) {
@@ -259,21 +253,15 @@ function collectSkipSegments(payload: Record<string, unknown>): Segment[] {
   }
 
   const deduped = new Map<string, Segment>();
-  for (const seg of segments) {
-    deduped.set(`${seg.type}|${seg.start}|${seg.end}`, seg);
-  }
+  for (const seg of segments) deduped.set(`${seg.type}|${seg.start}|${seg.end}`, seg);
   return [...deduped.values()].sort((a, b) => a.start - b.start);
 }
 
 export async function getAnilibriaSegments(
-  title: string,
-  season: number,
-  episodeNumber: number,
-  _source?: Record<string, unknown>,
-  aliases: string[] = [],
+  title: string, season: number, episodeNumber: number,
+  _source?: Record<string, unknown>, aliases: string[] = [],
 ): Promise<AniLibriaResult> {
   const requestUrls: string[] = [];
-
   const { release: releaseStub, urls: releaseUrls, error: releaseError } = await findRelease(title, season, aliases);
   requestUrls.push(...releaseUrls);
 
@@ -284,8 +272,8 @@ export async function getAnilibriaSegments(
   const releaseIdOrAlias = (releaseStub as Record<string, unknown>).alias ?? (releaseStub as Record<string, unknown>).id ?? (releaseStub as Record<string, unknown>).release_id;
   try {
     const details = await getReleaseDetails(releaseIdOrAlias as string | number);
-    const releasePayload = details.release;
     requestUrls.push(details.request_url);
+    const releasePayload = details.release;
 
     const episodePayload = findEpisodePayload(releasePayload, episodeNumber);
     if (!episodePayload) {
@@ -293,16 +281,9 @@ export async function getAnilibriaSegments(
     }
 
     let segments = collectSkipSegments(episodePayload as Record<string, unknown>);
-    if (segments.length === 0) {
-      segments = collectSkipSegments(releasePayload as Record<string, unknown>);
-    }
+    if (segments.length === 0) segments = collectSkipSegments(releasePayload as Record<string, unknown>);
 
-    return {
-      segments,
-      request_error: segments.length > 0 ? null : "AniLibria returned no skip data",
-      request_urls: requestUrls,
-      provider: "anilibria",
-    };
+    return { segments, request_error: segments.length > 0 ? null : "AniLibria returned no skip data", request_urls: requestUrls, provider: "anilibria" };
   } catch (err) {
     return { segments: [], request_error: `AniLibria release details failed: ${err}`, request_urls: requestUrls, provider: "anilibria" };
   }
@@ -315,7 +296,6 @@ export async function getAnilibriaSegments(
 export function collectReleaseEpisodeNumbers(releasePayload: ReleasePayload): number[] {
   const episodes = releasePayload.episodes;
   if (!Array.isArray(episodes)) return [];
-
   const numbers = new Set<number>();
   for (const item of episodes) {
     const num = item.number ?? item.episode ?? item.ordinal;
@@ -344,13 +324,8 @@ function extractVariantCodec(payload: Record<string, unknown>): "avc" | "hevc" |
 }
 
 function findMagnetValue(payload: unknown): string | null {
-  if (typeof payload === "string") {
-    const v = payload.trim();
-    return v.startsWith("magnet:?") ? v : null;
-  }
-  if (Array.isArray(payload)) {
-    for (const item of payload) { const m = findMagnetValue(item); if (m) return m; }
-  }
+  if (typeof payload === "string") { const v = payload.trim(); return v.startsWith("magnet:?") ? v : null; }
+  if (Array.isArray(payload)) { for (const item of payload) { const m = findMagnetValue(item); if (m) return m; } }
   if (typeof payload === "object" && payload !== null) {
     for (const value of Object.values(payload)) { const m = findMagnetValue(value); if (m) return m; }
   }
@@ -420,9 +395,7 @@ function* iterReleaseVariantPayloads(releasePayload: ReleasePayload): Generator<
   const torrent = (releasePayload as Record<string, unknown>).torrent;
   if (typeof torrent === "object" && torrent !== null) {
     const legacyMagnet = findMagnetValue(torrent);
-    if (legacyMagnet) {
-      yield* [{ codec: "avc", label: "legacy", magnet: legacyMagnet, episodes: releasePayload.episodes }];
-    }
+    if (legacyMagnet) yield* [{ codec: "avc", label: "legacy", magnet: legacyMagnet, episodes: releasePayload.episodes }];
   }
 
   yield* variants as Record<string, unknown>[];
@@ -440,26 +413,14 @@ export function extractReleaseSourceVariants(releasePayload: ReleasePayload): Re
     const labelEpisodes = extractVariantLabelEpisodeNumbers(label);
 
     let episodes = releaseEpisodes;
-    if (labelEpisodes) {
-      const labelSet = new Set(labelEpisodes);
-      episodes = releaseEpisodes.filter(e => labelSet.has(e));
-    }
+    if (labelEpisodes) { const ls = new Set(labelEpisodes); episodes = releaseEpisodes.filter(e => ls.has(e)); }
 
     if (!magnet || !codec || episodes.length === 0) continue;
-
     const identity = `${magnet}|${codec}|${episodes.join(",")}`;
     if (deduped.has(identity)) continue;
     deduped.add(identity);
-
-    variants.push({
-      codec,
-      resolution: parseVariantResolution(candidate),
-      magnet,
-      available_episodes: episodes,
-      label: label ?? undefined,
-    });
+    variants.push({ codec, resolution: parseVariantResolution(candidate), magnet, available_episodes: episodes, label: label ?? undefined });
   }
-
   return variants;
 }
 
@@ -471,8 +432,7 @@ export function selectReleaseSourceVariant(releasePayload: ReleasePayload): Rele
     const preferred = variants.filter(v => v.codec === preferredCodec && v.magnet && v.available_episodes.length > 0);
     if (preferred.length > 0) {
       preferred.sort((a, b) => {
-        const maxA = Math.max(...a.available_episodes);
-        const maxB = Math.max(...b.available_episodes);
+        const maxA = Math.max(...a.available_episodes); const maxB = Math.max(...b.available_episodes);
         if (maxB !== maxA) return maxB - maxA;
         if (b.available_episodes.length !== a.available_episodes.length) return b.available_episodes.length - a.available_episodes.length;
         return (a.resolution ?? "").localeCompare(b.resolution ?? "") || (a.label ?? "").localeCompare(b.label ?? "");
@@ -480,7 +440,6 @@ export function selectReleaseSourceVariant(releasePayload: ReleasePayload): Rele
       return preferred[0]!;
     }
   }
-
   throw new Error("no_supported_torrent_variant");
 }
 
@@ -500,10 +459,7 @@ export function extractReleaseTitle(releasePayload: ReleasePayload): string {
 export function extractReleaseTitleRu(releasePayload: ReleasePayload): string | null {
   const names = (releasePayload.name ?? releasePayload.names ?? {}) as Record<string, string>;
   if (typeof names === "object") {
-    for (const key of ["main", "ru"]) {
-      const v = names[key];
-      if (typeof v === "string" && v.trim()) return v.trim();
-    }
+    for (const key of ["main", "ru"]) { const v = names[key]; if (typeof v === "string" && v.trim()) return v.trim(); }
   }
   return null;
 }
@@ -516,23 +472,17 @@ export function extractReleaseSeason(releasePayload: ReleasePayload): number {
 
 export function extractReleaseMalId(releasePayload: ReleasePayload): number | null {
   const directKeys = ["mal_id", "malId", "myanimelist_id", "myanimelistId"];
-  for (const key of directKeys) {
-    const v = (releasePayload as Record<string, unknown>)[key];
-    const parsed = parsePositiveInt(v);
-    if (parsed !== null) return parsed;
-  }
-
+  for (const key of directKeys) { const v = (releasePayload as Record<string, unknown>)[key]; const p = parsePositiveInt(v); if (p !== null) return p; }
   const nestedCandidates: [string, string][] = [
     ["external_ids", "mal_id"], ["external_ids", "malId"], ["external_ids", "myanimelist"],
     ["external_ids", "myanimelist_id"], ["externalIds", "mal_id"], ["externalIds", "myanimelist"],
-    ["codes", "mal"], ["codes", "mal_id"], ["player", "mal_id"], ["player", "myanimelist"],
-    ["metadata", "mal_id"],
+    ["codes", "mal"], ["codes", "mal_id"], ["player", "mal_id"], ["player", "myanimelist"], ["metadata", "mal_id"],
   ];
-  for (const [parentKey, childKey] of nestedCandidates) {
-    const parent = (releasePayload as Record<string, unknown>)[parentKey];
+  for (const [pk, ck] of nestedCandidates) {
+    const parent = (releasePayload as Record<string, unknown>)[pk];
     if (typeof parent !== "object" || parent === null) continue;
-    const parsed = parsePositiveInt((parent as Record<string, unknown>)[childKey]);
-    if (parsed !== null) return parsed;
+    const p = parsePositiveInt((parent as Record<string, unknown>)[ck]);
+    if (p !== null) return p;
   }
   return null;
 }

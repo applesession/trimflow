@@ -1,15 +1,12 @@
-import { loadConfig } from "./shared/config";
 import { initDb, getTelegramState, saveTelegramState } from "./shared/db";
 import { ensureRuntimePaths, logLine } from "./shared/runtime";
-import { fetchUpdates, sendMessage, buildMainKeyboard, isAllowedChat, parseAllowedChatIds } from "./api/telegram";
-import { handleCommand, buildMainKeyboard as buildKeyboard } from "./modules/bot";
+import { fetchUpdates, sendMessage, isAllowedChat } from "./api/telegram";
+import { handleCommand, buildMainKeyboard } from "./modules/bot";
 
 const paths = ensureRuntimePaths();
 const logPath = paths.telegramLogPath;
 
 initDb();
-
-const config = loadConfig();
 let state = getTelegramState();
 
 logLine(logPath, "start telegram_bot");
@@ -21,11 +18,11 @@ while (true) {
 
   try {
     const offset = state.last_update_id != null ? state.last_update_id + 1 : undefined;
-    updates = await fetchUpdates(offset, 30);
+    updates = fetchUpdates(offset, 30);
     failureDelay = 5;
   } catch (err) {
     logLine(logPath, `telegram_poll_failed error=${String(err)} retry_in=${failureDelay}s`);
-    await Bun.sleep(failureDelay * 1000);
+    Bun.sleepSync(failureDelay * 1000);
     failureDelay = Math.min(failureDelay * 2, 60);
     continue;
   }
@@ -33,7 +30,7 @@ while (true) {
   for (const update of updates) {
     const upd = update as Record<string, unknown>;
     try {
-      const message = (upd.message ?? upd.callback_query?.message) as Record<string, unknown> | undefined;
+      const message = (upd.message ?? (upd.callback_query as Record<string, unknown>)?.message) as Record<string, unknown> | undefined;
       const chat = (message?.chat ?? {}) as Record<string, unknown>;
       const chatId = chat.id;
       const text = (upd.message?.text ?? "") as string;
@@ -42,15 +39,9 @@ while (true) {
 
       if (text && String(text).trim()) {
         const cmdText = String(text).trim();
-
-        // Map button aliases
         const aliases: Record<string, string> = {
-          "Статус": "/status",
-          "Текущая": "/current",
-          "Очередь": "/jobs",
-          "Ошибки": "/errors",
-          "Лог": "/log",
-          "Помощь": "/help",
+          "Статус": "/status", "Текущая": "/current", "Очередь": "/jobs",
+          "Ошибки": "/errors", "Лог": "/log", "Помощь": "/help",
         };
         const mappedText = aliases[cmdText] ?? cmdText;
 
@@ -62,7 +53,7 @@ while (true) {
         }
 
         const replyText = typeof response === "string" ? response : (response as Record<string, string>).text ?? String(response);
-        await sendMessage(chatId, replyText, buildKeyboard());
+        sendMessage(chatId, replyText, buildMainKeyboard());
       }
 
       const updateId = upd.update_id as number;

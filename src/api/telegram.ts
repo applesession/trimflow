@@ -8,13 +8,6 @@ export function getTelegramToken(): string {
   return (Bun.env.TELEGRAM_BOT_TOKEN ?? "").trim();
 }
 
-function getTelegramProxyUrl(): string | undefined {
-  const raw = (Bun.env.TELEGRAM_PROXY_URL ?? "").trim();
-  if (!raw) return undefined;
-  // Bun fetch supports socks5:// but not socks5h://
-  return raw.replace(/^socks5h:\/\//, "socks5://");
-}
-
 export function parseAllowedChatIds(rawValue?: string): Set<string> {
   const value = rawValue ?? Bun.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "";
   const result = new Set<string>();
@@ -35,37 +28,40 @@ export function telegramNotificationsEnabled(): boolean {
 }
 
 // ============================================================================
-// Telegram API call via Bun fetch (SOCKS5 proxy built-in)
+// Telegram API via curl subprocess (proxychains-compatible)
 // ============================================================================
 
-async function telegramRequest(
+function telegramRequest(
   method: string,
   payload: Record<string, unknown> = {},
-  timeout = 60_000,
-): Promise<{ ok: boolean; result?: unknown; description?: string }> {
+  timeout = 60,
+): { ok: boolean; result?: unknown; description?: string } {
   const token = getTelegramToken();
   if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
 
   const url = `${TELEGRAM_API_BASE}/bot${token}/${method}`;
+  const body = JSON.stringify(payload);
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(timeout),
-  });
+  const proc = Bun.spawnSync(
+    ["curl", "-s", "--connect-timeout", String(timeout), "--max-time", String(timeout),
+      "-X", "POST", "-H", "Content-Type: application/json", "-d", body, url],
+    { stdout: "pipe", stderr: "pipe" },
+  );
 
-  if (!response.ok) {
-    let description: string | undefined;
-    try {
-      description = ((await response.json()) as { description?: string }).description;
-    } catch {
-      description = (await response.text().catch(() => null))?.trim() || undefined;
-    }
-    throw new Error(`Telegram API ${method} HTTP ${response.status}: ${description ?? "unknown error"}`);
+  const stdout = new TextDecoder().decode(proc.stdout);
+  const stderr = new TextDecoder().decode(proc.stderr);
+
+  if (proc.exitCode !== 0) {
+    throw new Error(`Telegram API ${method} curl failed (exit ${proc.exitCode}): ${stderr || stdout}`);
   }
 
-  const data = (await response.json()) as { ok: boolean; result?: unknown; description?: string };
+  let data: { ok: boolean; result?: unknown; description?: string };
+  try {
+    data = JSON.parse(stdout) as typeof data;
+  } catch {
+    throw new Error(`Telegram API ${method} invalid JSON: ${stdout.slice(0, 200)}`);
+  }
+
   if (!data.ok) {
     throw new Error(`Telegram API ${method} failed: ${data.description ?? JSON.stringify(data)}`);
   }
@@ -76,73 +72,61 @@ async function telegramRequest(
 // Public API methods
 // ============================================================================
 
-export async function fetchUpdates(offset?: number, timeout = 30) {
-  const payload: Record<string, unknown> = {
-    timeout,
-    allowed_updates: ["message", "callback_query"],
-  };
+export function fetchUpdates(offset?: number, timeout = 30): unknown[] {
+  const payload: Record<string, unknown> = { timeout, allowed_updates: ["message", "callback_query"] };
   if (offset != null) payload.offset = offset;
-  const data = await telegramRequest("getUpdates", payload, (timeout + 10) * 1000);
+  const data = telegramRequest("getUpdates", payload, timeout + 10);
   return (data.result as unknown[]) ?? [];
 }
 
-export async function sendMessage(
+export function sendMessage(
   chatId: string | number,
   text: string,
   replyMarkup?: Record<string, unknown>,
-) {
-  const payload: Record<string, unknown> = {
-    chat_id: String(chatId),
-    text,
-    disable_web_page_preview: true,
-  };
+): void {
+  const payload: Record<string, unknown> = { chat_id: String(chatId), text, disable_web_page_preview: true };
   if (replyMarkup) payload.reply_markup = replyMarkup;
-  await telegramRequest("sendMessage", payload, 20_000);
+  telegramRequest("sendMessage", payload, 20);
 }
 
-export async function sendFormattedMessage(
+export function sendFormattedMessage(
   chatId: string | number,
   text: string,
   parseMode: string,
   replyMarkup?: Record<string, unknown>,
-) {
-  const payload: Record<string, unknown> = {
-    chat_id: String(chatId),
-    text,
-    disable_web_page_preview: true,
-    parse_mode: parseMode,
-  };
+): void {
+  const payload: Record<string, unknown> = { chat_id: String(chatId), text, disable_web_page_preview: true, parse_mode: parseMode };
   if (replyMarkup) payload.reply_markup = replyMarkup;
-  await telegramRequest("sendMessage", payload, 20_000);
+  telegramRequest("sendMessage", payload, 20);
 }
 
-export async function sendMessageWithFallback(
+export function sendMessageWithFallback(
   chatId: string | number,
   text: string,
   options: { parseMode?: string; replyMarkup?: Record<string, unknown> } = {},
-): Promise<void> {
+): void {
   const { parseMode, replyMarkup } = options;
 
   if (parseMode) {
     try {
-      await sendFormattedMessage(chatId, text, parseMode, replyMarkup);
+      sendFormattedMessage(chatId, text, parseMode, replyMarkup);
       return;
     } catch (err) {
       if (parseMode === "MarkdownV2" && isTelegramMarkdownRetryableError(err)) {
-        await sendMessage(chatId, demoteMarkdownV2ToPlainText(text), replyMarkup);
+        sendMessage(chatId, demoteMarkdownV2ToPlainText(text), replyMarkup);
         return;
       }
       throw err;
     }
   }
 
-  await sendMessage(chatId, text, replyMarkup);
+  sendMessage(chatId, text, replyMarkup);
 }
 
-export async function answerCallbackQuery(callbackQueryId: string, text?: string) {
+export function answerCallbackQuery(callbackQueryId: string, text?: string): void {
   const payload: Record<string, unknown> = { callback_query_id: callbackQueryId };
   if (text) payload.text = text;
-  await telegramRequest("answerCallbackQuery", payload, 20_000);
+  telegramRequest("answerCallbackQuery", payload, 20);
 }
 
 export function isTelegramMarkdownRetryableError(err: unknown): boolean {
@@ -160,14 +144,13 @@ export function demoteMarkdownV2ToPlainText(text: string): string {
   return value;
 }
 
-export async function sendMessageToAllowedChats(
+export function sendMessageToAllowedChats(
   text: string,
   options: { parseMode?: string; replyMarkup?: Record<string, unknown> } = {},
-): Promise<void[]> {
-  if (!telegramNotificationsEnabled()) return [];
+): void {
+  if (!telegramNotificationsEnabled()) return;
 
-  const chats = [...parseAllowedChatIds()].sort();
-  return Promise.all(
-    chats.map(chatId => sendMessageWithFallback(chatId, text, options)),
-  );
+  for (const chatId of [...parseAllowedChatIds()].sort()) {
+    sendMessageWithFallback(chatId, text, options);
+  }
 }
