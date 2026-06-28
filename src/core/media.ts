@@ -283,7 +283,7 @@ export function renderSegment(
   const cq = String(encoding.cq ?? 18);
   const audioCodec = (encoding.audio_codec as string) ?? "aac";
   const audioBitrate = (encoding.audio_bitrate as string) ?? "192k";
-  const pixelFormat = (encoding.pixel_format as string) ?? "yuv420p";
+  const pixelFormat = (encoding.pixel_format as string) || "yuv420p";
   const ai = options.audioStreamIndex ?? 0;
 
   const args: string[] = [

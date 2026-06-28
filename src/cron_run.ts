@@ -54,10 +54,10 @@ try {
           .slice(-Math.max(discoveryResult.summary.created_jobs, 0))
           .map(j => j.title)
           .join(", ");
-        await sendMessageToAllowedChats(
+        sendMessageToAllowedChats(
           `🛰️ *Автодискавери завершён*\n\n🆕 Новых аниме: \`${discoveryResult.summary.created_jobs}\`\n🔄 Обновлено: \`${discoveryResult.summary.updated_jobs}\`\n\n${titles ? `🎬 ${titles}` : ""}`,
           { parseMode: "MarkdownV2" },
-        ).catch(() => {});
+        );
       } catch { /* notifications are best-effort */ }
     }
   } catch (err) {
@@ -69,16 +69,20 @@ try {
   // Processing
   const summary = await runJobs(config, jobs, {
     log: (msg: string) => logLine(logPath, msg),
-    onJobSuccess: (job, result) => {
-      const vk = result.delivery_summary.vk;
-      const text = vk.enabled && vk.uploaded
-        ? `✅ Видео опубликовано в VK\n\n${getDisplayTitle(job)}\nЭпизоды: ${job.episodes_range}`
-        : `✅ Обработка завершена\n\n${getDisplayTitle(job)}\nЭпизоды: ${job.episodes_range}`;
-      sendMessageToAllowedChats(text).catch(() => {});
-    },
-    onJobFailure: (job, err) => {
-      sendMessageToAllowedChats(`❌ Ошибка\n\n${job.title}\n${String(err).slice(0, 200)}`).catch(() => {});
-    },
+      onJobSuccess: (job, result) => {
+        try {
+          const vk = result.delivery_summary.vk;
+          const text = vk.enabled && vk.uploaded
+            ? `✅ Видео опубликовано в VK\n\n${getDisplayTitle(job)}\nЭпизоды: ${job.episodes_range}`
+            : `✅ Обработка завершена\n\n${getDisplayTitle(job)}\nЭпизоды: ${job.episodes_range}`;
+          sendMessageToAllowedChats(text);
+        } catch { /* notification best-effort */ }
+      },
+      onJobFailure: (job, err) => {
+        try {
+          sendMessageToAllowedChats(`❌ Ошибка\n\n${job.title}\n${String(err).slice(0, 200)}`);
+        } catch { /* notification best-effort */ }
+      },
   });
 
   logLine(logPath, `processing_summary ${JSON.stringify(summary)}`);
@@ -94,7 +98,7 @@ try {
   logLine(logPath, `error ${String(err)}`);
   updateRuntimeStatus({ run_status: "failed", run_finished_at: utcNowIso(), current_stage: "failed" });
   try {
-    await sendMessageToAllowedChats(`❌ Ошибка cron_run\n\n${String(err).slice(0, 300)}`);
+    sendMessageToAllowedChats(`❌ Ошибка cron_run\n\n${String(err).slice(0, 300)}`);
   } catch { /* ok */ }
 } finally {
   releaseLock(lockPath);
