@@ -8,14 +8,37 @@ const TORRENTS_PAGE_URLS = [
 ];
 
 // ============================================================================
-// Curl subprocess helpers (proxychains-compatible)
+// Curl subprocess helpers (with explicit SOCKS5 proxy)
 // ============================================================================
 
+function curlProxyArgs(): string[] {
+  const raw = Bun.env.ANILIBERTY_PROXY_URL?.trim();
+  if (!raw) return [];
+
+  try {
+    const url = new URL(raw);
+    const host = url.hostname;
+    const port = url.port || "1080";
+    const user = decodeURIComponent(url.username || "");
+    const pass = decodeURIComponent(url.password || "");
+
+    const args = ["--socks5-hostname", `${host}:${port}`];
+    if (user) args.push("--proxy-user", `${user}:${pass}`);
+    return args;
+  } catch {
+    return [];
+  }
+}
+
 function curlGet(url: string, timeout = 20): string {
-  const proc = Bun.spawnSync(
-    ["curl", "-s", "--connect-timeout", String(timeout), "--max-time", String(timeout), url],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const args = [
+    "curl", "-s",
+    ...curlProxyArgs(),
+    "--connect-timeout", String(timeout),
+    "--max-time", String(timeout),
+    url,
+  ];
+  const proc = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
   const stdout = new TextDecoder().decode(proc.stdout);
   if (proc.exitCode !== 0) {
     const stderr = new TextDecoder().decode(proc.stderr);

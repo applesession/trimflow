@@ -1,6 +1,32 @@
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
 // ============================================================================
+// Proxy helper: parses socks5://... URL into curl flags
+// ============================================================================
+
+function curlProxyArgs(envName: string): string[] {
+  const raw = Bun.env[envName]?.trim();
+  if (!raw) return [];
+
+  // socks5h://tgproxy:S7kBGYw5jGVHIM@64.188.64.174:1080
+  //           or
+  // socks5://user:pass@host:port
+  try {
+    const url = new URL(raw);
+    const host = url.hostname;
+    const port = url.port || "1080";
+    const user = decodeURIComponent(url.username || "");
+    const pass = decodeURIComponent(url.password || "");
+
+    const args = ["--socks5-hostname", `${host}:${port}`];
+    if (user) args.push("--proxy-user", `${user}:${pass}`);
+    return args;
+  } catch {
+    return [];
+  }
+}
+
+// ============================================================================
 // Config helpers
 // ============================================================================
 
@@ -28,7 +54,7 @@ export function telegramNotificationsEnabled(): boolean {
 }
 
 // ============================================================================
-// Telegram API via curl subprocess (proxychains-compatible)
+// Telegram API via curl subprocess (with explicit SOCKS5 proxy)
 // ============================================================================
 
 function telegramRequest(
@@ -42,11 +68,18 @@ function telegramRequest(
   const url = `${TELEGRAM_API_BASE}/bot${token}/${method}`;
   const body = JSON.stringify(payload);
 
-  const proc = Bun.spawnSync(
-    ["curl", "-s", "--connect-timeout", String(timeout), "--max-time", String(timeout),
-      "-X", "POST", "-H", "Content-Type: application/json", "-d", body, url],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const args = [
+    "curl", "-s",
+    ...curlProxyArgs("TELEGRAM_PROXY_URL"),
+    "--connect-timeout", String(timeout),
+    "--max-time", String(timeout),
+    "-X", "POST",
+    "-H", "Content-Type: application/json",
+    "-d", body,
+    url,
+  ];
+
+  const proc = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe" });
 
   const stdout = new TextDecoder().decode(proc.stdout);
   const stderr = new TextDecoder().decode(proc.stderr);
