@@ -12,6 +12,7 @@ import {
   DEFAULT_CRON_LOCK_NAME,
   DEFAULT_CRON_LOG_NAME,
   DEFAULT_TELEGRAM_LOG_NAME,
+  TEMP_ROOT,
 } from "./constants";
 import type { RuntimeStatus, RuntimeErrorEntry, Job } from "./types";
 
@@ -216,4 +217,13 @@ export function logLine(logPath: string, message: string): string {
   console.log(line);
   appendFileSync(logPath, line + "\n");
   return line;
+}
+
+export function resetTempDir(titleSlug: string): string {
+  const dir = join(TEMP_ROOT, titleSlug);
+  if (existsSync(dir)) {
+    Bun.spawnSync(["rm", "-rf", dir], { stdout: "null", stderr: "null" });
+  }
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
