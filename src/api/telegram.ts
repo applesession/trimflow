@@ -1,6 +1,3 @@
-import { request as httpsRequest } from "node:https";
-import { SocksProxyAgent } from "socks-proxy-agent";
-
 const TELEGRAM_API_BASE = "https://api.telegram.org";
 
 // ============================================================================
@@ -11,8 +8,11 @@ export function getTelegramToken(): string {
   return (Bun.env.TELEGRAM_BOT_TOKEN ?? "").trim();
 }
 
-export function getTelegramProxyUrl(): string {
-  return (Bun.env.TELEGRAM_PROXY_URL ?? "").trim();
+function getTelegramProxyUrl(): string | undefined {
+  const raw = (Bun.env.TELEGRAM_PROXY_URL ?? "").trim();
+  if (!raw) return undefined;
+  // Bun fetch supports socks5:// but not socks5h://
+  return raw.replace(/^socks5h:\/\//, "socks5://");
 }
 
 export function parseAllowedChatIds(rawValue?: string): Set<string> {
@@ -35,44 +35,8 @@ export function telegramNotificationsEnabled(): boolean {
 }
 
 // ============================================================================
-// Telegram API call via node:https (SOCKS5 proxy support)
+// Telegram API call via Bun fetch (SOCKS5 proxy built-in)
 // ============================================================================
-
-function createAgent(): SocksProxyAgent | undefined {
-  const proxy = getTelegramProxyUrl();
-  if (!proxy) return undefined;
-  return new SocksProxyAgent(proxy);
-}
-
-function nodePost(url: string, body: string, timeoutMs = 60_000): Promise<{ text: string; status: number }> {
-  const parsed = new URL(url);
-  const agent = createAgent();
-
-  return new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": String(Buffer.byteLength(body)),
-        },
-        agent,
-        timeout: timeoutMs,
-      },
-      (res) => {
-        let data = "";
-        res.on("data", chunk => data += chunk);
-        res.on("end", () => resolve({ text: data, status: res.statusCode ?? 0 }));
-        res.on("error", reject);
-      },
-    );
-    req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error(`Telegram API timeout: ${url}`)); });
-    req.write(body);
-    req.end();
-  });
-}
 
 async function telegramRequest(
   method: string,
@@ -83,21 +47,27 @@ async function telegramRequest(
   if (!token) throw new Error("TELEGRAM_BOT_TOKEN is not configured");
 
   const url = `${TELEGRAM_API_BASE}/bot${token}/${method}`;
-  const body = JSON.stringify(payload);
+  const proxy = getTelegramProxyUrl();
 
-  const { text, status } = await nodePost(url, body, timeout);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeout),
+    ...(proxy ? { proxy } : {}),
+  });
 
-  if (status < 200 || status >= 300) {
+  if (!response.ok) {
     let description: string | undefined;
     try {
-      description = (JSON.parse(text) as { description?: string }).description;
+      description = ((await response.json()) as { description?: string }).description;
     } catch {
-      description = text.trim() || undefined;
+      description = (await response.text().catch(() => null))?.trim() || undefined;
     }
-    throw new Error(`Telegram API ${method} HTTP ${status}: ${description ?? "unknown error"}`);
+    throw new Error(`Telegram API ${method} HTTP ${response.status}: ${description ?? "unknown error"}`);
   }
 
-  const data = JSON.parse(text) as { ok: boolean; result?: unknown; description?: string };
+  const data = (await response.json()) as { ok: boolean; result?: unknown; description?: string };
   if (!data.ok) {
     throw new Error(`Telegram API ${method} failed: ${data.description ?? JSON.stringify(data)}`);
   }

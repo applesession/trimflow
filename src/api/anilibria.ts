@@ -1,6 +1,3 @@
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
-import { SocksProxyAgent } from "socks-proxy-agent";
 import type { ReleasePayload, ReleaseEpisode, ReleaseVariant, AniLibriaResult, Segment } from "../shared/types";
 
 const API_BASE_URL = "https://aniliberty.top/api/v1";
@@ -14,57 +11,32 @@ const DEFAULT_HEADERS = {
   "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
 };
 
-function getProxyUrl(): string | null {
-  return Bun.env.ANILIBERTY_PROXY_URL?.trim() || null;
-}
-
-function createAgent(url: string): unknown | undefined {
-  const proxy = getProxyUrl();
-  if (!proxy) return undefined;
-
-  const parsed = new URL(url);
-  // Only use proxy agent for HTTPS targets with SOCKS proxy
-  if (proxy.startsWith("socks") && parsed.protocol === "https:") {
-    return new SocksProxyAgent(proxy);
-  }
-  return undefined;
-}
-
-async function nodeFetch(url: string, timeout = 20): Promise<{ text: string; status: number }> {
-  const parsed = new URL(url);
-  const agent = createAgent(url) as SocksProxyAgent | undefined;
-
-  return new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      url,
-      {
-        headers: DEFAULT_HEADERS,
-        agent,
-        timeout: timeout * 1000,
-      },
-      (res) => {
-        let data = "";
-        res.on("data", chunk => data += chunk);
-        res.on("end", () => resolve({ text: data, status: res.statusCode ?? 0 }));
-        res.on("error", reject);
-      },
-    );
-    req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error(`Request timeout: ${url}`)); });
-    req.end();
-  });
+function getProxyUrl(): string | undefined {
+  const raw = Bun.env.ANILIBERTY_PROXY_URL?.trim();
+  if (!raw) return undefined;
+  return raw.replace(/^socks5h:\/\//, "socks5://");
 }
 
 async function requestJson(url: string, timeout = 20): Promise<{ data: unknown; requestUrl: string }> {
-  const { text, status } = await nodeFetch(url, timeout);
-  if (status < 200 || status >= 300) throw new Error(`AniLibria HTTP ${status} for ${url}`);
-  return { data: JSON.parse(text), requestUrl: url };
+  const proxy = getProxyUrl();
+  const response = await fetch(url, {
+    headers: DEFAULT_HEADERS,
+    signal: AbortSignal.timeout(timeout * 1000),
+    ...(proxy ? { proxy } : {}),
+  });
+  if (!response.ok) throw new Error(`AniLibria HTTP ${response.status} for ${url}`);
+  return { data: await response.json(), requestUrl: url };
 }
 
 async function requestText(url: string, timeout = 30): Promise<{ text: string; requestUrl: string }> {
-  const { text, status } = await nodeFetch(url, timeout);
-  if (status < 200 || status >= 300) throw new Error(`AniLibria HTTP ${status} for ${url}`);
-  return { text, requestUrl: url };
+  const proxy = getProxyUrl();
+  const response = await fetch(url, {
+    headers: DEFAULT_HEADERS,
+    signal: AbortSignal.timeout(timeout * 1000),
+    ...(proxy ? { proxy } : {}),
+  });
+  if (!response.ok) throw new Error(`AniLibria HTTP ${response.status} for ${url}`);
+  return { text: await response.text(), requestUrl: url };
 }
 
 // ============================================================================
