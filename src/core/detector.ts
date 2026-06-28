@@ -6,16 +6,16 @@ import type { EpisodeInfo, DetectorContext, DetectorInputs, DetectorConfig, Prov
 
 export function getDetectorSupportStatus(): { supported: boolean; reason: string | null } {
   // Check Python is available
-  const pyCheck = Bun.spawnSync(["python", "-c", "import numpy, librosa"], {
-    stdout: "null",
-    stderr: "null",
+  const pyCheck = Bun.spawnSync(["python3", "-c", "import numpy, librosa"], {
+    stdout: null,
+    stderr: null,
   });
   if (pyCheck.exitCode !== 0) {
     return { supported: false, reason: "detector_dependencies_missing:numpy,librosa" };
   }
 
   // Check ffmpeg
-  const ffCheck = Bun.spawnSync(["ffmpeg", "-version"], { stdout: "null", stderr: "null" });
+  const ffCheck = Bun.spawnSync(["ffmpeg", "-version"], { stdout: null, stderr: null });
   if (ffCheck.exitCode !== 0 && ffCheck.exitCode !== 1) {
     return { supported: false, reason: "ffmpeg_not_available" };
   }

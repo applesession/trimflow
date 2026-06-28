@@ -222,7 +222,7 @@ export function logLine(logPath: string, message: string): string {
 export function resetTempDir(titleSlug: string): string {
   const dir = join(TEMP_ROOT, titleSlug);
   if (existsSync(dir)) {
-    Bun.spawnSync(["rm", "-rf", dir], { stdout: "null", stderr: "null" });
+    Bun.spawnSync(["rm", "-rf", dir], { stdout: null, stderr: null });
   }
   mkdirSync(dir, { recursive: true });
   return dir;

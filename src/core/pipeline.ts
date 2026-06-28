@@ -373,7 +373,7 @@ export function processEpisodeChunk(
   preferredLanguage = "rus",
 ): { cumulativeTime: number; chunkOutput: string; manifestEpisodes: ManifestEpisode[]; timestamps: string[] } {
   const chunkDir = join(tempDir, `chunk_${String(chunkIndex).padStart(3, "0")}`);
-  Bun.spawnSync(["mkdir", "-p", chunkDir], { stdout: "null" });
+  Bun.spawnSync(["mkdir", "-p", chunkDir], { stdout: null });
 
   const segments: string[] = [];
   const manEps: ManifestEpisode[] = [];
@@ -451,9 +451,9 @@ async function deliverToVk(job: Job, delivery: ConfigDelivery, outputVideo: stri
 }
 
 export function cleanupJobArtifacts(cleanup: ConfigCleanup, opts: { downloadDir?: string | null; tempDir?: string; jobOutputDir?: string; success?: boolean }): void {
-  if (cleanup.downloads && opts.downloadDir) { console.log(`[CLEANUP] Removing downloads: ${opts.downloadDir}`); Bun.spawnSync(["rm", "-rf", opts.downloadDir], { stdout: "null", stderr: "null" }); }
-  if (cleanup.temp && opts.tempDir) { console.log(`[CLEANUP] Removing temp: ${opts.tempDir}`); Bun.spawnSync(["rm", "-rf", opts.tempDir], { stdout: "null", stderr: "null" }); }
-  if (opts.success && cleanup.output && opts.jobOutputDir) { console.log(`[CLEANUP] Removing output: ${opts.jobOutputDir}`); Bun.spawnSync(["rm", "-rf", opts.jobOutputDir], { stdout: "null", stderr: "null" }); }
+  if (cleanup.downloads && opts.downloadDir) { console.log(`[CLEANUP] Removing downloads: ${opts.downloadDir}`); Bun.spawnSync(["rm", "-rf", opts.downloadDir], { stdout: null, stderr: null }); }
+  if (cleanup.temp && opts.tempDir) { console.log(`[CLEANUP] Removing temp: ${opts.tempDir}`); Bun.spawnSync(["rm", "-rf", opts.tempDir], { stdout: null, stderr: null }); }
+  if (opts.success && cleanup.output && opts.jobOutputDir) { console.log(`[CLEANUP] Removing output: ${opts.jobOutputDir}`); Bun.spawnSync(["rm", "-rf", opts.jobOutputDir], { stdout: null, stderr: null }); }
 }
 
 // ============================================================================
@@ -505,7 +505,7 @@ export async function processJob(job: Job): Promise<JobResult> {
   const titleSlug = ensureNonEmptySlug(title);
   const allowedEpisodes = parseEpisodesRange(episodesRange);
   const jobOutputDir = join(outputRoot, titleSlug);
-  Bun.spawnSync(["mkdir", "-p", jobOutputDir], { stdout: "null" });
+  Bun.spawnSync(["mkdir", "-p", jobOutputDir], { stdout: null });
   const tempDir = resetTempDir(titleSlug);
   let downloadDir: string | null = null;
   let success = false;

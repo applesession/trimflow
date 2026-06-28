@@ -41,10 +41,10 @@ export function validateRequiredTools(_config: Config, jobs: Job[]): void {
 
   const missing: string[] = [];
   for (const tool of requiredTools) {
-    const result = Bun.spawnSync([tool, "-version"], { stdout: "null", stderr: "null" });
+    const result = Bun.spawnSync([tool, "-version"], { stdout: null, stderr: null });
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       // ffprobe returns exit code 1 for -version but still works
-      const result2 = Bun.spawnSync([tool], { stdout: "null", stderr: "null" });
+      const result2 = Bun.spawnSync([tool], { stdout: null, stderr: null });
       if (result2.exitCode !== 0) missing.push(tool);
     }
   }
