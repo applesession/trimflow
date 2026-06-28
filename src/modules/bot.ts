@@ -126,9 +126,9 @@ export function formatLogMessage(): string {
   if (tail.length === 0) return "Лог пока пуст";
   let content = tail.join("\n");
   if (content.length > 3500) content = content.slice(-3500);
-  // Escape triple backticks inside the code block
-  const safe = content.replace(/```/g, "``\\u200b`");
-  return `Хвост лога \\(${Math.min(20, lines.length)} строк\\)\n\n\`\`\`\n${safe}\n\`\`\``;
+  const title = escapeMdV2(`Хвост лога (${Math.min(20, lines.length)} строк)`);
+  const safe = content.replace(/```/g, "``\u200b`");
+  return `${title}\n\n\`\`\`log\n${safe}\n\`\`\``;
 }
 
 // ============================================================================
