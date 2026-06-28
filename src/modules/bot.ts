@@ -1,6 +1,7 @@
 import { getJobs, insertJob, deleteJob, getRuntimeStatus as dbGetStatus, getRuntimeErrors } from "../shared/db";
-import { getDisplayTitle, parseEpisodesRange, formatEpisodesRange, ensureNonEmptySlug } from "../shared/helpers";
-import { findMatchingJob, getJobReleaseId } from "./autojobs";
+import { getDisplayTitle, parseEpisodesRange, ensureNonEmptySlug } from "../shared/helpers";
+import { findMatchingJob } from "./autojobs";
+import { readFileSync, existsSync } from "node:fs";
 import type { Job } from "../shared/types";
 
 // ============================================================================
@@ -108,9 +109,24 @@ export function formatErrorsMessage(limit = 5): string {
 
 export function formatHelpMessage(): string {
   return ["Команды бота", "", "/status - статус очереди", "/current - текущая обработка",
-    "/errors - последние ошибки", "/jobs - аниме в очереди",
+    "/errors - последние ошибки", "/jobs - аниме в очереди", "/log - хвост лога",
     "/remove <номер> - удалить из очереди", "",
     "Пример: /add Название ; 001-012 ; magnet:?xt=... ; 1 ; 5"].join("\n");
+}
+
+// ============================================================================
+// /log
+// ============================================================================
+
+export function formatLogMessage(): string {
+  const logPath = "logs/cron.log";
+  if (!existsSync(logPath)) return "Лог ещё не создан";
+  const lines = readFileSync(logPath, "utf-8").split("\n").filter(Boolean);
+  const tail = lines.slice(-20);
+  if (tail.length === 0) return "Лог пока пуст";
+  let content = tail.join("\n");
+  if (content.length > 3500) content = content.slice(-3500);
+  return `Хвост лога (${Math.min(20, lines.length)} строк)\n\n${content}`;
 }
 
 // ============================================================================
@@ -168,6 +184,7 @@ export function handleCommand(text: string): string | Record<string, unknown> {
   if (text === "/status") return formatStatusMessage();
   if (text === "/current") return formatCurrentMessage();
   if (text === "/errors") return formatErrorsMessage();
+  if (text === "/log") return formatLogMessage();
 
   if (text.startsWith("/add ")) return formatAddResult(addJobFromCommand(text));
 
