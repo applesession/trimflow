@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from lib.config import (
+from shared.config import (
     deep_merge,
     load_completed_jobs,
     load_state,
@@ -8,16 +8,16 @@ from lib.config import (
     save_jobs,
     save_state,
 )
-from lib.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
-from lib.db import remove_completed_job as _db_remove_completed_job
-from lib.pipeline import process_job
-from lib.runtime import (
+from modules.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
+from shared.db import remove_completed_job as _db_remove_completed_job
+from core.pipeline import process_job
+from shared.runtime import (
     append_runtime_error,
     load_runtime_status,
     mark_runtime_job_finish,
     mark_runtime_job_start,
 )
-from lib.validation import (
+from shared.validation import (
     validate_required_env,
     validate_required_files,
     validate_required_tools,

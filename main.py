@@ -1,8 +1,16 @@
+import sys
+from pathlib import Path
+
+# Make src/ importable
+SRC = Path(__file__).resolve().parent / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
 from dotenv import load_dotenv
 
-from lib.config import load_config, load_jobs
-from lib.db import init_db
-from lib.runner import run_jobs
+from shared.config import load_config, load_jobs
+from shared.db import init_db
+from core.runner import run_jobs
 
 
 load_dotenv()

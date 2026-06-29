@@ -11,19 +11,17 @@
 
 ## Структура
 
-- `main.py` — точка входа: загрузка конфига, preflight-проверки, запуск `jobs`
-- `scripts/discover_jobs.py` — discovery свежих релизов AniLiberty и автогенерация queue
-- `scripts/cron_run.py` — cron-friendly discovery + processing с lock и runtime-логом
-- `scripts/telegram_bot.py` — Telegram operator layer через long polling
-- `lib/` — основная логика проекта по модулям
-- `lib/pipeline.py` — orchestration обработки одного job
-- `lib/media.py` — `ffmpeg/ffprobe`, сегменты, финальный рендер
-- `lib/aniskip.py` — запросы к AniSkip и сводка по вырезанию
-- `lib/detector.py` — локальный audio-fingerprint detector для fallback по `OP/ED`
-- `lib/discovery.py` — поиск и фильтрация файлов эпизодов
-- `lib/storage.py` — загрузка в S3
-- `lib/validation.py` — preflight-проверки и работа с `temp/`
-- `lib/helpers.py` / `lib/config.py` / `lib/constants.py` — общие утилиты, конфиг и константы
+```
+src/
+├── shared/          # Инфраструктура (db, config, helpers, runtime, validation)
+├── api/             # Внешние HTTP/S3 клиенты (anilibria, aniskip, vk, storage)
+├── core/            # Бизнес-логика (pipeline, media, detector, discovery, runner)
+├── modules/         # Фичи (autojobs discovery, telegram bot logic)
+├── cron_run.py      # Cron: lock → discovery → processing → TG уведомления
+├── discover_jobs.py # Автономный discovery
+└── telegram_bot.py  # Long-polling бот
+main.py              # Точка входа: ручной запуск
+```
 - `config.json` — дефолтные настройки и automation-настройки
 - `jobs.json` — активная очередь задач
 - `completed_jobs.json` — архив успешно завершённых задач
@@ -150,7 +148,7 @@ python main.py
 ## Discovery свежих релизов
 
 ```bash
-python scripts/discover_jobs.py
+python src/discover_jobs.py
 ```
 
 Что делает discovery:
@@ -166,7 +164,7 @@ python scripts/discover_jobs.py
 ## Cron-friendly запуск
 
 ```bash
-python scripts/cron_run.py
+python src/cron_run.py
 ```
 
 Что делает runner:
@@ -183,13 +181,13 @@ Runtime-файлы:
 Рекомендуемая команда для crontab:
 
 ```bash
-*/10 * * * * cd /path/to/workspace-gojo-satoru && python scripts/cron_run.py
+*/10 * * * * cd /path/to/workspace-gojo-satoru && python src/cron_run.py
 ```
 
 ## Telegram Bot
 
 ```bash
-python scripts/telegram_bot.py
+python src/telegram_bot.py
 ```
 
 Что делает бот:

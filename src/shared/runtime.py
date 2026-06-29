@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.constants import (
+from shared.constants import (
     DEFAULT_CRON_LOCK_NAME,
     DEFAULT_CRON_LOG_NAME,
     DEFAULT_LOGS_DIR,

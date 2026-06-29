@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from statistics import median
 
-from lib.constants import DEFAULT_TIMING_DETECTION
+from shared.constants import DEFAULT_TIMING_DETECTION
 
 
 SEASON_CLUSTER_TOLERANCE_SECONDS = 10.0

@@ -36,7 +36,7 @@ class CronRuntimeTests(unittest.TestCase):
         tmp_dir = self.make_workspace_temp_dir()
         lock_path = tmp_dir / "cron.lock"
 
-        result = acquire_lock(lock_path, "python scripts/cron_run.py")
+        result = acquire_lock(lock_path, "python src/cron_run.py")
 
         self.assertTrue(result["acquired"])
         self.assertTrue(lock_path.exists())
@@ -46,8 +46,8 @@ class CronRuntimeTests(unittest.TestCase):
         tmp_dir = self.make_workspace_temp_dir()
         lock_path = tmp_dir / "cron.lock"
 
-        first = acquire_lock(lock_path, "python scripts/cron_run.py")
-        second = acquire_lock(lock_path, "python scripts/cron_run.py")
+        first = acquire_lock(lock_path, "python src/cron_run.py")
+        second = acquire_lock(lock_path, "python src/cron_run.py")
 
         self.assertTrue(first["acquired"])
         self.assertFalse(second["acquired"])

@@ -5,15 +5,16 @@ import sys
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# Ensure src/ is importable when run from anywhere
+SRC = Path(__file__).resolve().parent
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-from lib.autojobs import discover_jobs  # noqa: E402
-from lib.config import load_config, load_jobs, load_state, save_jobs, save_state  # noqa: E402
-from lib.db import init_db  # noqa: E402
-from lib.runner import run_jobs  # noqa: E402
-from lib.runtime import (
+from modules.autojobs import discover_jobs  # noqa: E402
+from shared.config import load_config, load_jobs, load_state, save_jobs, save_state  # noqa: E402
+from shared.db import init_db  # noqa: E402
+from core.runner import run_jobs  # noqa: E402
+from shared.runtime import (
     acquire_lock,
     append_runtime_error,
     ensure_runtime_paths,
@@ -23,7 +24,7 @@ from lib.runtime import (
     utc_now_iso,
     update_runtime_status,
 )  # noqa: E402
-from lib.telegram_bot import (  # noqa: E402
+from modules.bot import (  # noqa: E402
     build_notification_details_payload,
     build_notification_details_reply_markup,
     format_discovery_message,
@@ -51,7 +52,7 @@ def main():
     log_path = paths["log_path"]
     status_path = paths["status_path"]
     errors_path = paths["errors_path"]
-    command = "python scripts/cron_run.py"
+    command = "python src/cron_run.py"
 
     lock_result = acquire_lock(lock_path, command)
     if not lock_result["acquired"]:

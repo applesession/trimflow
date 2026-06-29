@@ -2,7 +2,7 @@ import os
 import shutil
 from pathlib import Path
 
-from lib.constants import (
+from shared.constants import (
     BASE_REQUIRED_TOOLS,
     REQUIRED_ENV_VARS,
     TEMP_ROOT,

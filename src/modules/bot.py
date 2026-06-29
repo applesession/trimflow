@@ -10,7 +10,7 @@ from pathlib import Path
 import requests
 from urllib3.util import connection as urllib3_connection
 
-from lib.autojobs import (
+from modules.autojobs import (
     add_release_to_blacklist,
     build_blacklist_item,
     find_matching_job,
@@ -22,11 +22,11 @@ from lib.autojobs import (
     remove_release_from_blacklist,
     unmark_job_episodes_queued,
 )
-from lib.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
-from lib.constants import DEFAULT_TELEGRAM_STATE_PATH
-from lib.helpers import ensure_non_empty_slug, parse_episodes_range
-from lib.runner import build_execution_order
-from lib.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
+from shared.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
+from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
+from shared.helpers import ensure_non_empty_slug, parse_episodes_range
+from core.runner import build_execution_order
+from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org"

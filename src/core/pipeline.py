@@ -2,20 +2,20 @@ import json
 import shutil
 from pathlib import Path
 
-from lib.aniskip import (
+from api.aniskip import (
     build_quality_summary,
     get_aniskip_segments,
     print_skip_log,
     summarize_skips,
 )
-from lib.anilibria import get_anilibria_segments
-from lib.detector import (
+from api.anilibria import get_anilibria_segments
+from core.detector import (
     build_detector_context,
     get_detector_type_result,
     normalize_timing_detection_config,
 )
-from lib.discovery import filter_episode_files, find_episode_files
-from lib.helpers import (
+from core.discovery import filter_episode_files, find_episode_files
+from shared.helpers import (
     build_compilation_display_name,
     build_single_episode_display_name,
     build_timestamps_description,
@@ -29,7 +29,7 @@ from lib.helpers import (
     seconds_to_timestamp,
     run,
 )
-from lib.media import (
+from core.media import (
     cap_subsegment_durations,
     get_preferred_audio_stream,
     snap_remove_segments_to_keyframes,
@@ -41,10 +41,10 @@ from lib.media import (
     render_final,
     render_segment,
 )
-from lib.runtime import update_runtime_status
-from lib.storage import upload_file_to_s3
-from lib.validation import reset_temp_dir
-from lib.vk import publish_private_video_link_to_vk, publish_video_to_vk
+from shared.runtime import update_runtime_status
+from api.storage import upload_file_to_s3
+from shared.validation import reset_temp_dir
+from api.vk import publish_private_video_link_to_vk, publish_video_to_vk
 
 
 def download_magnet(magnet: str, download_dir: Path):

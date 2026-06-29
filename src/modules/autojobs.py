@@ -3,10 +3,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.anilibria import get_release_details, list_recent_releases
-from lib.config import normalize_automation_config
-from lib.helpers import ensure_non_empty_slug, parse_episodes_range
-from lib.db import (
+from api.anilibria import get_release_details, list_recent_releases
+from shared.config import normalize_automation_config
+from shared.helpers import ensure_non_empty_slug, parse_episodes_range
+from shared.db import (
     build_seen_episode_key,
     get_tracked_episode_keys,
     mark_episodes_queued,

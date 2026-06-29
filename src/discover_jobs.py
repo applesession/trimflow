@@ -5,12 +5,12 @@ import sys
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+SRC = Path(__file__).resolve().parent
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-from lib.autojobs import discover_jobs  # noqa: E402
-from lib.config import load_config, load_jobs, load_state, save_jobs, save_state  # noqa: E402
+from modules.autojobs import discover_jobs  # noqa: E402
+from shared.config import load_config, load_jobs, load_state, save_jobs, save_state  # noqa: E402
 
 
 load_dotenv()

@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from lib.constants import SUPPORTED_VIDEO_EXTENSIONS
+from shared.constants import SUPPORTED_VIDEO_EXTENSIONS
 
 
 def extract_episode_number(filename: str):

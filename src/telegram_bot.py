@@ -5,13 +5,13 @@ import time
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+SRC = Path(__file__).resolve().parent
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-from lib.config import load_config  # noqa: E402
-from lib.runtime import ensure_runtime_paths, log_line  # noqa: E402
-from lib.telegram_bot import fetch_updates, handle_update, load_telegram_state, update_telegram_state_progress  # noqa: E402
+from shared.config import load_config  # noqa: E402
+from shared.runtime import ensure_runtime_paths, log_line  # noqa: E402
+from modules.bot import fetch_updates, handle_update, load_telegram_state, update_telegram_state_progress  # noqa: E402
 
 
 load_dotenv()

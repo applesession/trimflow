@@ -2,9 +2,9 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-from lib.constants import CONFIG_PATH, DEFAULT_AUTOMATION, DEFAULT_COMPLETED_JOBS_PATH, DEFAULT_JOBS_PATH, DEFAULT_STATE_PATH
-from lib.db import load_jobs as _db_load_jobs, save_jobs as _db_save_jobs
-from lib.db import load_completed_jobs as _db_load_completed_jobs, save_completed_jobs as _db_save_completed_jobs
+from shared.constants import CONFIG_PATH, DEFAULT_AUTOMATION, DEFAULT_COMPLETED_JOBS_PATH, DEFAULT_JOBS_PATH, DEFAULT_STATE_PATH
+from shared.db import load_jobs as _db_load_jobs, save_jobs as _db_save_jobs
+from shared.db import load_completed_jobs as _db_load_completed_jobs, save_completed_jobs as _db_save_completed_jobs
 
 
 def load_config():

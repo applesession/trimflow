@@ -1,7 +1,7 @@
 import json
 import subprocess
 
-from lib.helpers import run
+from shared.helpers import run
 
 
 def detect_audio_streams(video_path):
