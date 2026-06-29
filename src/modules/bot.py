@@ -58,9 +58,8 @@ def build_main_keyboard():
     return {
         "keyboard": [
             [{"text": "Статус"}, {"text": "Текущая"}],
-            [{"text": "Очередь"}, {"text": "Следующие"}],
-            [{"text": "Ошибки"}, {"text": "Лог"}],
-            [{"text": "Помощь"}],
+            [{"text": "Очередь"}, {"text": "Ошибки"}],
+            [{"text": "Лог"}, {"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -950,17 +949,26 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True):
 
 
 def format_jobs_message_markdown(config, page=1, page_size=15):
-    page_data = get_jobs_page_data(config, page=page, page_size=page_size)
-    if not page_data["jobs"]:
+    jobs = load_jobs(config)
+    if not jobs:
         return "Очередь пуста"
+
+    # Sort by execution priority
+    sorted_jobs = build_execution_order(jobs, defaults=config.get("defaults", {}))
+    total = len(sorted_jobs)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    p = max(1, min(page, total_pages))
+    start = (p - 1) * page_size
+    end = min(start + page_size, total)
+    page_jobs = sorted_jobs[start:end]
 
     donut = []
     ongoing = []
     manual = []
-    for i, job in enumerate(page_data["jobs"]):
+    for i, job in enumerate(page_jobs):
         is_donut = (job.get("delivery") or {}).get("vk_privacy_view") == 5
         is_ongoing = (job.get("automation") or {}).get("is_ongoing")
-        idx = page_data["start_index"] + i + 1
+        idx = start + i + 1
         if is_donut:
             donut.append((idx, job))
         elif is_ongoing:
@@ -979,9 +987,8 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
             f"└ {season} · {eps_label} `{eps}`",
         ]
 
-    total = page_data["total_jobs"]
     title_word = "тайтл" if total == 1 else ("тайтла" if 2 <= total <= 4 else "тайтлов")
-    header = f"📋 Очередь аниме\n\n{total} {title_word} · Страница `{page_data['page']}/{page_data['total_pages']}` · \\#{page_data['start_index'] + 1}–{page_data['end_index']}"
+    header = f"📋 Очередь аниме\n\n{total} {title_word} · Страница `{p}/{total_pages}` · \\#{start + 1}–{end}"
     lines = [header, ""]
 
     for group_title, group_jobs in [
@@ -996,92 +1003,6 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
         for idx, job in group_jobs:
             lines.extend(_job_line(idx, job))
         lines.append("")
-
-    return "\n".join(lines).rstrip()
-
-
-def format_next_message(config, limit=10):
-    jobs = load_jobs(config)
-    if not jobs:
-        return "Очередь пуста"
-
-    normalized_limit = max(1, int(limit))
-    execution_jobs = build_execution_order(jobs, defaults=config.get("defaults", {}))
-    visible_jobs = execution_jobs[:normalized_limit]
-    lines = [
-        "Следующие к выполнению",
-        "",
-        "Порядок показан с учётом приоритета ongoing.",
-        "",
-    ]
-    for index, job in enumerate(visible_jobs, start=1):
-        ongoing_marker = " [ongoing]" if (job.get("automation") or {}).get("is_ongoing") else ""
-        lines.append(f"{index}. {get_display_title(job)}{ongoing_marker}")
-        lines.append(f"  Сезон: {job.get('season', 1)}")
-        lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
-    if len(execution_jobs) > normalized_limit:
-        lines.extend([
-            "",
-            f"Показано: {len(visible_jobs)} из {len(execution_jobs)}",
-        ])
-    return "\n".join(lines)
-
-
-def format_next_message_markdown(config, limit=10):
-    jobs = load_jobs(config)
-    if not jobs:
-        return "Очередь пуста"
-
-    normalized_limit = max(1, int(limit))
-    execution_jobs = build_execution_order(jobs, defaults=config.get("defaults", {}))
-    visible = execution_jobs[:normalized_limit]
-
-    donut = []
-    ongoing = []
-    manual = []
-    for i, job in enumerate(visible):
-        is_donut = (job.get("delivery") or {}).get("vk_privacy_view") == 5
-        is_ongoing = (job.get("automation") or {}).get("is_ongoing")
-        if is_donut:
-            donut.append((i + 1, job))
-        elif is_ongoing:
-            ongoing.append((i + 1, job))
-        else:
-            manual.append((i + 1, job))
-
-    def _job_line(idx, job):
-        title = escape_markdown_v2(get_display_title(job))
-        season = f"S{job.get('season', 1)}"
-        eps = job.get("episodes_range", "?")
-        is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
-        eps_label = "серия" if is_single else "серии"
-        return [
-            f"*{idx}\\. {title}*",
-            f"└ {season} · {eps_label} `{eps}`",
-        ]
-
-    lines = [
-        "📋 *Следующие к выполнению*",
-        "",
-        "Порядок с учётом приоритета ongoing\\.",
-        "",
-    ]
-
-    for group_title, group_jobs in [
-        ("🔄 Онгоинги", ongoing),
-        ("💎 Доны", donut),
-        ("✏️ Вручную", manual),
-    ]:
-        if not group_jobs:
-            continue
-        lines.append(group_title)
-        lines.append("")
-        for idx, job in group_jobs:
-            lines.extend(_job_line(idx, job))
-        lines.append("")
-
-    if len(execution_jobs) > normalized_limit:
-        lines.append(f"Показано: {len(visible)} из {len(execution_jobs)}")
 
     return "\n".join(lines).rstrip()
 
@@ -1595,7 +1516,6 @@ def normalize_command_text(text):
         "Статус": "/status",
         "Текущая": "/current",
         "Очередь": "/jobs",
-        "Следующие": "/next",
         "Ошибки": "/errors",
         "Лог": "/log",
         "Помощь": "/help",
@@ -1718,10 +1638,9 @@ def build_help_message():
         "/start - краткая справка",
         "/status - статус очереди и runtime",
         "/current - текущее или последнее выполнение",
-        "/next - показать ближайший runtime-порядок выполнения",
+        "/jobs - показать аниме в очереди (с приоритетом выполнения)",
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
-        "/jobs - показать последние аниме в очереди",
         "/remove <номер> - удалить аниме из очереди",
         "/complete <номер> - убрать аниме из очереди и вручную пометить завершённым",
         "/retry <номер> - повторно поставить аниме в очередь",
@@ -1729,7 +1648,7 @@ def build_help_message():
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
         "/unblacklist <номер> - убрать тайтл из discovery blacklist",
         "",
-        "Порядок в /jobs — операторский. Фактическое выполнение может давать приоритет ongoing.",
+        "Порядок в /jobs — по приоритету выполнения (ongoing → manual).",
         "",
         "Пример:",
         "/add Название тайтла ; Серия (001-012) ; magnet-ссылка ; сезон (1/2/3) ; тип приватности (0 - для всех; 5 - для донов)",
@@ -1746,20 +1665,6 @@ def handle_command(config, text):
         return format_status_message(config)
     if text.startswith("/current"):
         return format_current_message()
-    if text.startswith("/next"):
-        parts = text.split(maxsplit=1)
-        limit = 10
-        if len(parts) == 2:
-            try:
-                limit = int(parts[1].strip())
-            except ValueError as exc:
-                raise RuntimeError("Формат: /next или /next <количество>") from exc
-            if limit < 1:
-                raise RuntimeError("Количество должно быть не меньше 1")
-        return {
-            "text": format_next_message_markdown(config, limit=limit),
-            "parse_mode": "MarkdownV2",
-        }
     if text.startswith("/errors"):
         return format_errors_message()
     if text.startswith("/log"):
@@ -1861,14 +1766,19 @@ def maybe_handle_jobs_navigation(config, chat_id, text):
 def _handle_jobs_callback(config, chat_id, message_id, callback_query_id, page):
     """Handle inline keyboard pagination for /jobs list."""
     answer_callback_query(callback_query_id)
-    page_data = get_jobs_page_data(config, page=page)
-    if not page_data["jobs"]:
+
+    jobs = load_jobs(config)
+    sorted_jobs = build_execution_order(jobs, defaults=config.get("defaults", {}))
+    total = len(sorted_jobs)
+    if total == 0:
         return
-    text = format_jobs_message_markdown(config, page=page)
-    markup = build_jobs_inline_keyboard(
-        page_data["has_previous"], page_data["has_next"],
-        page_data["page"], page_data["total_pages"],
-    )
+
+    page_size = 15
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    p = max(1, min(page, total_pages))
+
+    text = format_jobs_message_markdown(config, page=p)
+    markup = build_jobs_inline_keyboard(p > 1, p < total_pages, p, total_pages)
     edit_message_text(chat_id, message_id, text, reply_markup=markup, parse_mode="MarkdownV2")
 
 
