@@ -332,7 +332,7 @@ def answer_callback_query(callback_query_id, text=None):
     return _telegram_request("answerCallbackQuery", payload=payload, timeout=20)
 
 
-def edit_message_text(chat_id, message_id, text, reply_markup=None):
+def edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mode=None):
     payload = {
         "chat_id": str(chat_id),
         "message_id": int(message_id),
@@ -340,6 +340,8 @@ def edit_message_text(chat_id, message_id, text, reply_markup=None):
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     return _telegram_request("editMessageText", payload=payload, timeout=20)
 
 
@@ -944,6 +946,43 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True):
         lines.append(f"  Сезон: {job.get('season', 1)}")
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
+
+
+def format_jobs_message_markdown(config, page=1, page_size=15):
+    page_data = get_jobs_page_data(config, page=page, page_size=page_size)
+    if not page_data["jobs"]:
+        return "Очередь пуста"
+
+    ongoing = []
+    manual = []
+    for i, job in enumerate(page_data["jobs"]):
+        target = ongoing if (job.get("automation") or {}).get("is_ongoing") else manual
+        target.append((page_data["start_index"] + i + 1, job))
+
+    def _job_line(index, job):
+        title = escape_markdown_v2(get_display_title(job))
+        season = f"S{job.get('season', 1)}"
+        eps = job.get("episodes_range", "?")
+        is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
+        eps_fmt = f"[`{eps}`]" if is_single else f"`{eps}`"
+        return f"•  `{index}`  *{title}*  {season}  {eps_fmt}"
+
+    lines = [
+        "📋 *Очередь аниме*",
+        "",
+        f"Всего `{page_data['total_jobs']}` · Стр `{page_data['page']}/{page_data['total_pages']}` · #{page_data['start_index'] + 1}–{page_data['end_index']}",
+        "",
+    ]
+
+    for group_title, group_jobs in [("🔄 *Ongoing*", ongoing), ("✏️ *Вручную*", manual)]:
+        if not group_jobs:
+            continue
+        lines.append(group_title)
+        for idx, job in group_jobs:
+            lines.append(_job_line(idx, job))
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 def format_next_message(config, limit=10):
@@ -1664,7 +1703,8 @@ def handle_command(config, text):
         if not page_data["jobs"]:
             return "Очередь пуста"
         return {
-            "text": format_jobs_message(config, page=page),
+            "text": format_jobs_message_markdown(config, page=page),
+            "parse_mode": "MarkdownV2",
             "reply_markup": build_jobs_inline_keyboard(
                 page_data["has_previous"], page_data["has_next"],
                 page_data["page"], page_data["total_pages"],
@@ -1746,12 +1786,12 @@ def _handle_jobs_callback(config, chat_id, message_id, callback_query_id, page):
     page_data = get_jobs_page_data(config, page=page)
     if not page_data["jobs"]:
         return
-    text = format_jobs_message(config, page=page)
+    text = format_jobs_message_markdown(config, page=page)
     markup = build_jobs_inline_keyboard(
         page_data["has_previous"], page_data["has_next"],
         page_data["page"], page_data["total_pages"],
     )
-    edit_message_text(chat_id, message_id, text, reply_markup=markup)
+    edit_message_text(chat_id, message_id, text, reply_markup=markup, parse_mode="MarkdownV2")
 
 
 def handle_update(config, update):
