@@ -1064,29 +1064,64 @@ def format_log_message_markdown(lines_limit=20, max_chars=3500):
     )
 
 
-def parse_index_command(text, command_name):
+def parse_index_range(text, command_name):
+    """Parse index range: '5', '1-10', '1,5,8-10' → sorted list of ints."""
     normalized = str(text or "").strip()
     prefix = f"/{command_name}"
     if normalized == prefix:
-        raise RuntimeError(f"Формат: /{command_name} <номер>")
+        raise RuntimeError(f"Формат: /{command_name} <номер> или <1\\-10> или <1,5,8\\-10>")
     if not normalized.startswith(prefix + " "):
         raise RuntimeError(f"Формат: /{command_name} <номер>")
 
-    raw_index = normalized[len(prefix):].strip()
-    try:
-        index = int(raw_index)
-    except ValueError as exc:
-        raise RuntimeError("Номер должен быть целым числом") from exc
-    if index < 1:
-        raise RuntimeError("Номер должен быть не меньше 1")
-    return index
+    raw = normalized[len(prefix):].strip()
+    indices = set()
+    for part in re.split(r"\s*,\s*", raw):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            start = int(a.strip())
+            end = int(b.strip())
+            if start < 1 or start > end:
+                raise RuntimeError(f"Неверный диапазон: {part}")
+            indices.update(range(start, end + 1))
+        else:
+            idx = int(part)
+            if idx < 1:
+                raise RuntimeError("Номер должен быть не меньше 1")
+            indices.add(idx)
+
+    if not indices:
+        raise RuntimeError("Не указано ни одного номера")
+    return sorted(indices)
+
+
+def parse_index_command(text, command_name):
+    """Parse a single index. Kept for /unblacklist, /retry."""
+    return parse_index_range(text, command_name)[0]
+
+
+def _get_execution_order(config):
+    jobs = load_jobs(config)
+    return build_execution_order(jobs, defaults=config.get("defaults", {}))
 
 
 def get_job_by_index(config, index):
-    jobs = load_jobs(config)
-    if index > len(jobs):
+    sorted_jobs = _get_execution_order(config)
+    if index < 1 or index > len(sorted_jobs):
         raise RuntimeError(f"Аниме с номером {index} не найдено")
-    return jobs[index - 1], jobs
+    return sorted_jobs[index - 1], sorted_jobs
+
+
+def get_jobs_by_indices(config, indices):
+    sorted_jobs = _get_execution_order(config)
+    result = []
+    for idx in indices:
+        if idx < 1 or idx > len(sorted_jobs):
+            raise RuntimeError(f"Аниме с номером {idx} не найдено")
+        result.append(sorted_jobs[idx - 1])
+    return result, sorted_jobs
 
 
 def build_failed_job_identities():
@@ -1155,14 +1190,20 @@ def format_retry_candidates_message(config):
     return "\n".join(lines)
 
 
-def build_pending_action_payload(action_type, source, index, job_snapshot):
+def build_pending_action_payload(action_type, source, index_or_indices, job_snapshot):
+    indices = index_or_indices if isinstance(index_or_indices, list) else [index_or_indices]
+    jobs = job_snapshot if isinstance(job_snapshot, list) else [job_snapshot]
     return {
         "type": action_type,
         "source": source,
-        "index": index,
-        "job_identity": build_job_identity(job_snapshot),
+        "indices": indices,
+        "job_identities": [build_job_identity(j) for j in jobs],
         "created_at": datetime.now().astimezone().isoformat(),
-        "job_snapshot": job_snapshot,
+        "job_snapshots": jobs,
+        # legacy fields for backward compat
+        "index": indices[0],
+        "job_identity": build_job_identity(jobs[0]),
+        "job_snapshot": jobs[0],
     }
 
 
@@ -1187,17 +1228,25 @@ def build_blacklist_pending_action_payload(action_type, index, blacklist_item):
     }
 
 
-def format_remove_confirmation(job, index):
+def _format_job_list(jobs, indices):
+    """Format a list of jobs with their indices for confirmation dialogs."""
+    lines = []
+    for idx, job in zip(indices, jobs):
+        lines.append(f"{idx}. {get_display_title(job)} — S{job.get('season', 1)} {job.get('episodes_range', '?')}")
+    return "\n".join(lines)
+
+
+def format_remove_confirmation(jobs, indices):
+    label = "удаления" if len(indices) > 1 else "удаления"
+    count_note = f"\n\nАниме к удалению: {len(indices)} шт." if len(indices) > 1 else ""
     return "\n".join([
-        "Подтверждение удаления",
+        f"Подтверждение {label}",
         "",
-        f"Номер: {index}",
-        f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
-        f"Эпизоды: {job.get('episodes_range', '?')}",
+        _format_job_list(jobs, indices),
+        count_note,
         "",
         "Подтверди удаление кнопкой ниже",
-    ])
+    ]).rstrip()
 
 
 def format_retry_confirmation(candidate, index):
@@ -1215,28 +1264,33 @@ def format_retry_confirmation(candidate, index):
     ])
 
 
-def format_remove_result(job):
+def format_remove_result(jobs):
+    if isinstance(jobs, list):
+        if len(jobs) == 0:
+            return "Ничего не удалено"
+        titles = [get_display_title(j) for j in jobs]
+        return f"Удалено из очереди: {len(jobs)} шт.\n\n" + "\n".join(f"• {t}" for t in titles)
     return "\n".join([
         "Аниме удалено из очереди",
         "",
-        f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
-        f"Эпизоды: {job.get('episodes_range', '?')}",
+        f"Тайтл: {get_display_title(jobs)}",
+        f"Сезон: {jobs.get('season', 1)}",
+        f"Эпизоды: {jobs.get('episodes_range', '?')}",
     ])
 
 
-def format_complete_confirmation(job, index):
+def format_complete_confirmation(jobs, indices):
+    label = "завершения" if len(indices) > 1 else "завершения"
+    count_note = f"\n\nАниме к завершению: {len(indices)} шт." if len(indices) > 1 else ""
     return "\n".join([
-        "Подтверждение завершения",
+        f"Подтверждение {label}",
         "",
-        f"Номер: {index}",
-        f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
-        f"Эпизоды: {job.get('episodes_range', '?')}",
+        _format_job_list(jobs, indices),
+        count_note,
         "",
-        "Аниме будет убрано из очереди и перенесено в completed_jobs.json",
+        "Аниме будет убрано из очереди и перенесено в completed_jobs.json" if len(indices) == 1 else "Аниме будут убраны из очереди и перенесены в completed_jobs.json",
         "Подтверди завершение кнопкой ниже",
-    ])
+    ]).rstrip()
 
 
 def format_retry_result(job, already_exists=False):
@@ -1257,18 +1311,19 @@ def format_retry_result(job, already_exists=False):
     ])
 
 
-def format_blacklist_confirmation(job, index):
-    return "\n".join([
-        "Подтверждение blacklist",
+def format_blacklist_confirmation(jobs, indices):
+    label = "blacklist" if len(indices) > 1 else "blacklist"
+    count_note = f"\n\nАниме к blacklist: {len(indices)} шт." if len(indices) > 1 else ""
+    lines = [
+        f"Подтверждение {label}",
         "",
-        f"Номер: {index}",
-        f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
-        f"Эпизоды: {job.get('episodes_range', '?')}",
+        _format_job_list(jobs, indices),
+        count_note,
         "",
-        "Тайтл будет добавлен в discovery blacklist и удалён из активной очереди",
+        "Тайтл будет добавлен в discovery blacklist и удалён из активной очереди" if len(indices) == 1 else "Тайтлы будут добавлены в discovery blacklist и удалены из активной очереди",
         "Подтверди действие кнопкой ниже",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def format_blacklist_list(config):
@@ -1291,7 +1346,16 @@ def format_blacklist_list(config):
     return "\n".join(lines)
 
 
-def format_blacklist_result(job, already_blacklisted=False):
+def format_blacklist_result(results):
+    if isinstance(results, list):
+        if len(results) == 0:
+            return "Ничего не добавлено в blacklist"
+        titles = []
+        for job, _already in results:
+            titles.append(f"• {get_display_title(job)}")
+        return f"Добавлено в blacklist: {len(results)} шт.\n\n" + "\n".join(titles)
+
+    job, already_blacklisted = results, False
     lines = [
         "Тайтл добавлен в discovery blacklist" if not already_blacklisted else "Тайтл уже был в discovery blacklist",
         "",
@@ -1325,7 +1389,16 @@ def format_unblacklist_result(item):
     ])
 
 
-def format_complete_result(job, already_archived=False):
+def format_complete_result(results):
+    if isinstance(results, list):
+        if len(results) == 0:
+            return "Ничего не завершено"
+        titles = []
+        for job, _already in results:
+            titles.append(f"• {get_display_title(job)} — S{job.get('season', 1)} {job.get('episodes_range', '?')}")
+        return f"Завершено: {len(results)} шт.\n\n" + "\n".join(titles)
+
+    job, already_archived = results, False
     if already_archived:
         return "\n".join([
             "Аниме убрано из очереди",
@@ -1335,7 +1408,6 @@ def format_complete_result(job, already_archived=False):
             f"Сезон: {job.get('season', 1)}",
             f"Эпизоды: {job.get('episodes_range', '?')}",
         ])
-
     return "\n".join([
         "Аниме перенесено в completed_jobs.json",
         "",
@@ -1482,13 +1554,18 @@ def confirm_pending_action(config, chat_id, text):
 
     clear_pending_action(chat_id)
     if action_type == "remove":
-        removed_job = remove_job_by_identity(config, pending.get("job_identity"))
-        return format_remove_result(removed_job)
+        removed = []
+        for job in pending.get("job_snapshots", []):
+            removed.append(remove_job_by_identity(config, build_job_identity(job)))
+        return format_remove_result(removed)
 
     if action_type == "complete":
-        removed_job = remove_job_by_identity(config, pending.get("job_identity"))
-        already_archived = archive_job_to_completed(config, removed_job)
-        return format_complete_result(removed_job, already_archived=already_archived)
+        results = []
+        for job in pending.get("job_snapshots", []):
+            removed_job = remove_job_by_identity(config, build_job_identity(job))
+            already_archived = archive_job_to_completed(config, removed_job)
+            results.append((removed_job, already_archived))
+        return format_complete_result(results)
 
     if action_type == "retry":
         job = pending.get("job_snapshot") or {}
@@ -1496,9 +1573,11 @@ def confirm_pending_action(config, chat_id, text):
         return format_retry_result(job, already_exists=not added)
 
     if action_type == "blacklist":
-        job = pending.get("job_snapshot") or {}
-        already_blacklisted = add_job_to_blacklist(config, job)
-        return format_blacklist_result(job, already_blacklisted=already_blacklisted)
+        results = []
+        for job in pending.get("job_snapshots", []):
+            already_blacklisted = add_job_to_blacklist(config, job)
+            results.append((job, already_blacklisted))
+        return format_blacklist_result(results)
 
     if action_type == "unblacklist":
         blacklist_item = pending.get("blacklist_item") or {}
@@ -1641,8 +1720,8 @@ def build_help_message():
         "/jobs - показать аниме в очереди (с приоритетом выполнения)",
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
-        "/remove <номер> - удалить аниме из очереди",
-        "/complete <номер> - убрать аниме из очереди и вручную пометить завершённым",
+        "/remove <номер> - удалить аниме из очереди (можно диапазон: 1-10, 1,5,8-10)",
+        "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
         "/blacklist - показать discovery blacklist",
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
@@ -1694,33 +1773,34 @@ def handle_command(config, text):
             ),
         }
     if text.startswith("/remove"):
-        index = parse_index_command(text, "remove")
-        job, _jobs = get_job_by_index(config, index)
+        indices = parse_index_range(text, "remove")
+        jobs_list, _ = get_jobs_by_indices(config, indices)
         return {
-            "text": format_remove_confirmation(job, index),
+            "text": format_remove_confirmation(jobs_list, indices),
             "reply_markup": build_confirmation_keyboard("remove"),
-            "pending_action": build_pending_action_payload("remove", "jobs", index, job),
+            "pending_action": build_pending_action_payload("remove", "jobs", indices, jobs_list),
         }
     if text.startswith("/complete"):
-        index = parse_index_command(text, "complete")
-        job, _jobs = get_job_by_index(config, index)
+        indices = parse_index_range(text, "complete")
+        jobs_list, _ = get_jobs_by_indices(config, indices)
         return {
-            "text": format_complete_confirmation(job, index),
+            "text": format_complete_confirmation(jobs_list, indices),
             "reply_markup": build_confirmation_keyboard("complete"),
-            "pending_action": build_pending_action_payload("complete", "jobs", index, job),
+            "pending_action": build_pending_action_payload("complete", "jobs", indices, jobs_list),
         }
     if text == "/blacklist":
         return format_blacklist_list(config)
     if text.startswith("/blacklist "):
-        index = parse_index_command(text, "blacklist")
-        job, _jobs = get_job_by_index(config, index)
-        release_id = get_job_release_id(job)
-        if release_id is None:
-            raise RuntimeError("Этот job нельзя добавить в discovery blacklist: отсутствует release_id")
+        indices = parse_index_range(text, "blacklist")
+        jobs_list, _ = get_jobs_by_indices(config, indices)
+        for idx, job in zip(indices, jobs_list):
+            release_id = get_job_release_id(job)
+            if release_id is None:
+                raise RuntimeError(f"Аниме #{idx} нельзя добавить в discovery blacklist: отсутствует release_id")
         return {
-            "text": format_blacklist_confirmation(job, index),
+            "text": format_blacklist_confirmation(jobs_list, indices),
             "reply_markup": build_confirmation_keyboard("blacklist"),
-            "pending_action": build_pending_action_payload("blacklist", "jobs", index, job),
+            "pending_action": build_pending_action_payload("blacklist", "jobs", indices, jobs_list),
         }
     if text.startswith("/unblacklist"):
         index = parse_index_command(text, "unblacklist")
