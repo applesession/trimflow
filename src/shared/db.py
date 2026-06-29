@@ -524,6 +524,29 @@ def unmark_episodes_queued(release_id, episode_numbers):
     conn.close()
 
 
+def get_episode_tracking_counts():
+    conn = _get_conn()
+    queued = conn.execute("SELECT COUNT(*) FROM episode_tracking WHERE status = 'queued'").fetchone()[0]
+    completed = conn.execute("SELECT COUNT(*) FROM episode_tracking WHERE status = 'completed'").fetchone()[0]
+    conn.close()
+    return {"queued": queued, "completed": completed}
+
+
+def get_episode_tracking_dicts():
+    conn = _get_conn()
+    rows = conn.execute("SELECT release_id, episode, status FROM episode_tracking").fetchall()
+    conn.close()
+    queued = {}
+    completed = {}
+    for r in rows:
+        key = build_seen_episode_key(r["release_id"], r["episode"])
+        if r["status"] == "queued":
+            queued[key] = True
+        else:
+            completed[key] = True
+    return queued, completed
+
+
 def get_discovery_blacklist():
     conn = _get_conn()
     rows = conn.execute("SELECT * FROM discovery_blacklist ORDER BY title").fetchall()
@@ -609,6 +632,13 @@ def record_skipped_item(item):
     )
     conn.commit()
     conn.close()
+
+
+def get_skipped_items_count():
+    conn = _get_conn()
+    count = conn.execute("SELECT COUNT(*) FROM skipped_items").fetchone()[0]
+    conn.close()
+    return count
 
 
 def save_ongoing_progress(key, entry):

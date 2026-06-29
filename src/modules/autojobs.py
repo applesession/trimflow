@@ -9,6 +9,8 @@ from shared.helpers import ensure_non_empty_slug, parse_episodes_range
 from shared.db import (
     build_seen_episode_key,
     get_tracked_episode_keys,
+    get_episode_tracking_dicts as _db_get_episode_tracking_dicts,
+    get_skipped_items_count as _db_get_skipped_items_count,
     mark_episodes_queued,
     mark_episodes_completed,
     unmark_episodes_queued,
@@ -27,16 +29,10 @@ def build_seen_episode_key(release_id, episode_number):
 
 
 def _get_episode_tracking_maps(state):
-    """Returns queued and completed episode maps for legacy compatibility.
-    Now reads from SQLite instead of state.json."""
-    tracked_keys = get_tracked_episode_keys()
-    # Build dicts for backward compat
-    queued = {}
-    completed = {}
-    # The state dict keys are no longer used directly; tracking is in SQLite
-    state.setdefault("queued_release_episodes", {})
-    state.setdefault("completed_release_episodes", {})
-    return state["queued_release_episodes"], state["completed_release_episodes"]
+    queued, completed = _db_get_episode_tracking_dicts()
+    state["queued_release_episodes"] = queued
+    state["completed_release_episodes"] = completed
+    return queued, completed
 
 
 def get_job_release_id(job):
@@ -284,6 +280,7 @@ def discover_jobs(config, jobs, state):
     _get_episode_tracking_maps(updated_state)
 
     if not automation.get("enabled", True):
+        _get_episode_tracking_maps(updated_state)
         updated_state["job_index"] = build_default_job_index(updated_jobs)
         return {
             "jobs": updated_jobs,
@@ -291,10 +288,10 @@ def discover_jobs(config, jobs, state):
             "summary": {
                 "created_jobs": 0,
                 "updated_jobs": 0,
-                "skipped_items": len(updated_state["skipped_items"]),
+                "skipped_items": _db_get_skipped_items_count(),
                 "queued_release_episodes": len(updated_state["queued_release_episodes"]),
                 "completed_release_episodes": len(updated_state["completed_release_episodes"]),
-                "blacklisted_releases": len(updated_state["discovery_blacklist"]),
+                "blacklisted_releases": len(_db_get_discovery_blacklist()),
                 "request_urls": [],
                 "status": "disabled",
             },
@@ -452,10 +449,10 @@ def discover_jobs(config, jobs, state):
         "summary": {
             "created_jobs": created_jobs,
             "updated_jobs": updated_jobs_count,
-            "skipped_items": len(updated_state["skipped_items"]),
+            "skipped_items": _db_get_skipped_items_count(),
             "queued_release_episodes": len(updated_state["queued_release_episodes"]),
             "completed_release_episodes": len(updated_state["completed_release_episodes"]),
-            "blacklisted_releases": len(updated_state["discovery_blacklist"]),
+            "blacklisted_releases": len(_db_get_discovery_blacklist()),
             "request_urls": releases_result.get("request_urls", []),
         },
     }

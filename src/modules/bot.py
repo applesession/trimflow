@@ -24,7 +24,7 @@ from modules.autojobs import (
 )
 from shared.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
 from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
-from shared.db import insert_one_job, remove_completed_job as _db_remove_job
+from shared.db import get_discovery_blacklist, get_episode_tracking_counts, insert_one_job, remove_completed_job as _db_remove_job
 from shared.helpers import ensure_non_empty_slug, parse_episodes_range
 from core.runner import build_execution_order
 from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -797,6 +797,7 @@ def format_status_message(config):
     state = load_state(config)
     runtime_paths = ensure_runtime_paths()
     active_title = detect_active_job_title(jobs, runtime_paths)
+    episode_counts = get_episode_tracking_counts()
 
     lines = [
         "Статус пайплайна",
@@ -804,9 +805,9 @@ def format_status_message(config):
         f"Активная задача: {active_title or 'сейчас ничего не обрабатывается'}",
         f"Аниме в очереди: {len(jobs)}",
         f"Последнее обновление очереди: {format_datetime_ru(state.get('last_discovery_at'))}",
-        f"Эпизодов в очереди: {len(state.get('queued_release_episodes', {}))}",
-        f"Завершённых эпизодов: {len(state.get('completed_release_episodes', {}))}",
-        f"В blacklist discovery: {len(state.get('discovery_blacklist', []))}",
+        f"Эпизодов в очереди: {episode_counts['queued']}",
+        f"Завершённых эпизодов: {episode_counts['completed']}",
+        f"В blacklist discovery: {len(get_blacklist_entries(config))}",
         "Выполнение может идти с приоритетом ongoing, даже если порядок в /jobs другой",
     ]
     return "\n".join(lines)
@@ -1208,8 +1209,7 @@ def build_pending_action_payload(action_type, source, index_or_indices, job_snap
 
 
 def get_blacklist_entries(config):
-    state = load_state(config)
-    entries = list(state.get("discovery_blacklist", []))
+    entries = get_discovery_blacklist()
     entries.sort(key=lambda item: (
         str(item.get("title_ru") or item.get("title") or "").strip().lower(),
         int(item.get("season") or 1),
@@ -1422,7 +1422,6 @@ def add_job_to_blacklist(config, job):
     if release_id is None:
         raise RuntimeError("Этот job нельзя добавить в discovery blacklist: отсутствует release_id")
 
-    state = load_state(config)
     blacklist_item = build_blacklist_item(
         release_id,
         title=job.get("title"),
@@ -1430,8 +1429,7 @@ def add_job_to_blacklist(config, job):
         season=job.get("season", 1),
         source="telegram",
     )
-    updated_state, already_blacklisted = add_release_to_blacklist(state, blacklist_item)
-    save_state(config, updated_state)
+    _, already_blacklisted = add_release_to_blacklist({}, blacklist_item)
 
     jobs = load_jobs(config)
     if find_matching_job(jobs, job) is not None:
@@ -1581,9 +1579,7 @@ def confirm_pending_action(config, chat_id, text):
 
     if action_type == "unblacklist":
         blacklist_item = pending.get("blacklist_item") or {}
-        state = load_state(config)
-        updated_state, removed_item = remove_release_from_blacklist(state, blacklist_item.get("release_id"))
-        save_state(config, updated_state)
+        _, removed_item = remove_release_from_blacklist({}, blacklist_item.get("release_id"))
         return format_unblacklist_result(removed_item)
 
     return "Неизвестное действие"
