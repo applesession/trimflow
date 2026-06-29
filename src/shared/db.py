@@ -359,6 +359,27 @@ def save_jobs(jobs):
     conn.close()
 
 
+def insert_one_job(job):
+    """Insert a single job without touching other jobs. Safe for concurrent use."""
+    conn = _get_conn()
+    with _write_lock:
+        now = _utc_now_iso()
+        row = _job_to_row(job)
+        conn.execute(
+            """INSERT INTO jobs (
+                created_at, updated_at, title, title_ru, mal_id, season,
+                episodes_range, processing_mode, source_type, source_magnet,
+                source_input_dir, source_download_dir, source_variant_codec,
+                source_variant_label, skip_types, encoding, delivery, cleanup,
+                processing, timing_detection, timing_providers,
+                preferred_audio_language, watermark_path, output_dir, automation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, now) + row,
+        )
+        conn.commit()
+    conn.close()
+
+
 def update_job_episodes_range(job, new_range):
     """Update episodes_range for a matching job — used by discovery when extending range."""
     conn = _get_conn()

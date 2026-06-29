@@ -24,6 +24,7 @@ from modules.autojobs import (
 )
 from shared.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
 from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
+from shared.db import insert_one_job
 from shared.helpers import ensure_non_empty_slug, parse_episodes_range
 from core.runner import build_execution_order
 from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -1367,8 +1368,7 @@ def retry_job_to_queue(config, job):
     jobs = load_jobs(config)
     if find_matching_job(jobs, job) is not None:
         return False
-    jobs.append(job)
-    save_jobs(config, jobs)
+    insert_one_job(job)
     state = load_state(config)
     updated_state = mark_job_episodes_queued(state, job)
     save_state(config, updated_state)
@@ -1543,8 +1543,7 @@ def add_job_from_command(config, text):
             "reason": "duplicate_job",
         }
 
-    jobs.append(candidate_job)
-    save_jobs(config, jobs)
+    insert_one_job(candidate_job)
     return {
         "added": True,
         "job": candidate_job,
