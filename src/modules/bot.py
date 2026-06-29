@@ -84,16 +84,20 @@ def build_jobs_pagination_keyboard(has_previous, has_next):
     }
 
 
-def build_jobs_inline_keyboard(has_previous, has_next, page):
-    keyboard = []
+def build_jobs_inline_keyboard(has_previous, has_next, page, total_pages):
     row = []
+
     if has_previous:
         row.append({"text": "« Назад", "callback_data": f"jobs:page:{page - 1}"})
+    else:
+        row.append({"text": f"{page}/{total_pages}", "callback_data": f"jobs:page:{page}"})
+
     if has_next:
         row.append({"text": "Вперед »", "callback_data": f"jobs:page:{page + 1}"})
-    if row:
-        keyboard.append(row)
-    return {"inline_keyboard": keyboard}
+    elif has_previous:
+        row.append({"text": f"{page}/{total_pages}", "callback_data": f"jobs:page:{page}"})
+
+    return {"inline_keyboard": [row]} if row else None
 
 
 def build_confirmation_keyboard(action_type):
@@ -1662,7 +1666,8 @@ def handle_command(config, text):
         return {
             "text": format_jobs_message(config, page=page),
             "reply_markup": build_jobs_inline_keyboard(
-                page_data["has_previous"], page_data["has_next"], page_data["page"],
+                page_data["has_previous"], page_data["has_next"],
+                page_data["page"], page_data["total_pages"],
             ),
         }
     if text.startswith("/remove"):
@@ -1743,7 +1748,8 @@ def _handle_jobs_callback(config, chat_id, message_id, callback_query_id, page):
         return
     text = format_jobs_message(config, page=page)
     markup = build_jobs_inline_keyboard(
-        page_data["has_previous"], page_data["has_next"], page_data["page"],
+        page_data["has_previous"], page_data["has_next"],
+        page_data["page"], page_data["total_pages"],
     )
     edit_message_text(chat_id, message_id, text, reply_markup=markup)
 
