@@ -953,11 +953,19 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
     if not page_data["jobs"]:
         return "Очередь пуста"
 
+    donut = []
     ongoing = []
     manual = []
     for i, job in enumerate(page_data["jobs"]):
-        target = ongoing if (job.get("automation") or {}).get("is_ongoing") else manual
-        target.append((page_data["start_index"] + i + 1, job))
+        is_donut = (job.get("delivery") or {}).get("vk_privacy_view") == 5
+        is_ongoing = (job.get("automation") or {}).get("is_ongoing")
+        idx = page_data["start_index"] + i + 1
+        if is_donut:
+            donut.append((idx, job))
+        elif is_ongoing:
+            ongoing.append((idx, job))
+        else:
+            manual.append((idx, job))
 
     def _job_line(index, job):
         title = escape_markdown_v2(get_display_title(job))
@@ -975,7 +983,11 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
     header = f"📋 Очередь аниме\n\n{total} {title_word} · Страница `{page_data['page']}/{page_data['total_pages']}` · \\#{page_data['start_index'] + 1}–{page_data['end_index']}"
     lines = [header, ""]
 
-    for group_title, group_jobs in [("🔄 Онгоинги", ongoing), ("✏️ Вручную", manual)]:
+    for group_title, group_jobs in [
+        ("🔄 Онгоинги", ongoing),
+        ("💎 Доны", donut),
+        ("✏️ Вручную", manual),
+    ]:
         if not group_jobs:
             continue
         lines.append(group_title)
