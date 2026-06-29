@@ -84,6 +84,18 @@ def build_jobs_pagination_keyboard(has_previous, has_next):
     }
 
 
+def build_jobs_inline_keyboard(has_previous, has_next, page):
+    keyboard = []
+    row = []
+    if has_previous:
+        row.append({"text": "« Назад", "callback_data": f"jobs:page:{page - 1}"})
+    if has_next:
+        row.append({"text": "Вперед »", "callback_data": f"jobs:page:{page + 1}"})
+    if row:
+        keyboard.append(row)
+    return {"inline_keyboard": keyboard}
+
+
 def build_confirmation_keyboard(action_type):
     if action_type == "remove":
         buttons = [[{"text": "Подтвердить удаление"}, {"text": "Отменить удаление"}]]
@@ -314,6 +326,17 @@ def answer_callback_query(callback_query_id, text=None):
     if text:
         payload["text"] = text
     return _telegram_request("answerCallbackQuery", payload=payload, timeout=20)
+
+
+def edit_message_text(chat_id, message_id, text, reply_markup=None):
+    payload = {
+        "chat_id": str(chat_id),
+        "message_id": int(message_id),
+        "text": text,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return _telegram_request("editMessageText", payload=payload, timeout=20)
 
 
 def send_message_to_allowed_chats(text, *, parse_mode=None, reply_markup=None):
@@ -1633,8 +1656,14 @@ def handle_command(config, text):
                 raise RuntimeError("Формат: /jobs или /jobs <страница>") from exc
             if page < 1:
                 raise RuntimeError("Номер страницы должен быть не меньше 1")
+        page_data = get_jobs_page_data(config, page=page)
+        if not page_data["jobs"]:
+            return "Очередь пуста"
         return {
-            "jobs_page": page,
+            "text": format_jobs_message(config, page=page),
+            "reply_markup": build_jobs_inline_keyboard(
+                page_data["has_previous"], page_data["has_next"], page_data["page"],
+            ),
         }
     if text.startswith("/remove"):
         index = parse_index_command(text, "remove")
@@ -1706,6 +1735,19 @@ def maybe_handle_jobs_navigation(config, chat_id, text):
     return build_jobs_message_response(config, chat_id, page=current_page + 1)
 
 
+def _handle_jobs_callback(config, chat_id, message_id, callback_query_id, page):
+    """Handle inline keyboard pagination for /jobs list."""
+    answer_callback_query(callback_query_id)
+    page_data = get_jobs_page_data(config, page=page)
+    if not page_data["jobs"]:
+        return
+    text = format_jobs_message(config, page=page)
+    markup = build_jobs_inline_keyboard(
+        page_data["has_previous"], page_data["has_next"], page_data["page"],
+    )
+    edit_message_text(chat_id, message_id, text, reply_markup=markup)
+
+
 def handle_update(config, update):
     callback_query = update.get("callback_query") or {}
     if callback_query:
@@ -1717,6 +1759,13 @@ def handle_update(config, update):
 
         data = str(callback_query.get("data") or "").strip()
         callback_query_id = callback_query.get("id")
+
+        # Inline pagination for /jobs
+        if data.startswith("jobs:page:"):
+            page = int(data.split(":")[2])
+            _handle_jobs_callback(config, chat_id, message.get("message_id"), callback_query_id, page)
+            return True
+
         if data.startswith("details:"):
             token = data.split(":", 1)[1].strip()
             payload = load_notification_details(token)
