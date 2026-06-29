@@ -24,7 +24,7 @@ from modules.autojobs import (
 )
 from shared.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
 from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
-from shared.db import insert_one_job
+from shared.db import insert_one_job, remove_completed_job as _db_remove_job
 from shared.helpers import ensure_non_empty_slug, parse_episodes_range
 from core.runner import build_execution_order
 from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -1315,18 +1315,13 @@ def get_blacklist_entry_by_index(config, index):
 
 def remove_job_by_identity(config, job_identity):
     jobs = load_jobs(config)
-    remaining = []
     removed_job = None
-    removed = False
     for job in jobs:
-        if not removed and build_job_identity(job) == job_identity:
+        if removed_job is None and build_job_identity(job) == job_identity:
             removed_job = job
-            removed = True
-            continue
-        remaining.append(job)
     if not removed_job:
         raise RuntimeError("Актуальная запись для удаления не найдена")
-    save_jobs(config, remaining)
+    _db_remove_job(removed_job)
     state = load_state(config)
     updated_state = unmark_job_episodes_queued(state, removed_job)
     save_state(config, updated_state)
