@@ -222,7 +222,7 @@ def normalize_processing_config(job):
     processing = {
         "chunk_size_episodes": 12,
     }
-    processing.update(job.get("processing", {}))
+    processing.update(job.get("processing") or {})
     try:
         chunk_size = int(processing.get("chunk_size_episodes", 12))
     except (TypeError, ValueError) as exc:
@@ -735,7 +735,7 @@ def build_delivery_config(job):
         "vk_comment_banner_path": "./assets/banner.png",
         "vk_comment_template": "",
     }
-    delivery.update(job.get("delivery", {}))
+    delivery.update(job.get("delivery") or {})
     delivery["s3_enabled"] = bool(delivery.get("s3_enabled", True))
     delivery["s3_upload_video"] = bool(delivery.get("s3_upload_video", False))
     delivery["s3_upload_timestamps"] = bool(delivery.get("s3_upload_timestamps", False))
@@ -953,13 +953,13 @@ def process_job(job, runtime_status_path=None):
     output_root = Path(job["output_dir"])
     watermark_path = Path(job["watermark_path"])
     skip_types = job.get("skip_types", ["op", "ed"])
-    encoding = job.get("encoding", {})
-    cleanup = job.get("cleanup", {"downloads": True, "temp": True})
+    encoding = job.get("encoding") or {}
+    cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
     processing = normalize_processing_config(job)
     timing_detection = normalize_timing_detection_config(job)
     segment_encoding = build_segment_encoding(encoding)
     delivery = build_delivery_config(job)
-    timing_providers = job.get("timing_providers", {})
+    timing_providers = job.get("timing_providers") or {}
     anilibria_enabled = timing_providers.get("anilibria_enabled", True)
     aniskip_enabled = timing_providers.get("aniskip_enabled", False)
     preferred_language = str(job.get("preferred_audio_language", "rus")).strip().lower() or "rus"

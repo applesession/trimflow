@@ -15,7 +15,7 @@ HIGH_CONFIDENCE_BOUNDARY_TOLERANCE = 5.0
 
 def normalize_timing_detection_config(job):
     merged = dict(DEFAULT_TIMING_DETECTION)
-    merged.update(job.get("timing_detection", {}))
+    merged.update(job.get("timing_detection") or {})
     merged["enabled"] = bool(merged.get("enabled", False))
     merged["search_head_seconds"] = int(merged["search_head_seconds"])
     merged["search_tail_seconds"] = int(merged["search_tail_seconds"])

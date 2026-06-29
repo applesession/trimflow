@@ -1563,7 +1563,7 @@ def format_add_result(result):
             f"Эпизоды: {job['episodes_range']}",
         ])
 
-    privacy_view = job.get("delivery", {}).get("vk_privacy_view", 0)
+    privacy_view = (job.get("delivery") or {}).get("vk_privacy_view", 0)
     privacy_labels = {0: "всем", 1: "участникам", 2: "редакторам", 3: "по ссылке", 5: "донам"}
     lines = [
         "Аниме добавлено",

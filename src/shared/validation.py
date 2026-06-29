@@ -16,7 +16,7 @@ def validate_required_env(config, jobs):
     delivery_enabled = {"s3": False, "vk": False}
     requires_private_vk_delivery = False
     for job in jobs:
-        delivery = job.get("delivery", {})
+        delivery = job.get("delivery") or {}
         if delivery.get("s3_enabled", True):
             delivery_enabled["s3"] = True
         if delivery.get("vk_enabled", False):
