@@ -58,8 +58,9 @@ def build_main_keyboard():
     return {
         "keyboard": [
             [{"text": "Статус"}, {"text": "Текущая"}],
-            [{"text": "Очередь"}, {"text": "Ошибки"}],
-            [{"text": "Лог"}, {"text": "Помощь"}],
+            [{"text": "Очередь"}, {"text": "Следующие"}],
+            [{"text": "Ошибки"}, {"text": "Лог"}],
+            [{"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -1026,6 +1027,65 @@ def format_next_message(config, limit=10):
     return "\n".join(lines)
 
 
+def format_next_message_markdown(config, limit=10):
+    jobs = load_jobs(config)
+    if not jobs:
+        return "Очередь пуста"
+
+    normalized_limit = max(1, int(limit))
+    execution_jobs = build_execution_order(jobs, defaults=config.get("defaults", {}))
+    visible = execution_jobs[:normalized_limit]
+
+    donut = []
+    ongoing = []
+    manual = []
+    for i, job in enumerate(visible):
+        is_donut = (job.get("delivery") or {}).get("vk_privacy_view") == 5
+        is_ongoing = (job.get("automation") or {}).get("is_ongoing")
+        if is_donut:
+            donut.append((i + 1, job))
+        elif is_ongoing:
+            ongoing.append((i + 1, job))
+        else:
+            manual.append((i + 1, job))
+
+    def _job_line(idx, job):
+        title = escape_markdown_v2(get_display_title(job))
+        season = f"S{job.get('season', 1)}"
+        eps = job.get("episodes_range", "?")
+        is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
+        eps_label = "серия" if is_single else "серии"
+        return [
+            f"*{idx}\\. {title}*",
+            f"└ {season} · {eps_label} `{eps}`",
+        ]
+
+    lines = [
+        "📋 *Следующие к выполнению*",
+        "",
+        "Порядок с учётом приоритета ongoing\\.",
+        "",
+    ]
+
+    for group_title, group_jobs in [
+        ("🔄 Онгоинги", ongoing),
+        ("💎 Доны", donut),
+        ("✏️ Вручную", manual),
+    ]:
+        if not group_jobs:
+            continue
+        lines.append(group_title)
+        lines.append("")
+        for idx, job in group_jobs:
+            lines.extend(_job_line(idx, job))
+        lines.append("")
+
+    if len(execution_jobs) > normalized_limit:
+        lines.append(f"Показано: {len(visible)} из {len(execution_jobs)}")
+
+    return "\n".join(lines).rstrip()
+
+
 def build_jobs_message_response(config, chat_id, page=1, page_size=15):
     page_data = get_jobs_page_data(config, page=page, page_size=page_size)
     if not page_data["jobs"]:
@@ -1535,6 +1595,7 @@ def normalize_command_text(text):
         "Статус": "/status",
         "Текущая": "/current",
         "Очередь": "/jobs",
+        "Следующие": "/next",
         "Ошибки": "/errors",
         "Лог": "/log",
         "Помощь": "/help",
@@ -1695,7 +1756,10 @@ def handle_command(config, text):
                 raise RuntimeError("Формат: /next или /next <количество>") from exc
             if limit < 1:
                 raise RuntimeError("Количество должно быть не меньше 1")
-        return format_next_message(config, limit=limit)
+        return {
+            "text": format_next_message_markdown(config, limit=limit),
+            "parse_mode": "MarkdownV2",
+        }
     if text.startswith("/errors"):
         return format_errors_message()
     if text.startswith("/log"):
