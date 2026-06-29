@@ -268,7 +268,7 @@ def _migrate_from_json(conn):
 
 
 def _job_from_row(row):
-    return {
+    job = {
         "title": row["title"],
         "title_ru": row["title_ru"],
         "mal_id": row["mal_id"],
@@ -283,18 +283,30 @@ def _job_from_row(row):
             "variant_codec": row["source_variant_codec"],
             "variant_label": row["source_variant_label"],
         },
-        "skip_types": json.loads(row["skip_types"]) if row["skip_types"] else None,
-        "encoding": json.loads(row["encoding"]) if row["encoding"] else None,
-        "delivery": json.loads(row["delivery"]) if row["delivery"] else None,
-        "cleanup": json.loads(row["cleanup"]) if row["cleanup"] else None,
-        "processing": json.loads(row["processing"]) if row["processing"] else None,
-        "timing_detection": json.loads(row["timing_detection"]) if row["timing_detection"] else None,
-        "timing_providers": json.loads(row["timing_providers"]) if row["timing_providers"] else None,
-        "preferred_audio_language": row["preferred_audio_language"] or "rus",
-        "watermark_path": row["watermark_path"],
-        "output_dir": row["output_dir"],
-        "automation": json.loads(row["automation"]) if row["automation"] else None,
     }
+    if row["skip_types"] is not None:
+        job["skip_types"] = json.loads(row["skip_types"])
+    if row["encoding"] is not None:
+        job["encoding"] = json.loads(row["encoding"])
+    if row["delivery"] is not None:
+        job["delivery"] = json.loads(row["delivery"])
+    if row["cleanup"] is not None:
+        job["cleanup"] = json.loads(row["cleanup"])
+    if row["processing"] is not None:
+        job["processing"] = json.loads(row["processing"])
+    if row["timing_detection"] is not None:
+        job["timing_detection"] = json.loads(row["timing_detection"])
+    if row["timing_providers"] is not None:
+        job["timing_providers"] = json.loads(row["timing_providers"])
+    if row["preferred_audio_language"]:
+        job["preferred_audio_language"] = row["preferred_audio_language"]
+    if row["watermark_path"] is not None:
+        job["watermark_path"] = row["watermark_path"]
+    if row["output_dir"] is not None:
+        job["output_dir"] = row["output_dir"]
+    if row["automation"] is not None:
+        job["automation"] = json.loads(row["automation"])
+    return job
 
 
 def _job_to_row(job):

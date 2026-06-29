@@ -108,6 +108,8 @@ def deep_merge(defaults, job):
     result = deepcopy(defaults)
 
     for key, value in job.items():
+        if value is None:
+            continue
         if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = deep_merge(result[key], value)
         else:
