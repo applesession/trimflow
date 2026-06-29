@@ -964,22 +964,24 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
         season = f"S{job.get('season', 1)}"
         eps = job.get("episodes_range", "?")
         is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
-        eps_fmt = f"[`{eps}`]" if is_single else f"`{eps}`"
-        return f"•  `{index}`  *{title}*  {season}  {eps_fmt}"
+        eps_label = "серия" if is_single else "серии"
+        return [
+            f"*{index}\\. {title}*",
+            f"└ {season} · {eps_label} `{eps}`",
+        ]
 
-    lines = [
-        "📋 *Очередь аниме*",
-        "",
-        f"Всего `{page_data['total_jobs']}` · Стр `{page_data['page']}/{page_data['total_pages']}` · \\#{page_data['start_index'] + 1}–{page_data['end_index']}",
-        "",
-    ]
+    total = page_data["total_jobs"]
+    title_word = "тайтл" if total == 1 else ("тайтла" if 2 <= total <= 4 else "тайтлов")
+    header = f"📋 Очередь аниме\n\n{total} {title_word} · Страница `{page_data['page']}/{page_data['total_pages']}` · \\#{page_data['start_index'] + 1}–{page_data['end_index']}"
+    lines = [header, ""]
 
-    for group_title, group_jobs in [("🔄 *Ongoing*", ongoing), ("✏️ *Вручную*", manual)]:
+    for group_title, group_jobs in [("🔄 Онгоинги", ongoing), ("✏️ Вручную", manual)]:
         if not group_jobs:
             continue
         lines.append(group_title)
+        lines.append("")
         for idx, job in group_jobs:
-            lines.append(_job_line(idx, job))
+            lines.extend(_job_line(idx, job))
         lines.append("")
 
     return "\n".join(lines).rstrip()
