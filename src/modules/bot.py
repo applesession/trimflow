@@ -970,7 +970,7 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
     lines = [
         "📋 *Очередь аниме*",
         "",
-        f"Всего `{page_data['total_jobs']}` · Стр `{page_data['page']}/{page_data['total_pages']}` · #{page_data['start_index'] + 1}–{page_data['end_index']}",
+        f"Всего `{page_data['total_jobs']}` · Стр `{page_data['page']}/{page_data['total_pages']}` · \\#{page_data['start_index'] + 1}–{page_data['end_index']}",
         "",
     ]
 
