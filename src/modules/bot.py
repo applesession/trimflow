@@ -400,6 +400,14 @@ def normalize_notification_error_reason(error):
     if not text:
         return "неизвестная ошибка"
 
+    ffmpeg_wrap_match = re.search(r"ffmpeg exited with code (\d+): (.+)", text)
+    if ffmpeg_wrap_match:
+        exit_code = ffmpeg_wrap_match.group(1)
+        cmd_tail = ffmpeg_wrap_match.group(2)
+        file_match = re.search(r"([^\s\\/]+\.m(?:kv|p4|ov))(?:\s|$)", cmd_tail)
+        detail = file_match.group(1) if file_match else cmd_tail[-80:]
+        return f"ffmpeg code {exit_code} — {detail}"
+
     called_process_match = re.search(r"CalledProcessError\((\d+),", text)
     if called_process_match:
         return f"ffmpeg exited with code {called_process_match.group(1)}"

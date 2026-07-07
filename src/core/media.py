@@ -319,11 +319,7 @@ def render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=
     run(cmd)
 
 
-def render_segment_precise(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
-    duration = max(0.0, end - start)
-    if duration <= 0:
-        raise RuntimeError(f"Invalid precise segment duration for {ep_file}: {start} -> {end}")
-
+def _build_segment_precise_cmd(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
     encoding = segment_encoding or {}
     video_codec = encoding.get("video_codec", "libx264")
     preset = encoding.get("preset", "medium")
@@ -359,7 +355,39 @@ def render_segment_precise(ep_file, segment_output, start, end, segment_encoding
         segment_output,
     ]
 
-    run(cmd)
+    return cmd
+
+
+def render_segment_precise(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
+    duration = max(0.0, end - start)
+    if duration <= 0:
+        raise RuntimeError(f"Invalid precise segment duration for {ep_file}: {start} -> {end}")
+
+    encoding = segment_encoding or {}
+    cmd = _build_segment_precise_cmd(ep_file, segment_output, start, end, encoding, audio_stream_index)
+    video_codec = encoding.get("video_codec", "libx264")
+
+    try:
+        run(cmd)
+        return
+    except RuntimeError as exc:
+        is_nvenc = "nvenc" in str(video_codec).lower()
+        called_process = exc.__cause__
+        exit_code = called_process.returncode if isinstance(called_process, subprocess.CalledProcessError) else None
+        if is_nvenc and exit_code in NVENC_FALLBACK_CODES:
+            pass
+        else:
+            raise
+
+    print(f"[SEGMENT_PRECISE] NVENC failed (code {exit_code}), falling back to libx264")
+    fallback_encoding = dict(encoding)
+    fallback_encoding["video_codec"] = "libx264"
+    fallback_encoding["preset"] = "ultrafast"
+    fallback_cmd = _build_segment_precise_cmd(
+        ep_file, segment_output, start, end,
+        fallback_encoding, audio_stream_index,
+    )
+    run(fallback_cmd)
 
 
 def render_segment(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
@@ -390,8 +418,8 @@ def render_concat(concat_file, concat_output, audio_stream_index=0):
     try:
         run(fast_path)
         return
-    except subprocess.CalledProcessError:
-        pass
+    except Exception as exc:
+        print(f"[CONCAT] fast path failed ({exc}), falling back to re-encode")
 
     safe_path = [
         "ffmpeg",
@@ -413,7 +441,24 @@ def render_concat(concat_file, concat_output, audio_stream_index=0):
     run(safe_path)
 
 
-def render_final(concat_output, watermark_path, output_video, encoding, audio_stream_index=0):
+def _probe_video_streams(path):
+    try:
+        result = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_type,duration",
+            "-of", "csv=p=0",
+            str(path),
+        ], encoding="utf-8", errors="replace").strip()
+        return bool(result)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False
+
+
+NVENC_FALLBACK_CODES = {1, 7, 220}
+
+
+def _build_final_cmd(concat_output, watermark_path, output_video, encoding, audio_stream_index):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
     cq = str(encoding.get("cq", 23))
@@ -448,4 +493,36 @@ def render_final(concat_output, watermark_path, output_video, encoding, audio_st
         output_video,
     ]
 
-    run(cmd)
+    return cmd
+
+
+def render_final(concat_output, watermark_path, output_video, encoding, audio_stream_index=0):
+    if not _probe_video_streams(concat_output):
+        raise RuntimeError(
+            f"concat_output has no video stream, file may be corrupt: {concat_output}"
+        )
+
+    cmd = _build_final_cmd(concat_output, watermark_path, output_video, encoding, audio_stream_index)
+    video_codec = encoding.get("video_codec", "h264_nvenc")
+
+    try:
+        run(cmd)
+        return
+    except RuntimeError as exc:
+        is_nvenc = "nvenc" in str(video_codec).lower()
+        called_process = exc.__cause__
+        exit_code = called_process.returncode if isinstance(called_process, subprocess.CalledProcessError) else None
+        if is_nvenc and exit_code in NVENC_FALLBACK_CODES:
+            pass
+        else:
+            raise
+
+    print(f"[FINAL_RENDER] NVENC failed (code {exit_code}), falling back to libx264")
+    fallback_encoding = dict(encoding)
+    fallback_encoding["video_codec"] = "libx264"
+    fallback_encoding["preset"] = "fast"
+    fallback_cmd = _build_final_cmd(
+        concat_output, watermark_path, output_video,
+        fallback_encoding, audio_stream_index,
+    )
+    run(fallback_cmd)

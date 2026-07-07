@@ -84,9 +84,15 @@ def build_vk_comment_text(template: str) -> str:
     return str(template or "").strip()
 
 
-def run(cmd):
+def run(cmd, timeout=None):
     print("\n[RUN]", " ".join(map(str, cmd)))
-    subprocess.run(list(map(str, cmd)), check=True)
+    str_cmd = [str(arg) for arg in cmd]
+    try:
+        subprocess.run(str_cmd, check=True, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"ffmpeg exited with code {exc.returncode}: {' '.join(str_cmd)}"
+        ) from exc
 
 
 def parse_episodes_range(episodes_range: str):
