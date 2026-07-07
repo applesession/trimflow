@@ -59,12 +59,19 @@ def build_single_episode_display_name(job, season, episode_number) -> str:
     return f"{display_title} - {season_number} Сезон {int(episode_number)} Серия".strip()
 
 
-def sanitize_filename(value: str) -> str:
+def sanitize_filename(value: str, max_bytes: int = 200) -> str:
     cleaned = str(value).replace("/", "-")
     cleaned = re.sub(r'[<>:"\\|?*]', "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     if not cleaned:
         raise RuntimeError(f"Value '{value}' produced an empty filename")
+
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > max_bytes:
+        cleaned = encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+
+    if not cleaned:
+        raise RuntimeError(f"Value '{value}' produced an empty filename after truncation")
     return cleaned
 
 
