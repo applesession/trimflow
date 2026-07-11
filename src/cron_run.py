@@ -28,6 +28,7 @@ from modules.bot import (  # noqa: E402
     build_notification_details_payload,
     build_notification_details_reply_markup,
     format_discovery_message,
+    format_download_timeout_message,
     format_error_message,
     format_publish_success_message,
     format_vk_publish_error_message,
@@ -177,7 +178,9 @@ def main():
             ),
             on_job_failure=lambda job, exc: notify_best_effort(
                 log_path,
-                format_error_message(f"job_failed:{job.get('title')}", repr(exc)),
+                format_download_timeout_message(job)
+                if "timed out" in str(exc)
+                else format_error_message(f"job_failed:{job.get('title')}", repr(exc)),
                 f"job_failed:{job.get('title')}",
                 parse_mode="MarkdownV2",
             ),

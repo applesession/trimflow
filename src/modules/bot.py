@@ -395,6 +395,30 @@ def format_error_message(context, error):
     return "\n".join(lines)
 
 
+def format_download_timeout_message(job):
+    display_title = get_display_title(job)
+    episodes_range = job.get("episodes_range", "")
+    episode_count = len(parse_episodes_range(episodes_range))
+
+    download_cfg = job.get("download") or {}
+    timeout_minutes = max(
+        int(download_cfg.get("timeout_minutes_minimum", 30)),
+        min(
+            episode_count * int(download_cfg.get("timeout_minutes_per_episode", 20)),
+            int(download_cfg.get("timeout_minutes_maximum", 1440)),
+        ),
+    )
+
+    lines = [
+        "⏰ *Пропущена загрузка*",
+        "",
+        f"🎬 *{escape_markdown_v2(display_title)}*",
+        f"📦 Эпизодов: {format_markdown_code(episode_count)}",
+        f"⏱️ Таймаут: {format_markdown_code(timeout_minutes)} мин",
+    ]
+    return "\n".join(lines)
+
+
 def normalize_notification_error_reason(error):
     text = str(error or "").strip()
     if not text:

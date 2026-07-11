@@ -3,6 +3,11 @@
     "output_dir": "./output",
     "watermark_path": "./assets/watermark.png",
     "skip_types": ["op", "ed"],
+    "download": {
+      "timeout_minutes_per_episode": 20,
+      "timeout_minutes_minimum": 30,
+      "timeout_minutes_maximum": 1440
+    },
     "cleanup": {
       "downloads": true,
       "temp": true,

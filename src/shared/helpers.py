@@ -100,6 +100,10 @@ def run(cmd, timeout=None):
         raise RuntimeError(
             f"ffmpeg exited with code {exc.returncode}: {' '.join(str_cmd)}"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {' '.join(str_cmd)}"
+        ) from exc
 
 
 def parse_episodes_range(episodes_range: str):

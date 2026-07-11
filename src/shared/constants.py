@@ -33,6 +33,11 @@ VK_PRIVATE_ENV_VARS = [
     "VK_PRIVATE_GROUP_ID",
 ]
 BASE_REQUIRED_TOOLS = ["ffmpeg", "ffprobe"]
+DEFAULT_DOWNLOAD = {
+    "timeout_minutes_per_episode": 20,
+    "timeout_minutes_minimum": 30,
+    "timeout_minutes_maximum": 1440,
+}
 DEFAULT_TIMING_DETECTION = {
     "enabled": False,
     "mode": "audio_fingerprint",

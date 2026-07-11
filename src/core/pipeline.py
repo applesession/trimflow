@@ -47,7 +47,7 @@ from shared.validation import reset_temp_dir
 from api.vk import publish_private_video_link_to_vk, publish_video_to_vk
 
 
-def download_magnet(magnet: str, download_dir: Path):
+def download_magnet(magnet: str, download_dir: Path, timeout=None):
     download_dir.mkdir(parents=True, exist_ok=True)
 
     run([
@@ -61,7 +61,7 @@ def download_magnet(magnet: str, download_dir: Path):
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
         magnet,
-    ])
+    ], timeout=timeout)
 
 
 def build_source_summary(selected_episodes, excluded_files):
@@ -314,10 +314,10 @@ def build_prefetched_empty_aniskip_results(episode_infos, reason):
     }
 
 
-def collect_episode_files(source, title_slug):
+def collect_episode_files(source, title_slug, download_timeout=None):
     if source["type"] == "magnet":
         download_dir = Path(source.get("download_dir", f"./downloads/{title_slug}"))
-        download_magnet(source["magnet"], download_dir)
+        download_magnet(source["magnet"], download_dir, timeout=download_timeout)
         detected_episode_files, ignored_files = find_episode_files(download_dir)
         return download_dir, detected_episode_files, ignored_files
 
@@ -967,6 +967,17 @@ def process_job(job, runtime_status_path=None):
     title_slug = ensure_non_empty_slug(title)
     allowed_episodes = parse_episodes_range(episodes_range)
 
+    download_cfg = job.get("download") or {}
+    episode_count = len(allowed_episodes)
+    download_timeout = max(
+        int(download_cfg.get("timeout_minutes_minimum", 30)) * 60,
+        min(
+            episode_count * int(download_cfg.get("timeout_minutes_per_episode", 20)) * 60,
+            int(download_cfg.get("timeout_minutes_maximum", 1440)) * 60,
+        ),
+    )
+    print(f"\n[DOWNLOAD TIMEOUT] {episode_count} episodes -> {download_timeout // 60} minutes")
+
     job_output_dir = output_root / title_slug
     job_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -980,6 +991,7 @@ def process_job(job, runtime_status_path=None):
         download_dir, detected_episode_files, ignored_files = collect_episode_files(
             source,
             title_slug,
+            download_timeout=download_timeout,
         )
 
         set_runtime_stage(runtime_status_path, "episode_scan")
