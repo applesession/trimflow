@@ -527,7 +527,7 @@ def format_job_details_message(payload):
         delivery_lines.append(_format_delivery_status_line("VK post", vk_summary.get("post_created")))
         delivery_lines.append(_format_delivery_status_line("VK comment", vk_summary.get("comment_created")))
         if vk_summary.get("preview_attempted"):
-            delivery_lines.append(_format_delivery_status_line("VK preview", vk_summary.get("preview_generated")))
+            delivery_lines.append(_format_delivery_status_line("VK preview", vk_summary.get("preview_attached")))
     if s3_summary.get("enabled"):
         delivery_lines.append(_format_delivery_status_line("S3 upload", s3_summary.get("uploaded")))
     if delivery_lines:
@@ -634,7 +634,7 @@ def format_vk_publish_success_message(job, vk_result, quality_summary=None):
         if comment_created
         else "✖️ Первый комментарий не создан"
     )
-    if vk_result.get("preview_attempted") and not vk_result.get("preview_generated"):
+    if vk_result.get("preview_attempted") and not vk_result.get("preview_attached"):
         lines.append("⚠️ AI preview не собралась, пост опубликован без неё")
     if warning_reason and not comment_created:
         lines.append(f"└ {escape_markdown_v2(warning_reason)}")

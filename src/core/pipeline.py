@@ -736,6 +736,7 @@ def build_delivery_config(job):
         "vk_comment_enabled": True,
         "vk_privacy_view": 0,
         "vk_preview_enabled": True,
+        "vk_preview_mode": "video_thumb",
         "vk_preview_provider": "wavespeed",
         "vk_preview_model": "google/nano-banana-2/edit-fast",
         "vk_preview_timeout_seconds": 180,
@@ -763,6 +764,7 @@ def build_delivery_config(job):
     delivery["vk_comment_enabled"] = bool(delivery.get("vk_comment_enabled", True))
     delivery["vk_privacy_view"] = int(delivery.get("vk_privacy_view", 0))
     delivery["vk_preview_enabled"] = bool(delivery.get("vk_preview_enabled", True))
+    delivery["vk_preview_mode"] = str(delivery.get("vk_preview_mode", "video_thumb") or "video_thumb").strip().lower()
     delivery["vk_preview_timeout_seconds"] = int(delivery.get("vk_preview_timeout_seconds", 180))
     return delivery
 
@@ -806,6 +808,15 @@ def build_vk_summary(enabled, uploaded=False, error=None, result=None):
 
 def is_private_vk_delivery(delivery):
     return int(delivery.get("vk_privacy_view", 0)) == 5
+
+
+def get_vk_preview_mode(delivery):
+    if not delivery.get("vk_preview_enabled", True):
+        return "disabled"
+    mode = str(delivery.get("vk_preview_mode", "video_thumb") or "video_thumb").strip().lower()
+    if mode != "video_thumb":
+        return "video_thumb"
+    return mode
 
 
 def _resolve_preview_temp_dir(temp_dir, delivery, pretty_base_name):
@@ -877,16 +888,17 @@ def download_preview_image(output_url, preview_dir, pretty_base_name):
     return preview_path
 
 
-def generate_vk_post_preview(job, delivery, pretty_base_name, temp_dir, runtime_status_path=None):
+def generate_vk_video_thumb_preview(job, delivery, pretty_base_name, temp_dir, runtime_status_path=None):
     preview_status = {
         "preview_attempted": False,
         "preview_generated": False,
         "preview_attached": False,
         "preview_error": None,
     }
-    if not delivery.get("vk_preview_enabled", True):
+    preview_mode = get_vk_preview_mode(delivery)
+    if preview_mode == "disabled":
         return None, preview_status
-    if not delivery.get("vk_wall_post_enabled", True):
+    if preview_mode != "video_thumb":
         return None, preview_status
 
     preview_status["preview_attempted"] = True
@@ -944,7 +956,7 @@ def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_desc
     if comment_text:
         print(f"[DELIVERY] VK comment start: {pretty_base_name}")
 
-    post_preview_path, preview_status = generate_vk_post_preview(
+    video_thumb_preview_path, preview_status = generate_vk_video_thumb_preview(
         job,
         delivery,
         pretty_base_name,
@@ -958,7 +970,8 @@ def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_desc
             pretty_base_name,
             timestamps_description,
             wall_post_text=wall_post_text,
-            post_preview_path=post_preview_path,
+            video_thumb_path=video_thumb_preview_path,
+            video_thumb_size=delivery.get("vk_preview_target_size"),
         )
     else:
         result = publish_video_to_vk(
@@ -969,12 +982,15 @@ def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_desc
             comment_text=comment_text,
             comment_banner_path=delivery.get("vk_comment_banner_path"),
             privacy_view=delivery.get("vk_privacy_view", 0),
-            post_preview_path=post_preview_path,
+            video_thumb_path=video_thumb_preview_path,
+            video_thumb_size=delivery.get("vk_preview_target_size"),
         )
 
     result["preview_attempted"] = preview_status["preview_attempted"]
     result["preview_generated"] = preview_status["preview_generated"]
     result["preview_attached"] = bool(result.get("preview_attached", False))
+    if video_thumb_preview_path:
+        result["preview_local_path"] = str(video_thumb_preview_path)
     if preview_status["preview_error"] and not result.get("preview_error"):
         result["preview_error"] = preview_status["preview_error"]
     return result

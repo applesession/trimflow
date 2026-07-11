@@ -80,6 +80,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertFalse(result["s3_upload_timestamps"])
         self.assertTrue(result["s3_upload_manifest"])
         self.assertEqual(result["vk_privacy_view"], 0)
+        self.assertEqual(result["vk_preview_mode"], "video_thumb")
 
     def test_build_delivery_config_keeps_private_vk_privacy_view(self):
         result = build_delivery_config({"delivery": {"vk_privacy_view": 5}})
@@ -240,18 +241,12 @@ class DeliveryTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk.create_wall_post")
-    @patch("lib.vk.save_wall_photo")
-    @patch("lib.vk.upload_wall_comment_photo")
-    @patch("lib.vk.request_wall_photo_upload_server")
     @patch("lib.vk.upload_video_file")
     @patch("lib.vk.request_video_upload")
-    def test_publish_video_to_vk_attaches_preview_photo_to_post(
+    def test_publish_video_to_vk_keeps_video_publish_when_video_thumb_is_unavailable(
         self,
         mock_request_upload,
         mock_upload_file,
-        mock_request_upload_server,
-        mock_upload_preview_photo,
-        mock_save_wall_photo,
         mock_create_post,
     ):
         tmp_dir = self.make_workspace_temp_dir()
@@ -265,9 +260,6 @@ class DeliveryTests(unittest.TestCase):
             "owner_id": -100,
         }
         mock_upload_file.return_value = {"ok": 1}
-        mock_request_upload_server.return_value = {"upload_url": "https://upload.photo.vk.test"}
-        mock_upload_preview_photo.return_value = {"photo": "[]", "server": 1, "hash": "hash"}
-        mock_save_wall_photo.return_value = {"owner_id": -200, "id": 55}
         mock_create_post.return_value = {"post_id": 77}
 
         result = publish_video_to_vk(
@@ -275,13 +267,14 @@ class DeliveryTests(unittest.TestCase):
             "Test Title",
             "desc",
             wall_post_text="wall text",
-            post_preview_path=preview_path,
+            video_thumb_path=preview_path,
+            video_thumb_size="1280x720",
         )
 
         self.assertTrue(result["post_created"])
-        self.assertTrue(result["preview_attached"])
-        self.assertEqual(result["post_preview_attachment"], "photo-200_55")
-        self.assertEqual(mock_create_post.call_args.kwargs["attachments"], "photo-200_55,video-100_42")
+        self.assertFalse(result["preview_attached"])
+        self.assertEqual(result["preview_error"], "video_thumb_upload_url_missing")
+        self.assertEqual(result["errors_by_stage"]["video_thumb"], "video_thumb_upload_url_missing")
 
     @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk.create_wall_comment")
