@@ -3,7 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from api.anilibria import get_release_details, list_recent_releases
+from api.anilibria import extract_release_poster_url, get_release_details, list_recent_releases
 from shared.config import normalize_automation_config
 from shared.helpers import ensure_non_empty_slug, parse_episodes_range
 from shared.db import (
@@ -529,8 +529,13 @@ def build_job_from_release(
         job["title_ru"] = title_ru
     if mal_id is not None:
         job["mal_id"] = mal_id
-    if automation_context:
-        job["automation"] = automation_context
+    poster_url = extract_release_poster_url(release_payload)
+    automation_payload = deepcopy(automation_context or {})
+    if poster_url:
+        automation_payload["poster_url"] = poster_url
+        automation_payload["poster_fetched_at"] = utc_now_iso()
+    if automation_payload:
+        job["automation"] = automation_payload
     return job
 
 

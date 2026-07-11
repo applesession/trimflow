@@ -189,6 +189,27 @@ def create_wall_comment(post_id, message, attachments=None, *, group_id=None):
     return response
 
 
+def _build_post_attachments(video_attachment, post_preview_path, result, *, group_id=None):
+    attachments = []
+    preview_path = Path(post_preview_path) if post_preview_path else None
+    if preview_path and preview_path.is_file():
+        try:
+            upload_server = request_wall_photo_upload_server(group_id=group_id)
+            uploaded_photo = upload_wall_comment_photo(upload_server["upload_url"], preview_path)
+            saved_photo = save_wall_photo(uploaded_photo, group_id=group_id)
+            preview_attachment = build_photo_attachment(saved_photo)
+            attachments.append(preview_attachment)
+            result["post_preview_attachment"] = preview_attachment
+            result["preview_attached"] = True
+        except Exception as exc:
+            result["errors_by_stage"]["preview_photo"] = repr(exc)
+    elif preview_path:
+        result["errors_by_stage"]["preview_photo"] = f"preview_not_found:{preview_path}"
+    if video_attachment:
+        attachments.append(video_attachment)
+    return ",".join(attachments) if attachments else None
+
+
 def publish_video_to_vk(
     local_path,
     title,
@@ -197,6 +218,7 @@ def publish_video_to_vk(
     comment_text=None,
     comment_banner_path=None,
     privacy_view=0,
+    post_preview_path=None,
 ):
     public_group_id = get_vk_public_group_id()
     save_response = request_video_upload(title, description, privacy_view=privacy_view, group_id=public_group_id)
@@ -218,16 +240,27 @@ def publish_video_to_vk(
         "post_id": None,
         "comment_id": None,
         "comment_attachment": None,
+        "post_preview_attachment": None,
+        "preview_attempted": bool(post_preview_path),
+        "preview_generated": bool(post_preview_path),
+        "preview_attached": False,
+        "preview_error": None,
         "errors_by_stage": {},
     }
 
     if wall_post_text:
         try:
             donut_duration = -1 if privacy_view == 5 else None
+            attachments = _build_post_attachments(
+                f"video{result['owner_id']}_{result['video_id']}",
+                post_preview_path,
+                result,
+                group_id=public_group_id,
+            )
             post_response = create_wall_post(
                 wall_post_text,
                 group_id=public_group_id,
-                attachments=f"video{result['owner_id']}_{result['video_id']}",
+                attachments=attachments,
                 donut_paid_duration=donut_duration,
             )
             result["post_created"] = True
@@ -265,11 +298,15 @@ def publish_video_to_vk(
         except Exception as exc:
             result["errors_by_stage"]["wall_comment"] = repr(exc)
 
+    result["preview_error"] = (
+        result["errors_by_stage"].get("preview_photo")
+        or result.get("preview_error")
+    )
     result["error"] = "; ".join(result["errors_by_stage"].values()) or None
     return result
 
 
-def publish_private_video_link_to_vk(local_path, title, description, wall_post_text):
+def publish_private_video_link_to_vk(local_path, title, description, wall_post_text, post_preview_path=None):
     private_group_id = get_vk_private_group_id()
     public_group_id = get_vk_public_group_id()
 
@@ -302,6 +339,11 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
         "post_id": None,
         "comment_id": None,
         "comment_attachment": None,
+        "post_preview_attachment": None,
+        "preview_attempted": bool(post_preview_path),
+        "preview_generated": bool(post_preview_path),
+        "preview_attached": False,
+        "preview_error": None,
         "post_message": None,
         "errors_by_stage": {},
     }
@@ -317,10 +359,16 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
 
     if post_message or video_url:
         try:
+            attachments = _build_post_attachments(
+                video_attachment,
+                post_preview_path,
+                result,
+                group_id=public_group_id,
+            )
             post_response = create_wall_post(
                 post_message,
                 group_id=public_group_id,
-                attachments=video_attachment,
+                attachments=attachments,
                 donut_paid_duration=-1,
             )
             result["post_created"] = True
@@ -330,5 +378,9 @@ def publish_private_video_link_to_vk(local_path, title, description, wall_post_t
             result["error"] = "; ".join(result["errors_by_stage"].values())
             return result
 
-    result["error"] = None
+    result["preview_error"] = (
+        result["errors_by_stage"].get("preview_photo")
+        or result.get("preview_error")
+    )
+    result["error"] = "; ".join(result["errors_by_stage"].values()) or None
     return result

@@ -626,6 +626,10 @@ class ConfigStateTests(unittest.TestCase):
         job = build_job_from_release(
             {
                 "name": {"english": "English Title", "main": "Русский тайтл"},
+                "poster": {
+                    "optimized": {"src": "/storage/releases/posters/100/optimized.webp"},
+                    "src": "/storage/releases/posters/100/source.jpg",
+                },
                 "episodes": [{"number": 1}, {"number": 2}],
                 "torrents": [{
                     "label": "AVC 1080p",
@@ -640,6 +644,10 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(job["title"], "English Title")
         self.assertEqual(job["title_ru"], "Русский тайтл")
         self.assertEqual(job["source"]["variant_codec"], "avc")
+        self.assertEqual(
+            job["automation"]["poster_url"],
+            "https://aniliberty.top/storage/releases/posters/100/optimized.webp",
+        )
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")

@@ -1,14 +1,16 @@
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 from api.aniskip import (
     build_quality_summary,
     get_aniskip_segments,
     print_skip_log,
     summarize_skips,
 )
-from api.anilibria import get_anilibria_segments
+from api.anilibria import extract_release_poster_url, get_anilibria_segments, get_release_details
 from core.detector import (
     build_detector_context,
     get_detector_type_result,
@@ -43,6 +45,7 @@ from core.media import (
 )
 from shared.runtime import update_runtime_status
 from api.storage import upload_file_to_s3
+from api.wavespeed import run_edit_prediction
 from shared.validation import reset_temp_dir
 from api.vk import publish_private_video_link_to_vk, publish_video_to_vk
 
@@ -732,6 +735,21 @@ def build_delivery_config(job):
         "vk_wall_post_enabled": True,
         "vk_comment_enabled": True,
         "vk_privacy_view": 0,
+        "vk_preview_enabled": True,
+        "vk_preview_provider": "wavespeed",
+        "vk_preview_model": "google/nano-banana-2/edit-fast",
+        "vk_preview_timeout_seconds": 180,
+        "vk_preview_prompt_template": (
+            "Transform the provided anime poster into a clickable VK video thumbnail. "
+            "Keep the anime identity and main character recognizable. Use a bold, stylish, "
+            "highly readable title treatment integrated into the artwork. Clean composition, "
+            "high contrast, professional social-media look, 16:9, 1280x720, no extra logos, "
+            "no unrelated text, no watermarks. Main text: \"{title_text}\". Secondary text: "
+            "\"{episode_text}\"."
+        ),
+        "vk_preview_output_aspect_ratio": "16:9",
+        "vk_preview_target_size": "1280x720",
+        "vk_preview_temp_dir": None,
         "vk_comment_banner_path": "./assets/banner.png",
         "vk_comment_template": "",
     }
@@ -744,6 +762,8 @@ def build_delivery_config(job):
     delivery["vk_wall_post_enabled"] = bool(delivery.get("vk_wall_post_enabled", True))
     delivery["vk_comment_enabled"] = bool(delivery.get("vk_comment_enabled", True))
     delivery["vk_privacy_view"] = int(delivery.get("vk_privacy_view", 0))
+    delivery["vk_preview_enabled"] = bool(delivery.get("vk_preview_enabled", True))
+    delivery["vk_preview_timeout_seconds"] = int(delivery.get("vk_preview_timeout_seconds", 180))
     return delivery
 
 
@@ -775,6 +795,11 @@ def build_vk_summary(enabled, uploaded=False, error=None, result=None):
         "post_id": result.get("post_id"),
         "comment_id": result.get("comment_id"),
         "comment_attachment": result.get("comment_attachment"),
+        "post_preview_attachment": result.get("post_preview_attachment"),
+        "preview_attempted": result.get("preview_attempted", False),
+        "preview_generated": result.get("preview_generated", False),
+        "preview_attached": result.get("preview_attached", False),
+        "preview_error": result.get("preview_error"),
         "errors_by_stage": result.get("errors_by_stage", {}),
     }
 
@@ -783,7 +808,123 @@ def is_private_vk_delivery(delivery):
     return int(delivery.get("vk_privacy_view", 0)) == 5
 
 
-def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_description):
+def _resolve_preview_temp_dir(temp_dir, delivery, pretty_base_name):
+    configured_dir = delivery.get("vk_preview_temp_dir")
+    if configured_dir:
+        preview_dir = Path(configured_dir)
+        if not preview_dir.is_absolute():
+            preview_dir = Path.cwd() / preview_dir
+        preview_dir = preview_dir / sanitize_filename(pretty_base_name)
+    else:
+        preview_dir = temp_dir / "vk_preview"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    return preview_dir
+
+
+def _build_vk_preview_episode_text(job):
+    episodes = sorted(parse_episodes_range(job.get("episodes_range", "")))
+    season = int(job.get("season", 1))
+    if not episodes:
+        return f"Season {season}"
+    if len(episodes) == 1:
+        return f"Season {season} • Episode {episodes[0]}"
+    return f"Season {season} • Episodes {episodes[0]}-{episodes[-1]}"
+
+
+def build_vk_preview_prompt(job, delivery):
+    title_text = str(get_display_title(job) or job.get("title") or "Anime").strip()
+    episode_text = _build_vk_preview_episode_text(job)
+    template = str(delivery.get("vk_preview_prompt_template") or "").strip()
+    if not template:
+        raise RuntimeError("vk_preview_prompt_template is empty")
+    return template.format(
+        title_text=title_text,
+        episode_text=episode_text,
+        title=title_text,
+        season=job.get("season", 1),
+        episodes_range=job.get("episodes_range", ""),
+        processing_mode=str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
+        aspect_ratio=delivery.get("vk_preview_output_aspect_ratio", "16:9"),
+        target_size=delivery.get("vk_preview_target_size", "1280x720"),
+    )
+
+
+def get_job_poster_url(job):
+    automation = job.get("automation") or {}
+    return str(automation.get("poster_url") or "").strip() or None
+
+
+def refresh_job_poster_url(job):
+    automation = job.get("automation") or {}
+    release_id = automation.get("release_id")
+    if not release_id:
+        return None
+    release_details = get_release_details(release_id)
+    poster_url = extract_release_poster_url(release_details.get("release") or {})
+    if poster_url:
+        automation["poster_url"] = poster_url
+        automation["poster_fetched_at"] = datetime.now(timezone.utc).isoformat()
+        job["automation"] = automation
+    return poster_url
+
+
+def download_preview_image(output_url, preview_dir, pretty_base_name):
+    response = requests.get(output_url, timeout=120)
+    response.raise_for_status()
+    suffix = Path(output_url.split("?", 1)[0]).suffix or ".jpg"
+    preview_path = preview_dir / f"{sanitize_filename(pretty_base_name)}_vk_preview{suffix}"
+    preview_path.write_bytes(response.content)
+    return preview_path
+
+
+def generate_vk_post_preview(job, delivery, pretty_base_name, temp_dir, runtime_status_path=None):
+    preview_status = {
+        "preview_attempted": False,
+        "preview_generated": False,
+        "preview_attached": False,
+        "preview_error": None,
+    }
+    if not delivery.get("vk_preview_enabled", True):
+        return None, preview_status
+    if not delivery.get("vk_wall_post_enabled", True):
+        return None, preview_status
+
+    preview_status["preview_attempted"] = True
+    try:
+        poster_url = get_job_poster_url(job) or refresh_job_poster_url(job)
+        if not poster_url:
+            raise RuntimeError("poster_url_missing")
+
+        if runtime_status_path:
+            set_runtime_stage(runtime_status_path, "preview_generate")
+        print(f"[DELIVERY] VK preview start: {pretty_base_name}")
+        prompt = build_vk_preview_prompt(job, delivery)
+        model = str(delivery.get("vk_preview_model", "google/nano-banana-2/edit-fast")).strip()
+        provider = str(delivery.get("vk_preview_provider", "wavespeed")).strip().lower()
+        if provider != "wavespeed":
+            raise RuntimeError(f"unsupported_vk_preview_provider:{provider}")
+
+        preview_result = run_edit_prediction(
+            model,
+            {
+                "image": poster_url,
+                "prompt": prompt,
+                "output_format": "jpeg",
+            },
+            timeout_seconds=delivery.get("vk_preview_timeout_seconds", 180),
+        )
+        preview_dir = _resolve_preview_temp_dir(temp_dir, delivery, pretty_base_name)
+        preview_path = download_preview_image(preview_result["output_url"], preview_dir, pretty_base_name)
+        preview_status["preview_generated"] = True
+        print(f"[DELIVERY] VK preview ok: {pretty_base_name}")
+        return preview_path, preview_status
+    except Exception as exc:
+        preview_status["preview_error"] = repr(exc)
+        print(f"[DELIVERY] VK preview failed: {preview_status['preview_error']}")
+        return None, preview_status
+
+
+def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_description, temp_dir, runtime_status_path=None):
     wall_post_text = (
         build_vk_wall_post_text(job, pretty_base_name)
         if delivery.get("vk_wall_post_enabled", True)
@@ -800,23 +941,40 @@ def deliver_to_vk(job, delivery, output_video, pretty_base_name, timestamps_desc
     if comment_text:
         print(f"[DELIVERY] VK comment start: {pretty_base_name}")
 
+    post_preview_path, preview_status = generate_vk_post_preview(
+        job,
+        delivery,
+        pretty_base_name,
+        temp_dir,
+        runtime_status_path=runtime_status_path,
+    )
+
     if is_private_vk_delivery(delivery):
-        return publish_private_video_link_to_vk(
+        result = publish_private_video_link_to_vk(
             output_video,
             pretty_base_name,
             timestamps_description,
             wall_post_text=wall_post_text,
+            post_preview_path=post_preview_path,
+        )
+    else:
+        result = publish_video_to_vk(
+            output_video,
+            pretty_base_name,
+            timestamps_description,
+            wall_post_text=wall_post_text,
+            comment_text=comment_text,
+            comment_banner_path=delivery.get("vk_comment_banner_path"),
+            privacy_view=delivery.get("vk_privacy_view", 0),
+            post_preview_path=post_preview_path,
         )
 
-    return publish_video_to_vk(
-        output_video,
-        pretty_base_name,
-        timestamps_description,
-        wall_post_text=wall_post_text,
-        comment_text=comment_text,
-        comment_banner_path=delivery.get("vk_comment_banner_path"),
-        privacy_view=delivery.get("vk_privacy_view", 0),
-    )
+    result["preview_attempted"] = preview_status["preview_attempted"]
+    result["preview_generated"] = preview_status["preview_generated"]
+    result["preview_attached"] = bool(result.get("preview_attached", False))
+    if preview_status["preview_error"] and not result.get("preview_error"):
+        result["preview_error"] = preview_status["preview_error"]
+    return result
 
 
 def log_vk_delivery_result(pretty_base_name, delivery, vk_result):
@@ -834,6 +992,10 @@ def log_vk_delivery_result(pretty_base_name, delivery, vk_result):
         "wall_group_id": vk_result.get("wall_group_id"),
         "video_url": vk_result.get("video_url"),
         "post_id": vk_result.get("post_id"),
+        "preview_attempted": vk_result.get("preview_attempted"),
+        "preview_generated": vk_result.get("preview_generated"),
+        "preview_attached": vk_result.get("preview_attached"),
+        "preview_error": vk_result.get("preview_error"),
         "error": vk_result.get("error"),
         "errors_by_stage": vk_result.get("errors_by_stage", {}),
     }
@@ -1098,6 +1260,8 @@ def process_job(job, runtime_status_path=None):
                         output_video,
                         pretty_base_name,
                         timestamps_description,
+                        temp_dir,
+                        runtime_status_path=runtime_status_path,
                     )
                     delivery_summary["vk"] = build_vk_summary(
                         enabled=True,
@@ -1344,6 +1508,8 @@ def process_job(job, runtime_status_path=None):
                     output_video,
                     pretty_base_name,
                     timestamps_description,
+                    temp_dir,
+                    runtime_status_path=runtime_status_path,
                 )
                 delivery_summary["vk"] = build_vk_summary(
                     enabled=True,

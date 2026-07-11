@@ -6,6 +6,7 @@ import requests
 
 
 API_BASE_URL = "https://aniliberty.top/api/v1"
+MEDIA_BASE_URL = "https://aniliberty.top"
 TORRENTS_PAGE_URLS = [
     "https://www.anilibria.top/anime/torrents",
     "https://aniliberty.top/anime/torrents",
@@ -43,6 +44,38 @@ def _build_request_url(url, params=None):
         return url
     query = urlencode(params, doseq=True)
     return f"{url}?{query}"
+
+
+def build_absolute_media_url(value):
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+    if normalized.startswith("/"):
+        return f"{MEDIA_BASE_URL}{normalized}"
+    return f"{MEDIA_BASE_URL}/{normalized.lstrip('/')}"
+
+
+def _first_non_empty_string(*values):
+    for value in values:
+        normalized = build_absolute_media_url(value)
+        if normalized:
+            return normalized
+    return None
+
+
+def extract_release_poster_url(release_payload):
+    poster = (release_payload or {}).get("poster") or {}
+    optimized = poster.get("optimized") or {}
+    return _first_non_empty_string(
+        optimized.get("src"),
+        poster.get("src"),
+        poster.get("preview"),
+        poster.get("thumbnail"),
+        optimized.get("preview"),
+        optimized.get("thumbnail"),
+    )
 
 
 def _extract_names(payload):

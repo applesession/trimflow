@@ -526,6 +526,8 @@ def format_job_details_message(payload):
         delivery_lines.append(_format_delivery_status_line("VK video", vk_summary.get("video_uploaded")))
         delivery_lines.append(_format_delivery_status_line("VK post", vk_summary.get("post_created")))
         delivery_lines.append(_format_delivery_status_line("VK comment", vk_summary.get("comment_created")))
+        if vk_summary.get("preview_attempted"):
+            delivery_lines.append(_format_delivery_status_line("VK preview", vk_summary.get("preview_generated")))
     if s3_summary.get("enabled"):
         delivery_lines.append(_format_delivery_status_line("S3 upload", s3_summary.get("uploaded")))
     if delivery_lines:

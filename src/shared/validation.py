@@ -9,12 +9,14 @@ from shared.constants import (
     VK_PRIVATE_ENV_VARS,
     VK_PUBLIC_ENV_VARS,
     VK_REQUIRED_ENV_VARS,
+    WAVESPEED_REQUIRED_ENV_VARS,
 )
 
 
 def validate_required_env(config, jobs):
     delivery_enabled = {"s3": False, "vk": False}
     requires_private_vk_delivery = False
+    requires_wavespeed = False
     for job in jobs:
         delivery = job.get("delivery") or {}
         if delivery.get("s3_enabled", True):
@@ -23,6 +25,8 @@ def validate_required_env(config, jobs):
             delivery_enabled["vk"] = True
             if int(delivery.get("vk_privacy_view", 0)) == 5:
                 requires_private_vk_delivery = True
+            if delivery.get("vk_preview_enabled", False) and str(delivery.get("vk_preview_provider", "wavespeed")).strip().lower() == "wavespeed":
+                requires_wavespeed = True
 
     required_vars = []
     if delivery_enabled["s3"]:
@@ -32,6 +36,8 @@ def validate_required_env(config, jobs):
         required_vars.extend(VK_PUBLIC_ENV_VARS)
         if requires_private_vk_delivery:
             required_vars.extend(VK_PRIVATE_ENV_VARS)
+        if requires_wavespeed:
+            required_vars.extend(WAVESPEED_REQUIRED_ENV_VARS)
 
     missing = [name for name in required_vars if not os.getenv(name)]
     if missing:

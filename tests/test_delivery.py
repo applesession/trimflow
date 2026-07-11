@@ -239,6 +239,51 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(mock_create_post.call_args.kwargs["attachments"], "video-100_42")
 
     @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
+    @patch("lib.vk.create_wall_post")
+    @patch("lib.vk.save_wall_photo")
+    @patch("lib.vk.upload_wall_comment_photo")
+    @patch("lib.vk.request_wall_photo_upload_server")
+    @patch("lib.vk.upload_video_file")
+    @patch("lib.vk.request_video_upload")
+    def test_publish_video_to_vk_attaches_preview_photo_to_post(
+        self,
+        mock_request_upload,
+        mock_upload_file,
+        mock_request_upload_server,
+        mock_upload_preview_photo,
+        mock_save_wall_photo,
+        mock_create_post,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        video_path = tmp_dir / "test.mkv"
+        preview_path = tmp_dir / "preview.jpg"
+        video_path.write_bytes(b"video")
+        preview_path.write_bytes(b"image")
+        mock_request_upload.return_value = {
+            "upload_url": "https://upload.vk.test",
+            "video_id": 42,
+            "owner_id": -100,
+        }
+        mock_upload_file.return_value = {"ok": 1}
+        mock_request_upload_server.return_value = {"upload_url": "https://upload.photo.vk.test"}
+        mock_upload_preview_photo.return_value = {"photo": "[]", "server": 1, "hash": "hash"}
+        mock_save_wall_photo.return_value = {"owner_id": -200, "id": 55}
+        mock_create_post.return_value = {"post_id": 77}
+
+        result = publish_video_to_vk(
+            video_path,
+            "Test Title",
+            "desc",
+            wall_post_text="wall text",
+            post_preview_path=preview_path,
+        )
+
+        self.assertTrue(result["post_created"])
+        self.assertTrue(result["preview_attached"])
+        self.assertEqual(result["post_preview_attachment"], "photo-200_55")
+        self.assertEqual(mock_create_post.call_args.kwargs["attachments"], "photo-200_55,video-100_42")
+
+    @patch.dict("os.environ", {"VK_PUBLIC_GROUP_ID": "236358467"})
     @patch("lib.vk.create_wall_comment")
     @patch("lib.vk.create_wall_post")
     @patch("lib.vk.upload_video_file")

@@ -32,6 +32,9 @@ VK_PUBLIC_ENV_VARS = [
 VK_PRIVATE_ENV_VARS = [
     "VK_PRIVATE_GROUP_ID",
 ]
+WAVESPEED_REQUIRED_ENV_VARS = [
+    "WAVESPEED_API_KEY",
+]
 BASE_REQUIRED_TOOLS = ["ffmpeg", "ffprobe"]
 DEFAULT_DOWNLOAD = {
     "timeout_minutes_per_episode": 20,
