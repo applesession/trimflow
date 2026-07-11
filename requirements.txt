@@ -4,3 +4,4 @@ python-dotenv
 boto3
 numpy
 librosa
+wavespeed

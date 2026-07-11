@@ -907,9 +907,12 @@ def generate_vk_post_preview(job, delivery, pretty_base_name, temp_dir, runtime_
         preview_result = run_edit_prediction(
             model,
             {
-                "image": poster_url,
                 "prompt": prompt,
+                "images": [poster_url],
+                "aspect_ratio": delivery.get("vk_preview_output_aspect_ratio", "16:9"),
+                "resolution": "2k",
                 "output_format": "jpeg",
+                "enable_web_search": False,
             },
             timeout_seconds=delivery.get("vk_preview_timeout_seconds", 180),
         )

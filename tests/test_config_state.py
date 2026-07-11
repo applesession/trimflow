@@ -183,7 +183,7 @@ class ConfigStateTests(unittest.TestCase):
         mock_torrents.assert_not_called()
 
     @patch("lib.anilibria._build_recent_releases_from_torrents_page")
-    @patch("lib.anilibria._request")
+    @patch("lib.anilibria._request")    й2Цйф
     def test_list_recent_releases_falls_back_to_torrents_page_when_api_is_empty(self, mock_request, mock_torrents):
         mock_request.return_value = (
             {"items": []},

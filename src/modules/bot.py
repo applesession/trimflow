@@ -540,6 +540,9 @@ def format_job_details_message(payload):
         error_reason = normalize_notification_error_reason(s3_summary.get("error"))
     if error_reason:
         lines.extend(["", f"Причина partial failure: {format_markdown_code(error_reason)}"])
+    preview_error = vk_summary.get("preview_error")
+    if preview_error:
+        lines.append(f"Ошибка VK preview: {format_markdown_code(normalize_notification_error_reason(preview_error))}")
 
     return "\n".join(lines)
 
@@ -631,8 +634,14 @@ def format_vk_publish_success_message(job, vk_result, quality_summary=None):
         if comment_created
         else "✖️ Первый комментарий не создан"
     )
+    if vk_result.get("preview_attempted") and not vk_result.get("preview_generated"):
+        lines.append("⚠️ AI preview не собралась, пост опубликован без неё")
     if warning_reason and not comment_created:
         lines.append(f"└ {escape_markdown_v2(warning_reason)}")
+    elif vk_result.get("preview_error"):
+        lines.append(
+            f"└ {escape_markdown_v2(normalize_notification_error_reason(vk_result.get('preview_error')))}"
+        )
     if vk_result.get("video_url"):
         lines.extend(["", f"🔗 {escape_markdown_v2(vk_result['video_url'])}"])
     return "\n".join(lines)
