@@ -261,6 +261,20 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(len(variants), 1)
         self.assertEqual(variants[0]["available_episodes"], list(range(1, 12)))
 
+    def test_torrent_range_can_lead_delayed_release_episodes(self):
+        release_payload = {
+            "episodes": [{"number": 1}],
+            "torrents": [{
+                "label": "One Piece - AniLiberty.TOP [WEBRip 1080p][AVC][1-2]",
+                "codec": "x264/AVC",
+                "magnet": "magnet:?xt=urn:btih:onepiece",
+            }],
+        }
+
+        variants = extract_release_source_variants(release_payload)
+
+        self.assertEqual(variants[0]["available_episodes"], [1, 2])
+
     def test_select_release_source_variant_prefers_avc_then_falls_back_to_hevc(self):
         release_payload = {
             "episodes": [{"number": index} for index in range(1, 12)],

@@ -725,14 +725,7 @@ def extract_release_source_variants(release_payload):
         codec = _extract_variant_codec(candidate)
         label = _extract_variant_label(candidate)
         label_episodes = _extract_variant_label_episode_numbers(label)
-        episodes = release_episodes
-        if label_episodes:
-            label_episode_set = set(label_episodes)
-            episodes = [
-                episode_number
-                for episode_number in release_episodes
-                if episode_number in label_episode_set
-            ]
+        episodes = label_episodes or release_episodes
         resolution = _parse_variant_resolution(candidate)
 
         if not magnet or not codec or not episodes:
