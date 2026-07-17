@@ -37,6 +37,20 @@ class PipelineCleanupTests(unittest.TestCase):
         self.assertFalse(temp_dir.exists())
         self.assertTrue(output_dir.exists())
 
+    def test_cleanup_preserves_resumable_temp_after_render_failure(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        temp_dir = tmp_dir / "temp" / "title"
+        temp_dir.mkdir(parents=True)
+
+        cleanup_job_artifacts(
+            {"temp": True},
+            temp_dir=temp_dir,
+            render_completed=False,
+            preserve_temp_on_failure=True,
+        )
+
+        self.assertTrue(temp_dir.exists())
+
     def test_cleanup_removes_downloads_but_keeps_output_after_delivery_failure(self):
         tmp_dir = self.make_workspace_temp_dir()
         download_dir = tmp_dir / "downloads" / "title"

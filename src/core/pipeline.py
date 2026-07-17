@@ -1,4 +1,5 @@
 import json
+import hashlib
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ from core.media import (
     build_hybrid_subsegments,
     build_keep_segments,
     ffprobe_duration,
+    ffprobe_media_signature,
     get_keyframes,
     render_concat,
     render_final,
@@ -46,7 +48,7 @@ from core.media import (
 from shared.runtime import update_runtime_status
 from api.storage import upload_file_to_s3
 from api.wavespeed import run_edit_prediction
-from shared.validation import reset_temp_dir
+from shared.validation import prepare_temp_dir, reset_temp_dir
 from api.vk import publish_private_video_link_to_vk, publish_video_to_vk
 
 
@@ -165,6 +167,7 @@ def build_compact_manifest(
     quality_summary,
     manifest_episodes,
     processing_metadata=None,
+    timing_sources_summary=None,
 ):
     manifest = {
         "title": job["title"],
@@ -183,11 +186,11 @@ def build_compact_manifest(
             "available": detector_context["available"],
             "reason": detector_context["reason"],
         },
-        "timing_sources_summary": {
-            "anilibria_available": any(result["segments"] for result in prefetched_anilibria_results.values()),
-            "aniskip_available": any(result["segments"] for result in prefetched_aniskip_results.values()),
-            "detector_available": detector_context["available"],
-        },
+        "timing_sources_summary": timing_sources_summary or build_timing_sources_summary(
+            prefetched_anilibria_results,
+            prefetched_aniskip_results,
+            detector_context,
+        ),
         "display_title": get_display_title(job),
         "output_display_name": pretty_base_name,
         "output_video": output_video.name,
@@ -243,6 +246,163 @@ def split_episode_infos_into_chunks(episode_infos, chunk_size):
         episode_infos[index:index + chunk_size]
         for index in range(0, len(episode_infos), chunk_size)
     ]
+
+
+CHUNK_CHECKPOINT_VERSION = 1
+
+
+def _file_identity(path):
+    path = Path(path)
+    try:
+        stat = path.stat()
+        return {
+            "path": str(path.resolve()),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    except OSError:
+        return {"path": str(path.resolve()), "size": None, "mtime_ns": None}
+
+
+def build_chunk_fingerprint(
+    job,
+    episode_infos,
+    *,
+    watermark_path,
+    processing,
+    timing_detection,
+    segment_encoding,
+    preferred_language,
+):
+    payload = {
+        "version": CHUNK_CHECKPOINT_VERSION,
+        "title": job.get("title"),
+        "season": str(job.get("season", "")).lstrip("0"),
+        "episodes_range": job.get("episodes_range"),
+        "source": job.get("source"),
+        "skip_types": job.get("skip_types", ["op", "ed"]),
+        "processing": processing,
+        "timing_detection": timing_detection,
+        "timing_providers": job.get("timing_providers") or {},
+        "segment_encoding": segment_encoding,
+        "encoding": job.get("encoding") or {},
+        "preferred_audio_language": preferred_language,
+        "watermark": _file_identity(watermark_path),
+        "episodes": [
+            {
+                "episode": item["episode"],
+                "duration": round(float(item["duration"]), 3),
+                "file": _file_identity(item["path"]),
+            }
+            for item in episode_infos
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_json_atomic(path, payload):
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def initialize_chunk_checkpoint(temp_dir, fingerprint):
+    checkpoint_path = temp_dir / "checkpoint.json"
+    checkpoint = None
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.get("version") != CHUNK_CHECKPOINT_VERSION
+        or checkpoint.get("fingerprint") != fingerprint
+    ):
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = {
+            "version": CHUNK_CHECKPOINT_VERSION,
+            "fingerprint": fingerprint,
+            "render_context": None,
+        }
+        _write_json_atomic(checkpoint_path, checkpoint)
+    return checkpoint
+
+
+def load_chunk_checkpoint(temp_dir, chunk_index, episode_numbers):
+    chunk_dir = temp_dir / f"chunk_{chunk_index:03d}"
+    checkpoint_path = chunk_dir / "checkpoint.json"
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint.get("output_file") != "rendered.mkv":
+            return None
+        output = chunk_dir / checkpoint["output_file"]
+        duration = ffprobe_duration(output)
+        signature = ffprobe_media_signature(output)
+    except Exception:
+        return None
+
+    if checkpoint.get("version") != CHUNK_CHECKPOINT_VERSION:
+        return None
+    if checkpoint.get("chunk_index") != chunk_index:
+        return None
+    if checkpoint.get("episodes") != list(episode_numbers):
+        return None
+    if not output.is_file() or output.stat().st_size != checkpoint.get("size"):
+        return None
+    if duration <= 0 or not signature or signature != checkpoint.get("media_signature"):
+        return None
+    manifest_episodes = checkpoint.get("manifest_episodes")
+    if not isinstance(manifest_episodes, list):
+        return None
+    if [item.get("episode") for item in manifest_episodes] != list(episode_numbers):
+        return None
+
+    return {
+        **checkpoint,
+        "chunk_output": output,
+        "duration": duration,
+        "media_signature": signature,
+    }
+
+
+def save_chunk_checkpoint(work_dir, chunk_index, episode_numbers, manifest_episodes, output):
+    duration = ffprobe_duration(output)
+    signature = ffprobe_media_signature(output)
+    if duration <= 0 or not signature:
+        raise RuntimeError(f"Rendered chunk {chunk_index} failed ffprobe validation")
+    checkpoint = {
+        "version": CHUNK_CHECKPOINT_VERSION,
+        "chunk_index": chunk_index,
+        "episodes": list(episode_numbers),
+        "output_file": output.name,
+        "size": output.stat().st_size,
+        "duration": duration,
+        "media_signature": signature,
+        "manifest_episodes": manifest_episodes,
+    }
+    _write_json_atomic(work_dir / "checkpoint.json", checkpoint)
+    return checkpoint
+
+
+def build_timestamps_from_episodes(manifest_episodes):
+    cumulative_time = 0.0
+    timestamps = []
+    for episode in manifest_episodes:
+        timestamps.append(f"{seconds_to_timestamp(cumulative_time)} - {episode['episode']} серия")
+        cumulative_time += float(episode.get("cleaned_duration", 0.0))
+    return timestamps
+
+
+def build_timing_sources_summary(prefetched_anilibria_results, prefetched_aniskip_results, detector_context):
+    return {
+        "anilibria_available": any(result["segments"] for result in prefetched_anilibria_results.values()),
+        "aniskip_available": any(result["segments"] for result in prefetched_aniskip_results.values()),
+        "detector_available": detector_context["available"],
+    }
 
 
 def build_chunk_episode_range(chunk_episode_infos):
@@ -1236,6 +1396,7 @@ def cleanup_job_artifacts(
     *,
     render_completed=False,
     job_completed=False,
+    preserve_temp_on_failure=False,
 ):
     cleanup = cleanup or {}
 
@@ -1243,7 +1404,7 @@ def cleanup_job_artifacts(
         print(f"[CLEANUP] Removing downloads: {download_dir}")
         shutil.rmtree(download_dir, ignore_errors=True)
 
-    if cleanup.get("temp", True) and temp_dir:
+    if cleanup.get("temp", True) and temp_dir and (render_completed or not preserve_temp_on_failure):
         print(f"[CLEANUP] Removing temp: {temp_dir}")
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1270,7 +1431,7 @@ def process_episode_chunk(
     chunk_index,
     total_chunks,
     skip_types,
-    temp_dir,
+    chunk_dir,
     cumulative_time,
     detector_context,
     segment_encoding,
@@ -1280,7 +1441,6 @@ def process_episode_chunk(
     total_episodes=None,
     preferred_language="rus",
 ):
-    chunk_dir = temp_dir / f"chunk_{chunk_index:03d}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
     chunk_segments = []
     chunk_manifest_episodes = []
@@ -1374,7 +1534,11 @@ def process_job(job, runtime_status_path=None):
     job_output_dir = artifacts["job_output_dir"]
     job_output_dir.mkdir(parents=True, exist_ok=True)
 
-    temp_dir = reset_temp_dir(title_slug)
+    temp_dir = (
+        reset_temp_dir(title_slug)
+        if processing_mode == "single_episode"
+        else prepare_temp_dir(title_slug)
+    )
     download_dir = None
     render_completed = False
     job_completed = False
@@ -1495,79 +1659,175 @@ def process_job(job, runtime_status_path=None):
             return result
 
         episode_infos = build_episode_infos(episode_files)
-        episode_chunks = split_episode_infos_into_chunks(
+        episode_chunks = split_episode_infos_into_chunks(episode_infos, processing["chunk_size_episodes"])
+        fingerprint = build_chunk_fingerprint(
+            job,
             episode_infos,
-            processing["chunk_size_episodes"],
+            watermark_path=watermark_path,
+            processing=processing,
+            timing_detection=timing_detection,
+            segment_encoding=segment_encoding,
+            preferred_language=preferred_language,
         )
+        chunk_checkpoint = initialize_chunk_checkpoint(temp_dir, fingerprint)
         set_runtime_stage(
             runtime_status_path,
             "episode_scan",
             total_episodes=len(episode_infos),
             total_chunks=len(episode_chunks),
         )
-        if aniskip_enabled and mal_id:
-            prefetched_aniskip_results = build_prefetched_aniskip_results(episode_infos, mal_id, skip_types)
-        elif aniskip_enabled and not mal_id:
-            prefetched_aniskip_results = build_prefetched_empty_aniskip_results(
-                episode_infos,
-                "AniSkip provider skipped: missing mal_id",
+        loaded_chunks = [
+            load_chunk_checkpoint(
+                temp_dir,
+                index,
+                [item["episode"] for item in episode_chunk],
             )
-        else:
-            prefetched_aniskip_results = build_prefetched_empty_aniskip_results(
-                episode_infos,
-                "AniSkip provider disabled by config",
-            )
-        if anilibria_enabled:
-            prefetched_anilibria_results = build_prefetched_anilibria_results(episode_infos, title, season, source)
-        else:
-            prefetched_anilibria_results = build_prefetched_empty_provider_results(
-                episode_infos,
-                "anilibria",
-                "AniLibria provider disabled by config",
-            )
-        set_runtime_stage(runtime_status_path, "detector", total_episodes=len(episode_infos))
-        detector_inputs = {
-            "aniskip_by_episode": prefetched_aniskip_results,
-            "anilibria_by_episode": prefetched_anilibria_results,
-        }
-        detector_context = build_detector_context(episode_infos, timing_detection, temp_dir, detector_inputs)
+            for index, episode_chunk in enumerate(episode_chunks, start=1)
+        ]
+        render_context = chunk_checkpoint.get("render_context")
+        render_context_valid = (
+            isinstance(render_context, dict)
+            and isinstance(render_context.get("detector"), dict)
+            and isinstance(render_context.get("timing_sources_summary"), dict)
+        )
+        needs_processing_context = any(chunk is None for chunk in loaded_chunks) or not render_context_valid
+        prefetched_aniskip_results = {}
+        prefetched_anilibria_results = {}
 
-        if detector_context["enabled"]:
-            status_text = "ready" if detector_context["available"] else f"disabled: {detector_context['reason']}"
-            print(f"\n[DETECTOR] {status_text}")
+        if needs_processing_context:
+            if aniskip_enabled and mal_id:
+                prefetched_aniskip_results = build_prefetched_aniskip_results(episode_infos, mal_id, skip_types)
+            elif aniskip_enabled and not mal_id:
+                prefetched_aniskip_results = build_prefetched_empty_aniskip_results(
+                    episode_infos,
+                    "AniSkip provider skipped: missing mal_id",
+                )
+            else:
+                prefetched_aniskip_results = build_prefetched_empty_aniskip_results(
+                    episode_infos,
+                    "AniSkip provider disabled by config",
+                )
+            if anilibria_enabled:
+                prefetched_anilibria_results = build_prefetched_anilibria_results(episode_infos, title, season, source)
+            else:
+                prefetched_anilibria_results = build_prefetched_empty_provider_results(
+                    episode_infos,
+                    "anilibria",
+                    "AniLibria provider disabled by config",
+                )
+            set_runtime_stage(runtime_status_path, "detector", total_episodes=len(episode_infos))
+            detector_inputs = {
+                "aniskip_by_episode": prefetched_aniskip_results,
+                "anilibria_by_episode": prefetched_anilibria_results,
+            }
+            detector_context = build_detector_context(episode_infos, timing_detection, temp_dir, detector_inputs)
+            timing_sources_summary = build_timing_sources_summary(
+                prefetched_anilibria_results,
+                prefetched_aniskip_results,
+                detector_context,
+            )
+            render_context = {
+                "detector": {
+                    key: detector_context.get(key)
+                    for key in ["enabled", "available", "reason"]
+                },
+                "timing_sources_summary": timing_sources_summary,
+            }
+            chunk_checkpoint["render_context"] = render_context
+            _write_json_atomic(temp_dir / "checkpoint.json", chunk_checkpoint)
+
+            if detector_context["enabled"]:
+                status_text = "ready" if detector_context["available"] else f"disabled: {detector_context['reason']}"
+                print(f"\n[DETECTOR] {status_text}")
+        else:
+            detector_context = render_context["detector"]
+            timing_sources_summary = render_context["timing_sources_summary"]
 
         pretty_base_name = artifacts["pretty_base_name"]
         output_video = artifacts["output_video"]
         output_txt = artifacts["output_txt"]
         output_manifest = artifacts["output_manifest"]
         concat_file = temp_dir / "concat.txt"
-        concat_output = temp_dir / "concat_output.mkv"
 
-        timestamps = []
         cumulative_time = 0.0
         chunk_outputs = []
+        chunk_signatures = []
         manifest_episodes = []
 
         for chunk_index, chunk_episode_infos in enumerate(episode_chunks, start=1):
-            chunk_result = process_episode_chunk(
-                chunk_episode_infos,
-                chunk_index=chunk_index,
-                total_chunks=len(episode_chunks),
-                skip_types=skip_types,
-                temp_dir=temp_dir,
-                cumulative_time=cumulative_time,
-                detector_context=detector_context,
-                segment_encoding=segment_encoding,
-                prefetched_anilibria_results=prefetched_anilibria_results,
-                prefetched_aniskip_results=prefetched_aniskip_results,
-                runtime_status_path=runtime_status_path,
-                total_episodes=len(episode_infos),
-                preferred_language=preferred_language,
-            )
-            cumulative_time = chunk_result["cumulative_time"]
+            episode_numbers = [item["episode"] for item in chunk_episode_infos]
+            chunk_result = loaded_chunks[chunk_index - 1]
+            if chunk_result:
+                print(f"[CHUNK CHECKPOINT] Reusing chunk {chunk_index}/{len(episode_chunks)}")
+            else:
+                chunk_dir = temp_dir / f"chunk_{chunk_index:03d}"
+                work_dir = temp_dir / f"chunk_{chunk_index:03d}.work"
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+                shutil.rmtree(work_dir, ignore_errors=True)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    processed = process_episode_chunk(
+                        chunk_episode_infos,
+                        chunk_index=chunk_index,
+                        total_chunks=len(episode_chunks),
+                        skip_types=skip_types,
+                        chunk_dir=work_dir,
+                        cumulative_time=cumulative_time,
+                        detector_context=detector_context,
+                        segment_encoding=segment_encoding,
+                        prefetched_anilibria_results=prefetched_anilibria_results,
+                        prefetched_aniskip_results=prefetched_aniskip_results,
+                        runtime_status_path=runtime_status_path,
+                        total_episodes=len(episode_infos),
+                        preferred_language=preferred_language,
+                    )
+                    rendered_chunk = work_dir / "rendered.mkv"
+                    set_runtime_stage(
+                        runtime_status_path,
+                        "final_render",
+                        total_episodes=len(episode_infos),
+                        current_chunk_index=chunk_index,
+                        total_chunks=len(episode_chunks),
+                        current_chunk_episode_range=build_chunk_episode_range(chunk_episode_infos),
+                    )
+                    render_final(
+                        concat_output=processed["chunk_output"],
+                        watermark_path=watermark_path,
+                        output_video=rendered_chunk,
+                        encoding=encoding,
+                    )
+                    save_chunk_checkpoint(
+                        work_dir,
+                        chunk_index,
+                        episode_numbers,
+                        processed["manifest_episodes"],
+                        rendered_chunk,
+                    )
+                    for item in work_dir.iterdir():
+                        if item.name in {"rendered.mkv", "checkpoint.json"}:
+                            continue
+                        if item.is_dir():
+                            shutil.rmtree(item, ignore_errors=True)
+                        else:
+                            item.unlink(missing_ok=True)
+                    work_dir.replace(chunk_dir)
+                    chunk_result = load_chunk_checkpoint(temp_dir, chunk_index, episode_numbers)
+                    if not chunk_result:
+                        raise RuntimeError(f"Chunk {chunk_index} checkpoint validation failed")
+                except Exception:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    raise
+
             chunk_outputs.append(chunk_result["chunk_output"])
+            chunk_signatures.append(chunk_result["media_signature"])
             manifest_episodes.extend(chunk_result["manifest_episodes"])
-            timestamps.extend(chunk_result["timestamps"])
+            cumulative_time += sum(
+                float(item.get("cleaned_duration", 0.0))
+                for item in chunk_result["manifest_episodes"]
+            )
+
+        if any(signature != chunk_signatures[0] for signature in chunk_signatures[1:]):
+            raise RuntimeError("Rendered chunks have incompatible media signatures")
 
         set_runtime_stage(
             runtime_status_path,
@@ -1577,20 +1837,20 @@ def process_job(job, runtime_status_path=None):
             current_chunk_episode_range=None,
         )
         create_concat_file(chunk_outputs, concat_file)
-        render_concat(concat_file, concat_output)
-        set_runtime_stage(
-            runtime_status_path,
-            "final_render",
-            total_episodes=len(episode_infos),
-            current_chunk_index=None,
-            current_chunk_episode_range=None,
-        )
-        render_final(
-            concat_output=concat_output,
-            watermark_path=watermark_path,
-            output_video=output_video,
-            encoding=encoding,
-        )
+        partial_output = output_video.with_name(output_video.stem + ".partial" + output_video.suffix)
+        partial_output.unlink(missing_ok=True)
+        try:
+            render_concat(concat_file, partial_output, allow_reencode=False)
+            if ffprobe_duration(partial_output) <= 0:
+                raise RuntimeError("Final concat has zero duration")
+            if ffprobe_media_signature(partial_output) != chunk_signatures[0]:
+                raise RuntimeError("Final concat has incompatible media signature")
+            partial_output.replace(output_video)
+        except Exception:
+            partial_output.unlink(missing_ok=True)
+            raise
+
+        timestamps = build_timestamps_from_episodes(manifest_episodes)
 
         timestamps_description = build_timestamps_description(timestamps)
         with open(output_txt, "w", encoding="utf-8") as file:
@@ -1621,7 +1881,9 @@ def process_job(job, runtime_status_path=None):
             processing_metadata={
                 "chunk_size_episodes": processing["chunk_size_episodes"],
                 "chunks_count": len(episode_chunks),
+                "resumable_final_chunks": True,
             },
+            timing_sources_summary=timing_sources_summary,
         )
 
         print("\n[QUALITY SUMMARY]")
@@ -1659,4 +1921,5 @@ def process_job(job, runtime_status_path=None):
             job_output_dir=job_output_dir,
             render_completed=render_completed,
             job_completed=job_completed,
+            preserve_temp_on_failure=processing_mode != "single_episode",
         )

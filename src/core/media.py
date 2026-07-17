@@ -91,6 +91,35 @@ def ffprobe_duration(path):
     return float(result.decode().strip())
 
 
+def ffprobe_media_signature(path):
+    try:
+        result = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,channel_layout",
+            "-of", "json",
+            str(path),
+        ], encoding="utf-8", errors="replace")
+        streams = json.loads(result).get("streams", [])
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+
+    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    if not video:
+        return None
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    return {
+        "video": {
+            key: video.get(key)
+            for key in ["codec_name", "width", "height", "pix_fmt"]
+        },
+        "audio": {
+            key: audio.get(key)
+            for key in ["codec_name", "sample_rate", "channels", "channel_layout"]
+        } if audio else None,
+    }
+
+
 def merge_remove_segments(remove_segments):
     if not remove_segments:
         return []
@@ -379,9 +408,10 @@ def render_segment_precise(ep_file, segment_output, start, end, segment_encoding
         else:
             raise
 
-    print(f"[SEGMENT_PRECISE] NVENC failed (code {exit_code}), falling back to libx264")
+    fallback_codec = get_nvenc_fallback_codec(video_codec)
+    print(f"[SEGMENT_PRECISE] NVENC failed (code {exit_code}), falling back to {fallback_codec}")
     fallback_encoding = dict(encoding)
-    fallback_encoding["video_codec"] = "libx264"
+    fallback_encoding["video_codec"] = fallback_codec
     fallback_encoding["preset"] = "ultrafast"
     fallback_cmd = _build_segment_precise_cmd(
         ep_file, segment_output, start, end,
@@ -403,7 +433,7 @@ def render_segment(ep_file, segment_output, start, end, segment_encoding=None, a
     render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=audio_stream_index)
 
 
-def render_concat(concat_file, concat_output, audio_stream_index=0):
+def render_concat(concat_file, concat_output, audio_stream_index=0, allow_reencode=True):
     fast_path = [
         "ffmpeg",
         "-y",
@@ -419,6 +449,8 @@ def render_concat(concat_file, concat_output, audio_stream_index=0):
         run(fast_path)
         return
     except Exception as exc:
+        if not allow_reencode:
+            raise
         print(f"[CONCAT] fast path failed ({exc}), falling back to re-encode")
 
     safe_path = [
@@ -456,6 +488,13 @@ def _probe_video_streams(path):
 
 
 NVENC_FALLBACK_CODES = {1, 7, 220}
+
+
+def get_nvenc_fallback_codec(video_codec):
+    normalized = str(video_codec or "").lower()
+    if "hevc" in normalized or "h265" in normalized:
+        return "libx265"
+    return "libx264"
 
 
 def _build_final_cmd(concat_output, watermark_path, output_video, encoding, audio_stream_index):
@@ -517,9 +556,10 @@ def render_final(concat_output, watermark_path, output_video, encoding, audio_st
         else:
             raise
 
-    print(f"[FINAL_RENDER] NVENC failed (code {exit_code}), falling back to libx264")
+    fallback_codec = get_nvenc_fallback_codec(video_codec)
+    print(f"[FINAL_RENDER] NVENC failed (code {exit_code}), falling back to {fallback_codec}")
     fallback_encoding = dict(encoding)
-    fallback_encoding["video_codec"] = "libx264"
+    fallback_encoding["video_codec"] = fallback_codec
     fallback_encoding["preset"] = "fast"
     fallback_cmd = _build_final_cmd(
         concat_output, watermark_path, output_video,

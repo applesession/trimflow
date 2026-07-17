@@ -1,10 +1,14 @@
 import unittest
 from unittest.mock import patch
 
-from lib.media import get_preferred_audio_stream
+from lib.media import get_nvenc_fallback_codec, get_preferred_audio_stream
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    def test_nvenc_fallback_keeps_codec_family(self):
+        self.assertEqual(get_nvenc_fallback_codec("h264_nvenc"), "libx264")
+        self.assertEqual(get_nvenc_fallback_codec("hevc_nvenc"), "libx265")
+
     @patch("lib.media.detect_audio_streams")
     def test_prefers_russian_audio_stream_position_not_absolute_stream_index(self, mock_detect_audio_streams):
         mock_detect_audio_streams.return_value = [

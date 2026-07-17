@@ -68,13 +68,20 @@ def validate_required_files(config):
         raise RuntimeError(f"Watermark file not found: {watermark_path}")
 
 
-def reset_temp_dir(title_slug: str):
+def prepare_temp_dir(title_slug: str):
     temp_root = TEMP_ROOT.resolve()
     temp_dir = (TEMP_ROOT / title_slug).resolve()
 
     if temp_dir == temp_root:
         raise RuntimeError("Refusing to clear the temp root directly")
 
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    return temp_dir
+
+
+def reset_temp_dir(title_slug: str):
+    temp_dir = prepare_temp_dir(title_slug)
+
     shutil.rmtree(temp_dir, ignore_errors=True)
-    Path(temp_dir).mkdir(parents=True, exist_ok=True)
-    return Path(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    return temp_dir
