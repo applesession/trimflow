@@ -53,8 +53,8 @@ def build_default_state():
     }
 
 
-def load_jobs(config):
-    return _db_load_jobs()
+def load_jobs(config, status=None):
+    return _db_load_jobs(status=status)
 
 
 def load_state(config):

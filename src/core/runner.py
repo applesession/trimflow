@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 from shared.config import (
     deep_merge,
     load_completed_jobs,
+    load_jobs,
     load_state,
     save_completed_jobs,
     save_jobs,
     save_state,
 )
 from modules.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
-from shared.db import remove_completed_job as _db_remove_completed_job
+from shared.db import claim_job, remove_completed_job as _db_remove_completed_job, return_job_to_pending
 from core.pipeline import process_job
 from shared.runtime import (
     append_runtime_error,
@@ -171,10 +172,12 @@ def run_jobs(
 
     defaults = config.get("defaults", {})
     merged_jobs = build_execution_order(active_jobs, defaults=defaults)
+    dynamic_queue = any(job.get("_queue_id") is not None for job in active_jobs)
 
-    validate_required_env(config, merged_jobs)
-    validate_required_tools(config, merged_jobs)
-    validate_required_files(config)
+    if not dynamic_queue:
+        validate_required_env(config, merged_jobs)
+        validate_required_tools(config, merged_jobs)
+        validate_required_files(config)
 
     completed_jobs = load_completed_jobs(config)
     blocked_full_refresh_keys = set()
@@ -185,33 +188,71 @@ def run_jobs(
         "jobs_skipped": 0,
         "failed_titles": [],
     }
+    attempted_queue_ids = set()
+    seen_queue_ids = {job.get("_queue_id") for job in active_jobs if job.get("_queue_id") is not None}
+    static_jobs = iter(merged_jobs)
+    index = 0
 
-    for index, merged_job in enumerate(merged_jobs, start=1):
+    while True:
+        if dynamic_queue:
+            pending_jobs = [
+                job
+                for job in load_jobs(config, status="pending")
+                if job.get("_queue_id") not in attempted_queue_ids
+            ]
+            seen_queue_ids.update(job.get("_queue_id") for job in pending_jobs)
+            if not pending_jobs:
+                break
+            ordered_jobs = build_execution_order(pending_jobs, defaults=defaults)
+            merged_job = ordered_jobs[0]
+            queue_id = merged_job.get("_queue_id")
+            total_jobs = summary["jobs_processed"] + summary["jobs_failed"] + len(ordered_jobs)
+        else:
+            try:
+                merged_job = next(static_jobs)
+            except StopIteration:
+                break
+            queue_id = None
+            total_jobs = len(merged_jobs)
+
+        index += 1
         if is_incremental_full_refresh_job(merged_job) and get_job_ongoing_progress_key(merged_job) in blocked_full_refresh_keys:
-            log(f"SKIP JOB {index}/{len(merged_jobs)} after failed single publish: {merged_job['title']}")
+            log(f"SKIP JOB {index}/{total_jobs} after failed single publish: {merged_job['title']}")
             summary["jobs_skipped"] += 1
+            if queue_id is not None:
+                attempted_queue_ids.add(queue_id)
+            continue
+
+        if queue_id is not None and not claim_job(queue_id):
             continue
 
         log("\n" + "=" * 80)
-        log(f"START JOB {index}/{len(merged_jobs)}: {merged_job['title']}")
+        log(f"START JOB {index}/{total_jobs}: {merged_job['title']}")
         log("=" * 80)
         if runtime_status_path:
             mark_runtime_job_start(
                 runtime_status_path,
                 merged_job,
                 current_job_index=index,
-                total_jobs=len(merged_jobs),
+                total_jobs=total_jobs,
                 jobs_processed=summary["jobs_processed"],
                 jobs_failed=summary["jobs_failed"],
             )
 
         try:
+            if dynamic_queue:
+                validate_required_env(config, [merged_job])
+                validate_required_tools(config, [merged_job])
+                validate_required_files(config)
             job_result = process_job(merged_job, runtime_status_path=runtime_status_path)
             if is_job_completed(job_result):
                 _db_remove_completed_job(merged_job)
                 completed_jobs.append(build_completed_job_entry(merged_job, job_result))
                 save_completed_jobs(config, completed_jobs)
                 update_state_after_successful_job(config, merged_job)
+            elif queue_id is not None:
+                return_job_to_pending(queue_id)
+                attempted_queue_ids.add(queue_id)
 
             summary["jobs_processed"] += 1
             if runtime_status_path:
@@ -229,6 +270,9 @@ def run_jobs(
             if on_job_success:
                 on_job_success(merged_job, job_result)
         except Exception as exc:
+            if queue_id is not None:
+                return_job_to_pending(queue_id)
+                attempted_queue_ids.add(queue_id)
             log(f"\n[JOB FAILED] {merged_job.get('title')}")
             log(repr(exc))
             summary["jobs_failed"] += 1
@@ -268,5 +312,7 @@ def run_jobs(
                 on_job_failure(merged_job, exc)
             continue
 
+    if dynamic_queue:
+        summary["jobs_found"] = len(seen_queue_ids)
     log("\n=== ALL JOBS FINISHED ===")
     return summary

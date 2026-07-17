@@ -261,8 +261,14 @@ def queue_discovered_job(jobs, candidate_job):
         return "created"
 
     if existing_job != candidate_job:
+        queue_id = existing_job.get("_queue_id")
+        queue_status = existing_job.get("_queue_status")
         existing_job.clear()
         existing_job.update(candidate_job)
+        if queue_id is not None:
+            existing_job["_queue_id"] = queue_id
+        if queue_status is not None:
+            existing_job["_queue_status"] = queue_status
         return "updated"
 
     return "unchanged"
@@ -278,6 +284,11 @@ def discover_jobs(config, jobs, state):
     updated_state.setdefault("ongoing_progress", {})
     updated_state.setdefault("discovery_blacklist", [])
     _get_episode_tracking_maps(updated_state)
+    running_release_ids = {
+        get_job_release_id(job)
+        for job in updated_jobs
+        if job.get("_queue_status") == "running" and get_job_release_id(job) is not None
+    }
 
     if not automation.get("enabled", True):
         _get_episode_tracking_maps(updated_state)
@@ -315,6 +326,8 @@ def discover_jobs(config, jobs, state):
         release_payload = release_details["release"]
         release_id = release_payload.get("id") or release_stub.get("id") or release_stub.get("release_id")
         if release_id is None:
+            continue
+        if _parse_positive_int(release_id) in running_release_ids:
             continue
         if _db_find_blacklist_item(release_id) is not None:
             _db_record_skipped_item({

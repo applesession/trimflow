@@ -17,7 +17,7 @@ src/
 ├── api/             # Внешние HTTP/S3 клиенты (anilibria, aniskip, vk, storage)
 ├── core/            # Бизнес-логика (pipeline, media, detector, discovery, runner)
 ├── modules/         # Фичи (autojobs discovery, telegram bot logic)
-├── cron_run.py      # Cron: lock → discovery → processing → TG уведомления
+├── cron_run.py      # Cron: discovery → render-lock → processing → TG уведомления
 ├── discover_jobs.py # Автономный discovery
 └── telegram_bot.py  # Long-polling бот
 main.py              # Точка входа: ручной запуск
@@ -168,20 +168,20 @@ python src/cron_run.py
 ```
 
 Что делает runner:
-- пытается взять файловый lock;
-- если другой запуск ещё идёт, пишет `already_running` в лог и завершается без ошибки;
-- выполняет discovery;
-- сразу после этого обрабатывает всю текущую очередь job'ов;
+- выполняет discovery под отдельным lock и безопасно дополняет SQLite-очередь;
+- пытается взять render-lock; занятый lock не прерывает активный render;
+- после каждого job перечитывает очередь, поэтому новый ongoing становится следующим по приоритету;
 - пишет сводку в `stdout` и в `logs/cron.log`.
 
 Runtime-файлы:
-- `.runtime/cron.lock` — lock активного запуска
+- `.runtime/discovery.lock` — lock активного discovery
+- `.runtime/cron.lock` — lock активного render
 - `logs/cron.log` — append-only лог раннера
 
 Рекомендуемая команда для crontab:
 
 ```bash
-*/10 * * * * cd /path/to/workspace-gojo-satoru && python src/cron_run.py
+*/5 * * * * cd /path/to/workspace-gojo-satoru && python src/cron_run.py
 ```
 
 ## Telegram Bot

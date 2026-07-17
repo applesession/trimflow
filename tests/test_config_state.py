@@ -358,6 +358,37 @@ class ConfigStateTests(unittest.TestCase):
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
+    def test_discovery_defers_release_that_is_currently_running(
+        self, mock_list_recent_releases, mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 42, "alias": "active", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {"id": 42, "alias": "active", "is_ongoing": True},
+            "request_url": "https://example.test/active",
+        }
+        running = {
+            "_queue_id": 1,
+            "_queue_status": "running",
+            "title": "Active",
+            "season": 1,
+            "episodes_range": "001-003",
+            "source": {"type": "magnet", "magnet": "active"},
+            "automation": {"release_id": 42},
+        }
+        state = build_default_state()
+
+        result = discover_jobs({}, [running], state)
+
+        self.assertEqual(result["jobs"], [running])
+        self.assertEqual(result["state"]["queued_release_episodes"], {})
+        self.assertEqual(result["summary"]["created_jobs"], 0)
+        self.assertEqual(result["summary"]["updated_jobs"], 0)
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
     def test_discover_jobs_expands_existing_job_range(self, mock_list_recent_releases, mock_get_release_details):
         mock_list_recent_releases.return_value = {
             "releases": [

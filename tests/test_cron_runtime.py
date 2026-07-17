@@ -22,7 +22,16 @@ from lib.runtime import (
     update_runtime_status,
 )
 from scripts import cron_run
-from shared.db import get_episode_tracking_dicts, load_ongoing_progress
+from shared.db import (
+    claim_job,
+    get_episode_tracking_dicts,
+    insert_one_job,
+    load_jobs as load_db_jobs,
+    load_ongoing_progress,
+    reset_running_jobs,
+    save_jobs as save_db_jobs,
+    sync_discovered_jobs,
+)
 
 
 class CronRuntimeTests(unittest.TestCase):
@@ -36,6 +45,105 @@ class CronRuntimeTests(unittest.TestCase):
         temp_dir.mkdir(parents=True, exist_ok=True)
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         return temp_dir
+
+    @staticmethod
+    def completed_result():
+        return {
+            "output_video": "/tmp/out.mkv",
+            "output_display_name": "ok",
+            "delivery_summary": {"vk": {"enabled": False}, "s3": {"enabled": False}},
+        }
+
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    @patch("lib.runner.process_job")
+    def test_worker_reloads_queue_and_prioritizes_new_ongoing(
+        self, mock_process_job, mock_validate_env, mock_validate_tools, mock_validate_files,
+    ):
+        current = {"title": "Current", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}
+        later = {"title": "Later", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m2"}}
+        ongoing = {
+            "title": "Ongoing", "season": 1, "episodes_range": "010",
+            "processing_mode": "single_episode",
+            "source": {"type": "magnet", "magnet": "m3"},
+            "automation": {"is_ongoing": True, "publish_strategy": "single_update"},
+        }
+        save_db_jobs([current, later])
+
+        def process(job, **kwargs):
+            if job["title"] == "Current":
+                insert_one_job(ongoing)
+            return self.completed_result()
+
+        mock_process_job.side_effect = process
+        run_jobs({"defaults": {}}, load_db_jobs(status="pending"))
+
+        self.assertEqual(
+            [call.args[0]["title"] for call in mock_process_job.call_args_list],
+            ["Current", "Ongoing", "Later"],
+        )
+
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    @patch("lib.runner.process_job")
+    def test_failed_job_returns_pending_without_same_run_retry(
+        self, mock_process_job, mock_validate_env, mock_validate_tools, mock_validate_files,
+    ):
+        save_db_jobs([
+            {"title": "Fails", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}},
+            {"title": "Works", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m2"}},
+        ])
+        mock_process_job.side_effect = [RuntimeError("boom"), self.completed_result()]
+
+        summary = run_jobs({"defaults": {}}, load_db_jobs(status="pending"))
+
+        self.assertEqual(mock_process_job.call_count, 2)
+        self.assertEqual(summary["jobs_failed"], 1)
+        remaining = load_db_jobs()
+        self.assertEqual([(job["title"], job["_queue_status"]) for job in remaining], [("Fails", "pending")])
+
+    def test_discovery_sync_never_changes_running_row(self):
+        original = {
+            "title": "Active", "season": 1, "episodes_range": "001-003",
+            "source": {"type": "magnet", "magnet": "active"},
+            "automation": {"release_id": 42},
+        }
+        save_db_jobs([original])
+        active = load_db_jobs()[0]
+        self.assertTrue(claim_job(active["_queue_id"]))
+        active["episodes_range"] = "001-999"
+        active["_queue_status"] = "running"
+
+        sync_discovered_jobs([active, {
+            "title": "New", "season": 1, "episodes_range": "010",
+            "source": {"type": "magnet", "magnet": "new"},
+        }])
+
+        jobs = load_db_jobs()
+        self.assertEqual((jobs[0]["episodes_range"], jobs[0]["_queue_status"]), ("001-003", "running"))
+        self.assertEqual((jobs[1]["title"], jobs[1]["_queue_status"]), ("New", "pending"))
+
+    def test_stale_running_job_is_recovered(self):
+        save_db_jobs([{"title": "A", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}])
+        job = load_db_jobs()[0]
+        self.assertTrue(claim_job(job["_queue_id"]))
+
+        self.assertEqual(reset_running_jobs(), 1)
+        self.assertEqual(load_db_jobs()[0]["_queue_status"], "pending")
+
+    def test_pending_queue_replacement_preserves_running_job(self):
+        save_db_jobs([{"title": "Active", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}])
+        active = load_db_jobs()[0]
+        self.assertTrue(claim_job(active["_queue_id"]))
+
+        save_db_jobs([{"title": "New", "season": 1, "episodes_range": "002", "source": {"type": "magnet", "magnet": "m2"}}])
+
+        self.assertEqual(
+            [(job["title"], job["_queue_status"]) for job in load_db_jobs()],
+            [("Active", "running"), ("New", "pending")],
+        )
 
     def test_lock_acquisition_succeeds_on_first_run(self):
         tmp_dir = self.make_workspace_temp_dir()
@@ -695,12 +803,14 @@ class CronRuntimeTests(unittest.TestCase):
 
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.log_line")
+    @patch("scripts.cron_run.run_discovery_once", return_value={"status": "completed", "summary": {}, "jobs_added": []})
     @patch("scripts.cron_run.acquire_lock")
     @patch("scripts.cron_run.ensure_runtime_paths")
     def test_cron_run_skips_when_lock_is_active(
         self,
         mock_paths,
         mock_acquire_lock,
+        mock_run_discovery_once,
         mock_log_line,
         mock_release_lock,
     ):
@@ -724,15 +834,14 @@ class CronRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         mock_log_line.assert_called()
+        mock_run_discovery_once.assert_called_once()
         mock_release_lock.assert_not_called()
 
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.send_message_to_allowed_chats")
     @patch("scripts.cron_run.run_jobs")
-    @patch("scripts.cron_run.save_state")
-    @patch("scripts.cron_run.save_jobs")
-    @patch("scripts.cron_run.discover_jobs")
-    @patch("scripts.cron_run.load_state")
+    @patch("scripts.cron_run.reset_running_jobs", return_value=0)
+    @patch("scripts.cron_run.run_discovery_once")
     @patch("scripts.cron_run.load_jobs")
     @patch("scripts.cron_run.load_config")
     @patch("scripts.cron_run.log_line")
@@ -745,10 +854,8 @@ class CronRuntimeTests(unittest.TestCase):
         mock_log_line,
         mock_load_config,
         mock_load_jobs,
-        mock_load_state,
-        mock_discover_jobs,
-        mock_save_jobs,
-        mock_save_state,
+        mock_run_discovery_once,
+        mock_reset_running_jobs,
         mock_run_jobs,
         mock_send_message,
         mock_release_lock,
@@ -770,12 +877,14 @@ class CronRuntimeTests(unittest.TestCase):
         }
         mock_load_config.return_value = {"defaults": {}}
         mock_load_jobs.return_value = []
-        mock_load_state.return_value = {}
-        mock_discover_jobs.return_value = {
+        mock_run_discovery_once.return_value = {
+            "status": "completed",
             "jobs": [{"title": "A"}],
             "state": {"schema_version": 1},
             "summary": {"created_jobs": 1},
+            "jobs_added": [{"title": "A"}],
         }
+        mock_load_jobs.return_value = [{"title": "A"}]
         mock_run_jobs.return_value = {
             "jobs_found": 1,
             "jobs_processed": 1,
@@ -787,9 +896,7 @@ class CronRuntimeTests(unittest.TestCase):
         result = cron_run.main()
 
         self.assertEqual(result, 0)
-        mock_discover_jobs.assert_called_once()
-        mock_save_jobs.assert_called_once()
-        mock_save_state.assert_called_once()
+        mock_run_discovery_once.assert_called_once()
         mock_run_jobs.assert_called_once()
         self.assertEqual(mock_run_jobs.call_args.args[1], [{"title": "A"}])
         mock_send_message.assert_called_once()
@@ -798,10 +905,8 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.send_message_to_allowed_chats")
     @patch("scripts.cron_run.run_jobs")
-    @patch("scripts.cron_run.save_state")
-    @patch("scripts.cron_run.save_jobs")
-    @patch("scripts.cron_run.discover_jobs")
-    @patch("scripts.cron_run.load_state")
+    @patch("scripts.cron_run.reset_running_jobs", return_value=0)
+    @patch("scripts.cron_run.run_discovery_once")
     @patch("scripts.cron_run.load_jobs")
     @patch("scripts.cron_run.load_config")
     @patch("scripts.cron_run.log_line")
@@ -814,10 +919,8 @@ class CronRuntimeTests(unittest.TestCase):
         mock_log_line,
         mock_load_config,
         mock_load_jobs,
-        mock_load_state,
-        mock_discover_jobs,
-        mock_save_jobs,
-        mock_save_state,
+        mock_run_discovery_once,
+        mock_reset_running_jobs,
         mock_run_jobs,
         mock_send_message,
         mock_release_lock,
@@ -839,11 +942,12 @@ class CronRuntimeTests(unittest.TestCase):
         }
         mock_load_config.return_value = {"defaults": {}}
         mock_load_jobs.return_value = []
-        mock_load_state.return_value = {}
-        mock_discover_jobs.return_value = {
+        mock_run_discovery_once.return_value = {
+            "status": "completed",
             "jobs": [{"title": "A"}],
             "state": {"schema_version": 1},
             "summary": {"created_jobs": 1},
+            "jobs_added": [{"title": "A"}],
         }
         mock_run_jobs.return_value = {
             "jobs_found": 1,
@@ -869,10 +973,8 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.send_message_to_allowed_chats")
     @patch("scripts.cron_run.run_jobs")
-    @patch("scripts.cron_run.save_state")
-    @patch("scripts.cron_run.save_jobs")
-    @patch("scripts.cron_run.discover_jobs")
-    @patch("scripts.cron_run.load_state")
+    @patch("scripts.cron_run.reset_running_jobs", return_value=0)
+    @patch("scripts.cron_run.run_discovery_once")
     @patch("scripts.cron_run.load_jobs")
     @patch("scripts.cron_run.load_config")
     @patch("scripts.cron_run.log_line")
@@ -885,10 +987,8 @@ class CronRuntimeTests(unittest.TestCase):
         mock_log_line,
         mock_load_config,
         mock_load_jobs,
-        mock_load_state,
-        mock_discover_jobs,
-        mock_save_jobs,
-        mock_save_state,
+        mock_run_discovery_once,
+        mock_reset_running_jobs,
         mock_run_jobs,
         mock_send_message,
         mock_release_lock,
@@ -910,8 +1010,7 @@ class CronRuntimeTests(unittest.TestCase):
         }
         mock_load_config.return_value = {"defaults": {}}
         mock_load_jobs.return_value = [{"title": "Queued Job"}]
-        mock_load_state.return_value = {}
-        mock_discover_jobs.side_effect = RuntimeError("discovery down")
+        mock_run_discovery_once.side_effect = RuntimeError("discovery down")
         mock_run_jobs.return_value = {
             "jobs_found": 1,
             "jobs_processed": 1,
@@ -923,8 +1022,6 @@ class CronRuntimeTests(unittest.TestCase):
         result = cron_run.main()
 
         self.assertEqual(result, 0)
-        mock_save_jobs.assert_not_called()
-        mock_save_state.assert_not_called()
         mock_run_jobs.assert_called_once()
         self.assertEqual(mock_run_jobs.call_args.args[1], [{"title": "Queued Job"}])
         self.assertTrue(

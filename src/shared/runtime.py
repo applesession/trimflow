@@ -6,6 +6,7 @@ from pathlib import Path
 from shared.constants import (
     DEFAULT_CRON_LOCK_NAME,
     DEFAULT_CRON_LOG_NAME,
+    DEFAULT_DISCOVERY_LOCK_NAME,
     DEFAULT_LOGS_DIR,
     DEFAULT_RUNTIME_DIR,
     DEFAULT_RUNTIME_ERRORS_LIMIT,
@@ -28,6 +29,7 @@ def ensure_runtime_paths():
         "runtime_dir": runtime_dir,
         "logs_dir": logs_dir,
         "lock_path": runtime_dir / DEFAULT_CRON_LOCK_NAME,
+        "discovery_lock_path": runtime_dir / DEFAULT_DISCOVERY_LOCK_NAME,
         "log_path": logs_dir / DEFAULT_CRON_LOG_NAME,
         "telegram_log_path": logs_dir / DEFAULT_TELEGRAM_LOG_NAME,
         "status_path": runtime_dir / DEFAULT_RUNTIME_STATUS_NAME,

@@ -269,6 +269,8 @@ def _migrate_from_json(conn):
 
 def _job_from_row(row):
     job = {
+        "_queue_id": row["id"],
+        "_queue_status": row["status"],
         "title": row["title"],
         "title_ru": row["title_ru"],
         "mal_id": row["mal_id"],
@@ -340,21 +342,27 @@ def _job_to_row(job):
     )
 
 
-def load_jobs():
+def load_jobs(status=None):
     """Replaces JSON load_jobs — reads from SQLite."""
     conn = _get_conn()
-    rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    if status is None:
+        rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM jobs WHERE status = ? ORDER BY id", (status,)).fetchall()
     conn.close()
     return [_job_from_row(r) for r in rows]
 
 
 def save_jobs(jobs):
-    """Replaces JSON save_jobs — full replacement (used during discovery sync)."""
+    """Replace pending jobs while preserving the active render row."""
     conn = _get_conn()
     with _write_lock:
-        conn.execute("DELETE FROM jobs")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM jobs WHERE status = 'pending'")
         now = _utc_now_iso()
         for job in jobs:
+            if job.get("_queue_status") == "running":
+                continue
             row = _job_to_row(job)
             conn.execute(
                 """INSERT INTO jobs (
@@ -392,6 +400,113 @@ def insert_one_job(job):
     conn.close()
 
 
+def sync_discovered_jobs(jobs):
+    """Upsert discovery results without replacing or changing running jobs."""
+    conn = _get_conn()
+    inserted = 0
+    updated = 0
+    with _write_lock:
+        conn.execute("BEGIN IMMEDIATE")
+        for job in jobs:
+            if job.get("_queue_status") == "running":
+                continue
+
+            queue_id = job.get("_queue_id")
+            if queue_id is not None:
+                cursor = conn.execute(
+                    """UPDATE jobs SET
+                        updated_at = ?, title = ?, title_ru = ?, mal_id = ?, season = ?,
+                        episodes_range = ?, processing_mode = ?, source_type = ?, source_magnet = ?,
+                        source_input_dir = ?, source_download_dir = ?, source_variant_codec = ?,
+                        source_variant_label = ?, skip_types = ?, encoding = ?, delivery = ?, cleanup = ?,
+                        processing = ?, timing_detection = ?, timing_providers = ?,
+                        preferred_audio_language = ?, watermark_path = ?, output_dir = ?, automation = ?
+                       WHERE id = ? AND status = 'pending'""",
+                    (_utc_now_iso(),) + _job_to_row(job) + (int(queue_id),),
+                )
+                if cursor.rowcount:
+                    updated += 1
+                continue
+
+            source = job.get("source", {})
+            existing = conn.execute(
+                """SELECT id FROM jobs
+                   WHERE status = 'pending' AND title = ? AND season = ?
+                     AND processing_mode = ? AND source_type = ? AND source_magnet IS ?
+                   LIMIT 1""",
+                (
+                    job.get("title", ""),
+                    int(job.get("season", 1)),
+                    str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
+                    source.get("type", "magnet"),
+                    source.get("magnet"),
+                ),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE jobs SET episodes_range = ?, updated_at = ?, automation = ? WHERE id = ?",
+                    (
+                        job.get("episodes_range", ""),
+                        _utc_now_iso(),
+                        json.dumps(job.get("automation")) if job.get("automation") else None,
+                        existing["id"],
+                    ),
+                )
+                updated += 1
+                continue
+
+            now = _utc_now_iso()
+            conn.execute(
+                """INSERT INTO jobs (
+                    created_at, updated_at, title, title_ru, mal_id, season,
+                    episodes_range, processing_mode, source_type, source_magnet,
+                    source_input_dir, source_download_dir, source_variant_codec,
+                    source_variant_label, skip_types, encoding, delivery, cleanup,
+                    processing, timing_detection, timing_providers,
+                    preferred_audio_language, watermark_path, output_dir, automation, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (now, now) + _job_to_row(job),
+            )
+            inserted += 1
+        conn.commit()
+    conn.close()
+    return {"inserted": inserted, "updated": updated}
+
+
+def claim_job(queue_id):
+    conn = _get_conn()
+    cursor = conn.execute(
+        "UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'",
+        (_utc_now_iso(), int(queue_id)),
+    )
+    conn.commit()
+    claimed = cursor.rowcount == 1
+    conn.close()
+    return claimed
+
+
+def return_job_to_pending(queue_id):
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'running'",
+        (_utc_now_iso(), int(queue_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reset_running_jobs():
+    conn = _get_conn()
+    cursor = conn.execute(
+        "UPDATE jobs SET status = 'pending', updated_at = ? WHERE status = 'running'",
+        (_utc_now_iso(),),
+    )
+    conn.commit()
+    count = cursor.rowcount
+    conn.close()
+    return count
+
+
 def update_job_episodes_range(job, new_range):
     """Update episodes_range for a matching job — used by discovery when extending range."""
     conn = _get_conn()
@@ -415,10 +530,16 @@ def update_job_episodes_range(job, new_range):
 def remove_completed_job(job):
     """Remove a completed job from the queue (runner calls this)."""
     conn = _get_conn()
+    queue_id = job.get("_queue_id")
+    if queue_id is not None:
+        conn.execute("DELETE FROM jobs WHERE id = ? AND status = 'running'", (int(queue_id),))
+        conn.commit()
+        conn.close()
+        return
     source = job.get("source", {})
     conn.execute(
         """DELETE FROM jobs
-           WHERE title = ? AND season = ?
+           WHERE status = 'running' AND title = ? AND season = ?
              AND source_type = ? AND source_magnet IS ?
              AND processing_mode = ?""",
         (
@@ -427,6 +548,29 @@ def remove_completed_job(job):
             str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
         ),
     )
+    conn.commit()
+    conn.close()
+
+
+def remove_pending_job(job):
+    """Remove a queued job without touching an active render."""
+    conn = _get_conn()
+    queue_id = job.get("_queue_id")
+    if queue_id is not None:
+        conn.execute("DELETE FROM jobs WHERE id = ? AND status = 'pending'", (int(queue_id),))
+    else:
+        source = job.get("source", {})
+        conn.execute(
+            """DELETE FROM jobs
+               WHERE status = 'pending' AND title = ? AND season = ?
+                 AND source_type = ? AND source_magnet IS ?
+                 AND processing_mode = ?""",
+            (
+                job.get("title", ""), int(job.get("season", 1)),
+                source.get("type", "magnet"), source.get("magnet", ""),
+                str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
+            ),
+        )
     conn.commit()
     conn.close()
 

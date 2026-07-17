@@ -10,9 +10,9 @@ SRC = Path(__file__).resolve().parent
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from modules.autojobs import discover_jobs  # noqa: E402
-from shared.config import load_config, load_jobs, load_state, save_jobs, save_state  # noqa: E402
-from shared.db import init_db  # noqa: E402
+from discover_jobs import run_discovery_once  # noqa: E402
+from shared.config import load_config, load_jobs  # noqa: E402
+from shared.db import init_db, reset_running_jobs  # noqa: E402
 from core.runner import run_jobs  # noqa: E402
 from shared.runtime import (
     acquire_lock,
@@ -55,6 +55,41 @@ def main():
     errors_path = paths["errors_path"]
     command = "python src/cron_run.py"
 
+    init_db()
+    log_line(log_path, "start discovery")
+    try:
+        discovery_result = run_discovery_once()
+        if discovery_result.get("status") == "already_running":
+            log_line(log_path, "discovery_already_running")
+        else:
+            log_line(
+                log_path,
+                "discovery_summary " + json.dumps(discovery_result["summary"], ensure_ascii=False),
+            )
+            if discovery_result["summary"].get("created_jobs", 0) > 0 or discovery_result["summary"].get("updated_jobs", 0) > 0:
+                notify_best_effort(
+                    log_path,
+                    format_discovery_message(discovery_result["summary"], discovery_result["jobs_added"]),
+                    "discovery_summary",
+                    parse_mode="MarkdownV2",
+                )
+    except Exception as exc:
+        log_line(log_path, f"warning discovery_failed error={repr(exc)}")
+        append_runtime_error(
+            context="discovery_failed",
+            message=repr(exc),
+            error_type=type(exc).__name__,
+            stage="discovery",
+            status_path=status_path,
+            errors_path=errors_path,
+        )
+        notify_best_effort(
+            log_path,
+            format_error_message("discovery", repr(exc)),
+            "discovery_error",
+            parse_mode="MarkdownV2",
+        )
+
     lock_result = acquire_lock(lock_path, command)
     if not lock_result["acquired"]:
         payload = lock_result.get("lock_payload") or {}
@@ -66,14 +101,16 @@ def main():
         return 0
 
     try:
-        init_db()
-        log_line(log_path, "start cron_run")
+        recovered_jobs = reset_running_jobs()
+        if recovered_jobs:
+            log_line(log_path, f"recovered_stale_jobs count={recovered_jobs}")
+        log_line(log_path, "start render")
         update_runtime_status(
             status_path,
             run_status="running",
             run_started_at=utc_now_iso(),
             run_finished_at=None,
-            current_stage="cron_start",
+            current_stage="processing",
             queue_progress={
                 "current_job_index": 0,
                 "total_jobs": 0,
@@ -84,66 +121,7 @@ def main():
         )
 
         config = load_config()
-        jobs = load_jobs(config)
-        state = load_state(config)
-        update_runtime_status(status_path, queue_progress={"total_jobs": len(jobs)})
-
-        try:
-            update_runtime_status(status_path, current_stage="discovery")
-            discovery_result = discover_jobs(config, jobs, state)
-            save_jobs(config, discovery_result["jobs"])
-            save_state(config, discovery_result["state"])
-
-            log_line(
-                log_path,
-                "discovery_summary " + json.dumps(discovery_result["summary"], ensure_ascii=False),
-            )
-            if discovery_result["summary"].get("created_jobs", 0) > 0 or discovery_result["summary"].get("updated_jobs", 0) > 0:
-                existing_keys = {
-                    (
-                        job.get("title"),
-                        job.get("season"),
-                        job.get("episodes_range"),
-                        job.get("source", {}).get("magnet"),
-                    )
-                    for job in jobs
-                }
-                jobs_added = [
-                    job
-                    for job in discovery_result["jobs"]
-                    if (
-                        job.get("title"),
-                        job.get("season"),
-                        job.get("episodes_range"),
-                        job.get("source", {}).get("magnet"),
-                    ) not in existing_keys
-                ]
-                notify_best_effort(
-                    log_path,
-                    format_discovery_message(discovery_result["summary"], jobs_added),
-                    "discovery_summary",
-                    parse_mode="MarkdownV2",
-                )
-
-            jobs = discovery_result["jobs"]
-            update_runtime_status(status_path, queue_progress={"total_jobs": len(jobs)})
-        except Exception as exc:
-            log_line(log_path, f"warning discovery_failed error={repr(exc)}")
-            append_runtime_error(
-                context="discovery_failed",
-                message=repr(exc),
-                error_type=type(exc).__name__,
-                stage="discovery",
-                run_status="running",
-                status_path=status_path,
-                errors_path=errors_path,
-            )
-            notify_best_effort(
-                log_path,
-                format_error_message("discovery", repr(exc)),
-                "discovery_error",
-                parse_mode="MarkdownV2",
-            )
+        jobs = load_jobs(config, status="pending")
 
         update_runtime_status(status_path, current_stage="processing", queue_progress={"total_jobs": len(jobs)})
         processing_summary = run_jobs(
@@ -197,7 +175,7 @@ def main():
             jobs_processed=processing_summary.get("jobs_processed", 0),
             jobs_failed=processing_summary.get("jobs_failed", 0),
         )
-        log_line(log_path, "finish cron_run")
+        log_line(log_path, "finish render")
         return 0
     except Exception as exc:
         mark_runtime_run_finish(
