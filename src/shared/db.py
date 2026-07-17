@@ -399,7 +399,7 @@ def update_job_episodes_range(job, new_range):
     conn.execute(
         """UPDATE jobs SET episodes_range = ?, updated_at = ?
            WHERE title = ? AND season = ?
-             AND source_type = ? AND source_magnet = ?
+             AND source_type = ? AND source_magnet IS ?
              AND processing_mode = ?""",
         (
             new_range, _utc_now_iso(),
@@ -419,7 +419,7 @@ def remove_completed_job(job):
     conn.execute(
         """DELETE FROM jobs
            WHERE title = ? AND season = ?
-             AND source_type = ? AND source_magnet = ?
+             AND source_type = ? AND source_magnet IS ?
              AND processing_mode = ?""",
         (
             job.get("title", ""), int(job.get("season", 1)),
@@ -630,6 +630,15 @@ def remove_from_blacklist(release_id):
 
 def record_skipped_item(item):
     conn = _get_conn()
+    episodes = json.dumps(item.get("episodes", []))
+    duplicate = conn.execute(
+        """SELECT 1 FROM skipped_items
+           WHERE release_id IS ? AND alias IS ? AND title IS ? AND episodes = ? AND reason IS ?""",
+        (item.get("release_id"), item.get("alias"), item.get("title"), episodes, item.get("reason")),
+    ).fetchone()
+    if duplicate:
+        conn.close()
+        return
     conn.execute(
         """INSERT INTO skipped_items (release_id, alias, title, episodes, reason, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
@@ -637,7 +646,7 @@ def record_skipped_item(item):
             item.get("release_id"),
             item.get("alias"),
             item.get("title"),
-            json.dumps(item.get("episodes", [])),
+            episodes,
             item.get("reason"),
             item.get("recorded_at", _utc_now_iso()),
         ),

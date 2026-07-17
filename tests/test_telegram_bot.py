@@ -6,7 +6,15 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from lib.config import save_jobs, save_state
+from lib import reset_test_db
+from lib.config import load_completed_jobs, load_jobs, save_completed_jobs, save_jobs, save_state
+from shared.db import (
+    add_to_blacklist,
+    get_discovery_blacklist,
+    get_episode_tracking_dicts,
+    mark_episodes_completed,
+    mark_episodes_queued,
+)
 from lib.telegram_bot import (
     add_job_from_command,
     build_main_keyboard,
@@ -43,6 +51,9 @@ from lib.telegram_bot import (
 
 
 class TelegramBotTests(unittest.TestCase):
+    def setUp(self):
+        reset_test_db()
+
     def make_workspace_temp_dir(self):
         root = Path(".test_tmp")
         root.mkdir(exist_ok=True)
@@ -207,6 +218,8 @@ class TelegramBotTests(unittest.TestCase):
             "job_index": {},
             "skipped_items": [],
         })
+        mark_episodes_queued(1, [3])
+        mark_episodes_completed(1, [1, 2])
 
         runtime_paths = {
             "runtime_dir": tmp_dir,
@@ -261,10 +274,10 @@ class TelegramBotTests(unittest.TestCase):
         self.assertNotIn("/help - показать команды", message)
         self.assertNotIn("Кнопки:", message)
         self.assertNotIn("Статус, Очередь, Помощь", message)
-        self.assertIn("/next - показать ближайший runtime-порядок выполнения", message)
+        self.assertNotIn("/next", message)
         self.assertIn("/blacklist - показать discovery blacklist", message)
         self.assertIn("/unblacklist <номер> - убрать тайтл из discovery blacklist", message)
-        self.assertIn("Фактическое выполнение может давать приоритет ongoing", message)
+        self.assertIn("Порядок в /jobs — по приоритету выполнения", message)
 
     def test_build_main_keyboard_returns_reply_markup(self):
         keyboard = build_main_keyboard()
@@ -551,7 +564,6 @@ class TelegramBotTests(unittest.TestCase):
             "skipped_items": [],
             "ongoing_progress": {},
         })
-
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
             update = {
                 "update_id": 1,
@@ -572,10 +584,9 @@ class TelegramBotTests(unittest.TestCase):
 
             self.assertEqual(len(load_telegram_state()["pending_actions"]), 0)
 
-        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
-        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
-        self.assertEqual(jobs_data, [])
-        self.assertEqual(state_data["queued_release_episodes"], {})
+        self.assertEqual(load_jobs(config), [])
+        queued, _ = get_episode_tracking_dicts()
+        self.assertEqual(queued, {})
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -614,12 +625,11 @@ class TelegramBotTests(unittest.TestCase):
                 "message": {"chat": {"id": 123}, "text": "Подтвердить blacklist"},
             })
 
-        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
-        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
-        self.assertEqual(jobs_data, [])
-        self.assertEqual(state_data["queued_release_episodes"], {})
-        self.assertEqual(len(state_data["discovery_blacklist"]), 1)
-        self.assertEqual(state_data["discovery_blacklist"][0]["release_id"], 42)
+        self.assertEqual(load_jobs(config), [])
+        self.assertEqual(get_episode_tracking_dicts()[0], {})
+        blacklist = get_discovery_blacklist()
+        self.assertEqual(len(blacklist), 1)
+        self.assertEqual(blacklist[0]["release_id"], 42)
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -660,6 +670,10 @@ class TelegramBotTests(unittest.TestCase):
             "skipped_items": [],
             "ongoing_progress": {},
         })
+        add_to_blacklist({
+            "release_id": 42, "title": "A", "title_ru": "А", "season": 1,
+            "added_at": "2026-06-27T00:00:00+00:00", "source": "telegram",
+        })
 
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
             handled = handle_update(config, {
@@ -675,8 +689,7 @@ class TelegramBotTests(unittest.TestCase):
                 "message": {"chat": {"id": 123}, "text": "Подтвердить снятие blacklist"},
             })
 
-        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
-        self.assertEqual(state_data["discovery_blacklist"], [])
+        self.assertEqual(get_discovery_blacklist(), [])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -699,6 +712,10 @@ class TelegramBotTests(unittest.TestCase):
             "job_index": {},
             "skipped_items": [],
             "ongoing_progress": {},
+        })
+        add_to_blacklist({
+            "release_id": 42, "title": "A", "title_ru": "А", "season": 1,
+            "added_at": "2026-06-27T00:00:00+00:00", "source": "telegram",
         })
 
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
@@ -756,8 +773,7 @@ class TelegramBotTests(unittest.TestCase):
             self.assertEqual(updated_state["last_update_id"], 2)
             self.assertEqual(updated_state["last_handled_at"], 222)
 
-        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
-        self.assertEqual(jobs_data, [])
+        self.assertEqual(load_jobs(config), [])
 
     @patch("lib.telegram_bot.send_reply")
     @patch("lib.telegram_bot.send_message")
@@ -767,28 +783,17 @@ class TelegramBotTests(unittest.TestCase):
         config = self.make_config(tmp_dir)
         state_path = (tmp_dir / "telegram_state.json").resolve()
         completed_path = tmp_dir / "completed_jobs.json"
-        completed_path.write_text(
-            """[
-  {
-    "status": "completed",
-    "job": {
-      "title": "A",
-      "title_ru": "А",
-      "season": 1,
-      "episodes_range": "001",
-      "source": {
-        "type": "magnet",
-        "magnet": "magnet:?xt=urn:btih:testhash",
-        "download_dir": "downloads/A"
-      },
-      "automation": {
-        "release_id": 1
-      }
-    }
-  }
-]""",
-            encoding="utf-8",
-        )
+        save_completed_jobs(config, [{
+            "status": "completed",
+            "job": {
+                "title": "A", "title_ru": "А", "season": 1, "episodes_range": "001",
+                "source": {
+                    "type": "magnet", "magnet": "magnet:?xt=urn:btih:testhash",
+                    "download_dir": "downloads/A",
+                },
+                "automation": {"release_id": 1},
+            },
+        }])
         config["automation"]["completed_jobs_path"] = str(completed_path.resolve())
         save_jobs(config, [])
         save_state(config, {
@@ -822,11 +827,10 @@ class TelegramBotTests(unittest.TestCase):
             }
             handle_update(config, confirm_update)
 
-        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
-        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        jobs_data = load_jobs(config)
         self.assertEqual(len(jobs_data), 1)
         self.assertEqual(jobs_data[0]["title_ru"], "А")
-        self.assertIn("1:001", state_data["queued_release_episodes"])
+        self.assertIn("1:001", get_episode_tracking_dicts()[0])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -875,15 +879,15 @@ class TelegramBotTests(unittest.TestCase):
             }
             handle_update(config, confirm_update)
 
-        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
-        completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
-        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        jobs_data = load_jobs(config)
+        completed_data = load_completed_jobs(config)
+        queued, completed = get_episode_tracking_dicts()
         self.assertEqual(jobs_data, [])
         self.assertEqual(len(completed_data), 1)
-        self.assertEqual(state_data["queued_release_episodes"], {})
-        self.assertIn("1:001", state_data["completed_release_episodes"])
+        self.assertEqual(queued, {})
+        self.assertIn("1:001", completed)
 
-    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.send_formatted_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
     def test_jobs_pagination_navigation_uses_buttons_and_persists_page(self, _mock_allowed, mock_send_message):
         tmp_dir = self.make_workspace_temp_dir()
@@ -906,29 +910,32 @@ class TelegramBotTests(unittest.TestCase):
             })
             first_message = mock_send_message.call_args_list[-1].args[1]
             first_markup = mock_send_message.call_args_list[-1].kwargs["reply_markup"]
-            self.assertIn("Страница: 1/2", first_message)
-            self.assertIn("1. Тайтл 1", first_message)
-            self.assertEqual(first_markup["keyboard"][0][0]["text"], "Вперед")
-            self.assertEqual(get_jobs_pagination_page(123), 1)
+            self.assertIn("Страница `1/2`", first_message)
+            self.assertIn("*1\\. Тайтл 1*", first_message)
+            self.assertEqual(first_markup["inline_keyboard"][0][-1]["text"], "Вперед »")
 
-            handle_update(config, {
-                "update_id": 2,
-                "message": {"chat": {"id": 123}, "text": "Вперед"},
-            })
-            second_message = mock_send_message.call_args_list[-1].args[1]
-            second_markup = mock_send_message.call_args_list[-1].kwargs["reply_markup"]
-            self.assertIn("Страница: 2/2", second_message)
-            self.assertIn("16. Тайтл 16", second_message)
-            self.assertEqual(second_markup["keyboard"][0][0]["text"], "Назад")
-            self.assertEqual(get_jobs_pagination_page(123), 2)
+            with patch("lib.telegram_bot.edit_message_text") as mock_edit, patch(
+                "lib.telegram_bot.answer_callback_query"
+            ):
+                handle_update(config, {
+                    "callback_query": {
+                        "id": "next", "data": "jobs:page:2",
+                        "message": {"chat": {"id": 123}, "message_id": 7},
+                    },
+                })
+                second_message = mock_edit.call_args.args[2]
+                second_markup = mock_edit.call_args.kwargs["reply_markup"]
+                self.assertIn("Страница `2/2`", second_message)
+                self.assertIn("*16\\. Тайтл 16*", second_message)
+                self.assertEqual(second_markup["inline_keyboard"][0][0]["text"], "« Назад")
 
-            handle_update(config, {
-                "update_id": 3,
-                "message": {"chat": {"id": 123}, "text": "Назад"},
-            })
-            third_message = mock_send_message.call_args_list[-1].args[1]
-            self.assertIn("Страница: 1/2", third_message)
-            self.assertEqual(get_jobs_pagination_page(123), 1)
+                handle_update(config, {
+                    "callback_query": {
+                        "id": "previous", "data": "jobs:page:1",
+                        "message": {"chat": {"id": 123}, "message_id": 7},
+                    },
+                })
+                self.assertIn("Страница `1/2`", mock_edit.call_args.args[2])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
@@ -959,17 +966,12 @@ class TelegramBotTests(unittest.TestCase):
             "skipped_items": [],
             "ongoing_progress": {},
         })
-        completed_path.write_text(
-            json.dumps([
-                {
-                    "status": "completed",
-                    "completed_at": "2026-06-13T10:00:00+00:00",
-                    "job": job,
-                    "delivery_summary": {},
-                }
-            ], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_completed_jobs(config, [{
+            "status": "completed",
+            "completed_at": "2026-06-13T10:00:00+00:00",
+            "job": job,
+            "delivery_summary": {},
+        }])
 
         with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
             handle_update(config, {
@@ -981,13 +983,13 @@ class TelegramBotTests(unittest.TestCase):
                 "message": {"chat": {"id": 123}, "text": "Подтвердить завершение"},
             })
 
-        jobs_data = json.loads((tmp_dir / "jobs.json").read_text(encoding="utf-8"))
-        completed_data = json.loads(completed_path.read_text(encoding="utf-8"))
-        state_data = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        jobs_data = load_jobs(config)
+        completed_data = load_completed_jobs(config)
+        queued, completed = get_episode_tracking_dicts()
         self.assertEqual(jobs_data, [])
         self.assertEqual(len(completed_data), 1)
-        self.assertEqual(state_data["queued_release_episodes"], {})
-        self.assertIn("1:001", state_data["completed_release_episodes"])
+        self.assertEqual(queued, {})
+        self.assertIn("1:001", completed)
 
     @patch("lib.telegram_bot.send_formatted_message")
     @patch("lib.telegram_bot.answer_callback_query")

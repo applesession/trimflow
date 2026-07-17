@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+from lib import reset_test_db
 from lib.runner import build_job_identity, run_jobs
 from lib.runtime import (
     acquire_lock,
@@ -21,9 +22,13 @@ from lib.runtime import (
     update_runtime_status,
 )
 from scripts import cron_run
+from shared.db import get_episode_tracking_dicts, load_ongoing_progress
 
 
 class CronRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        reset_test_db()
+
     def make_workspace_temp_dir(self):
         root = Path(".test_tmp")
         root.mkdir(exist_ok=True)
@@ -234,7 +239,7 @@ class CronRuntimeTests(unittest.TestCase):
         summary = run_jobs({"defaults": {}}, jobs)
 
         self.assertEqual(summary["jobs_processed"], 1)
-        mock_save_jobs.assert_called_once_with({"defaults": {}}, [])
+        mock_save_jobs.assert_not_called()
         saved_archive = mock_save_completed_jobs.call_args.args[1]
         self.assertEqual(len(saved_archive), 1)
         self.assertEqual(saved_archive[0]["job"]["title"], "A")
@@ -315,9 +320,9 @@ class CronRuntimeTests(unittest.TestCase):
         summary = run_jobs({"defaults": {}}, jobs)
         self.assertEqual(summary["jobs_processed"], 1)
         mock_save_state.assert_called_once()
-        saved_state = mock_save_state.call_args.args[1]
-        self.assertTrue(saved_state["ongoing_progress"]["a|1|magnet"]["has_full_publish"])
-        self.assertEqual(saved_state["ongoing_progress"]["a|1|magnet"]["last_full_range"], "001-010")
+        progress = load_ongoing_progress()["a|1|magnet"]
+        self.assertTrue(progress["has_full_publish"])
+        self.assertEqual(progress["last_full_range"], "001-010")
 
     @patch("lib.runner.process_job")
     @patch("lib.runner.save_completed_jobs")
@@ -419,10 +424,10 @@ class CronRuntimeTests(unittest.TestCase):
 
         self.assertEqual(summary["jobs_processed"], 1)
         mock_save_state.assert_called_once()
-        saved_state = mock_save_state.call_args.args[1]
-        self.assertEqual(saved_state["queued_release_episodes"], {})
-        self.assertIn("42:001", saved_state["completed_release_episodes"])
-        self.assertIn("42:002", saved_state["completed_release_episodes"])
+        queued, completed = get_episode_tracking_dicts()
+        self.assertEqual(queued, {})
+        self.assertIn("42:001", completed)
+        self.assertIn("42:002", completed)
 
     @patch("lib.runner.process_job")
     @patch("lib.runner.save_completed_jobs")

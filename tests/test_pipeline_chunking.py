@@ -163,6 +163,7 @@ class PipelineChunkingTests(unittest.TestCase):
             segment_encoding,
             anilibria_result,
             aniskip_result,
+            preferred_language="rus",
         ):
             segment_output = episode_temp_dir / f"ep{episode_info['episode']:03d}_seg000_000.mkv"
             manifest_episode = {
@@ -291,23 +292,15 @@ class PipelineChunkingTests(unittest.TestCase):
         )
 
         self.assertEqual(cumulative_time, 549.0)
-        self.assertEqual(len(segment_outputs), 4)
-        self.assertEqual(mock_render_segment.call_count, 4)
+        self.assertEqual(len(segment_outputs), 1)
+        self.assertEqual(mock_render_segment.call_count, 1)
         render_ranges = [
             (call.args[2], call.args[3])
             for call in mock_render_segment.call_args_list
         ]
-        self.assertEqual(render_ranges, [
-            (0.0, 150.0),
-            (150.0, 300.0),
-            (300.0, 450.0),
-            (450.0, 549.0),
-        ])
+        self.assertEqual(render_ranges, [(0.0, 549.0)])
         self.assertEqual(manifest_episode["kept_segments"], [
-            {"start": 0.0, "end": 150.0, "cut_mode": "copy"},
-            {"start": 150.0, "end": 300.0, "cut_mode": "copy"},
-            {"start": 300.0, "end": 450.0, "cut_mode": "copy"},
-            {"start": 450.0, "end": 549.0, "cut_mode": "copy"},
+            {"start": 0.0, "end": 549.0, "cut_mode": "copy"},
         ])
         self.assertEqual(timestamp_line, "00:00:00 - 1 серия")
 

@@ -443,6 +443,7 @@ def discover_jobs(config, jobs, state):
 
     updated_state["last_discovery_at"] = utc_now_iso()
     updated_state["job_index"] = build_default_job_index(updated_jobs)
+    _get_episode_tracking_maps(updated_state)
     return {
         "jobs": updated_jobs,
         "state": updated_state,

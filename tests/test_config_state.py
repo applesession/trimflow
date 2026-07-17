@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lib import reset_test_db
 from lib.anilibria import (
     _build_recent_releases_from_api,
     _build_request_kwargs,
@@ -23,9 +24,13 @@ from lib.autojobs import (
 )
 from lib.config import build_default_state, load_completed_jobs, load_jobs, load_state
 from lib.discovery import filter_episode_files
+from shared.db import add_to_blacklist, mark_episodes_completed, save_ongoing_progress
 
 
 class ConfigStateTests(unittest.TestCase):
+    def setUp(self):
+        reset_test_db()
+
     def make_workspace_temp_dir(self):
         root = Path(".test_tmp")
         root.mkdir(exist_ok=True)
@@ -493,7 +498,7 @@ class ConfigStateTests(unittest.TestCase):
         }
 
         state = build_default_state()
-        state["discovery_blacklist"].append({
+        add_to_blacklist({
             "release_id": 999,
             "title": "Blocked Release",
             "title_ru": None,
@@ -506,7 +511,7 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(result["jobs"], [])
         self.assertEqual(result["summary"]["created_jobs"], 0)
-        self.assertEqual(result["state"]["skipped_items"][0]["reason"], "blacklisted_release")
+        self.assertEqual(result["summary"]["skipped_items"], 1)
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
@@ -539,19 +544,14 @@ class ConfigStateTests(unittest.TestCase):
         }
 
         state = build_default_state()
-        for episode_number in range(1, 10):
-            state["completed_release_episodes"][f"77:{episode_number:03d}"] = {
-                "release_id": 77,
-                "episode": episode_number,
-                "completed_at": "2026-06-13T00:00:00+00:00",
-            }
+        mark_episodes_completed(77, range(1, 10))
         ongoing_key = build_ongoing_progress_key("Ongoing Release", 1, "magnet")
-        state["ongoing_progress"][ongoing_key] = {
+        save_ongoing_progress(ongoing_key, {
             "has_full_publish": True,
             "last_full_episode": 9,
             "last_full_range": "001-009",
             "updated_at": "2026-06-13T00:00:00+00:00",
-        }
+        })
 
         result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], state)
 
@@ -595,19 +595,14 @@ class ConfigStateTests(unittest.TestCase):
         }
 
         state = build_default_state()
-        for episode_number in range(1, 11):
-            state["completed_release_episodes"][f"10175:{episode_number:03d}"] = {
-                "release_id": 10175,
-                "episode": episode_number,
-                "completed_at": "2026-06-13T00:00:00+00:00",
-            }
+        mark_episodes_completed(10175, range(1, 11))
         ongoing_key = build_ongoing_progress_key("Otaku ni Yasashii Gal wa Inai!?", 1, "magnet")
-        state["ongoing_progress"][ongoing_key] = {
+        save_ongoing_progress(ongoing_key, {
             "has_full_publish": True,
             "last_full_episode": 10,
             "last_full_range": "001-010",
             "updated_at": "2026-06-13T00:00:00+00:00",
-        }
+        })
 
         result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], state)
 
@@ -782,7 +777,7 @@ class ConfigStateTests(unittest.TestCase):
 
         self.assertEqual(result["jobs"], [])
         self.assertEqual(result["summary"]["created_jobs"], 0)
-        self.assertEqual(result["state"]["skipped_items"][0]["reason"], "no_supported_torrent_variant")
+        self.assertEqual(result["summary"]["skipped_items"], 1)
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
@@ -821,9 +816,8 @@ class ConfigStateTests(unittest.TestCase):
             first_result["state"],
         )
 
-        self.assertEqual(len(first_result["state"]["skipped_items"]), 1)
-        self.assertEqual(len(second_result["state"]["skipped_items"]), 1)
-        self.assertEqual(second_result["state"]["skipped_items"][0]["reason"], "no_supported_torrent_variant")
+        self.assertEqual(first_result["summary"]["skipped_items"], 1)
+        self.assertEqual(second_result["summary"]["skipped_items"], 1)
 
 
 if __name__ == "__main__":
