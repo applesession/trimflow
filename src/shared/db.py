@@ -495,16 +495,22 @@ def return_job_to_pending(queue_id):
     conn.close()
 
 
-def reset_running_jobs():
+def recover_running_jobs():
     conn = _get_conn()
-    cursor = conn.execute(
-        "UPDATE jobs SET status = 'pending', updated_at = ? WHERE status = 'running'",
-        (_utc_now_iso(),),
-    )
-    conn.commit()
-    count = cursor.rowcount
+    with _write_lock:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute("SELECT * FROM jobs WHERE status = 'running' ORDER BY id").fetchall()
+        conn.execute(
+            "UPDATE jobs SET status = 'pending', updated_at = ? WHERE status = 'running'",
+            (_utc_now_iso(),),
+        )
+        conn.commit()
     conn.close()
-    return count
+    return [_job_from_row(row) for row in rows]
+
+
+def reset_running_jobs():
+    return len(recover_running_jobs())
 
 
 def update_job_episodes_range(job, new_range):

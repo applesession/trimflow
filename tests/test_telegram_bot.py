@@ -30,6 +30,7 @@ from lib.telegram_bot import (
     format_jobs_message,
     format_next_message,
     format_publish_success_message,
+    format_render_interrupted_message,
     format_status_message,
     format_vk_publish_error_message,
     format_vk_publish_success_message,
@@ -53,6 +54,30 @@ from lib.telegram_bot import (
 class TelegramBotTests(unittest.TestCase):
     def setUp(self):
         reset_test_db()
+
+    def test_render_interrupted_message_includes_recovery_context(self):
+        message = format_render_interrupted_message(
+            {"title": "Chunk Test", "title_ru": "Тест", "episodes_range": "001-024"},
+            "OOM killer завершил процесс PID 123",
+            {
+                "current_stage": "final_render",
+                "current_job": {
+                    "title": "Chunk Test",
+                    "stage": "final_render",
+                    "current_chunk_index": 2,
+                    "total_chunks": 2,
+                    "current_episode": 18,
+                    "total_episodes": 24,
+                },
+            },
+            {"pid": 123, "started_at": "2026-07-17T14:00:00+00:00"},
+        )
+
+        self.assertIn("Render аварийно прерван", message)
+        self.assertIn("OOM killer", message)
+        self.assertIn("Чанк:", message)
+        self.assertIn("Серия:", message)
+        self.assertIn("checkpoint", message)
 
     def make_workspace_temp_dir(self):
         root = Path(".test_tmp")
@@ -395,6 +420,8 @@ class TelegramBotTests(unittest.TestCase):
                     "title_ru": "Русский тайтл",
                     "current_episode": 3,
                     "total_episodes": 10,
+                    "current_chunk_index": 1,
+                    "total_chunks": 2,
                     "message": "RuntimeError('boom')",
                 }
             ],
@@ -407,6 +434,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Этап: вырезка сегментов", message)
         self.assertIn("Тайтл: Русский тайтл", message)
         self.assertIn("Серия: 3 / 10", message)
+        self.assertIn("Чанк: 1 / 2", message)
         self.assertIn("RuntimeError('boom')", message)
 
     def test_jobs_message_shows_numbering(self):

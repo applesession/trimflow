@@ -1,10 +1,12 @@
 import io
 import json
 import shutil
+import subprocess
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 from uuid import uuid4
 
 from lib import reset_test_db
@@ -14,6 +16,7 @@ from lib.runtime import (
     append_runtime_error,
     build_default_runtime_errors,
     build_default_runtime_status,
+    detect_interruption_reason,
     is_lock_stale,
     load_runtime_errors,
     load_runtime_status,
@@ -28,6 +31,7 @@ from shared.db import (
     insert_one_job,
     load_jobs as load_db_jobs,
     load_ongoing_progress,
+    recover_running_jobs,
     reset_running_jobs,
     save_jobs as save_db_jobs,
     sync_discovered_jobs,
@@ -133,6 +137,16 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(reset_running_jobs(), 1)
         self.assertEqual(load_db_jobs()[0]["_queue_status"], "pending")
 
+    def test_recover_running_jobs_returns_recovered_rows(self):
+        save_db_jobs([{"title": "A", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}])
+        job = load_db_jobs()[0]
+        self.assertTrue(claim_job(job["_queue_id"]))
+
+        recovered = recover_running_jobs()
+
+        self.assertEqual([item["title"] for item in recovered], ["A"])
+        self.assertEqual(load_db_jobs()[0]["_queue_status"], "pending")
+
     def test_pending_queue_replacement_preserves_running_job(self):
         save_db_jobs([{"title": "Active", "season": 1, "episodes_range": "001", "source": {"type": "magnet", "magnet": "m1"}}])
         active = load_db_jobs()[0]
@@ -177,6 +191,64 @@ class CronRuntimeTests(unittest.TestCase):
 
         self.assertTrue(stale)
         self.assertEqual(payload["pid"], 999999)
+
+    def test_acquire_lock_returns_recovered_stale_payload(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        lock_path = tmp_dir / "cron.lock"
+        stale_payload = {
+            "pid": 999999,
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "command": "python src/cron_run.py",
+        }
+        lock_path.write_text(json.dumps(stale_payload), encoding="utf-8")
+
+        result = acquire_lock(lock_path, "python src/cron_run.py")
+
+        self.assertTrue(result["acquired"])
+        self.assertTrue(result["recovered_stale_lock"])
+        self.assertEqual(result["stale_lock_payload"], stale_payload)
+        release_lock(lock_path)
+
+        next_result = acquire_lock(lock_path, "python src/cron_run.py")
+        self.assertFalse(next_result["recovered_stale_lock"])
+        release_lock(lock_path)
+
+    @patch("lib.runtime.subprocess.run")
+    @patch("lib.runtime.shutil.which", return_value="/usr/bin/journalctl")
+    def test_detect_interruption_reason_finds_oom_for_pid(self, mock_which, mock_run):
+        mock_run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "oom-kill:constraint=CONSTRAINT_NONE\n"
+                "Out of memory: Killed process 999999 (python) total-vm:123\n"
+            ),
+            stderr="",
+        )
+
+        result = detect_interruption_reason({
+            "pid": 999999,
+            "started_at": "2026-01-01T00:00:00+00:00",
+        })
+
+        self.assertEqual(result["source"], "kernel_journal")
+        self.assertIn("OOM killer", result["reason"])
+
+    @patch("lib.runtime.subprocess.run", side_effect=subprocess.TimeoutExpired("journalctl", 5))
+    @patch("lib.runtime.shutil.which", return_value="/usr/bin/journalctl")
+    def test_detect_interruption_reason_falls_back_on_timeout(self, mock_which, mock_run):
+        result = detect_interruption_reason({"pid": 999999})
+
+        self.assertEqual(result["source"], "fallback")
+        self.assertIn("SIGKILL", result["reason"])
+        self.assertIn("diagnostic_error", result)
+
+    @patch("lib.runtime.subprocess.run")
+    @patch("lib.runtime.shutil.which", return_value=None)
+    def test_detect_interruption_reason_falls_back_without_journal(self, mock_which, mock_run):
+        result = detect_interruption_reason({"pid": 999999})
+
+        self.assertEqual(result["source"], "fallback")
+        mock_run.assert_not_called()
 
     def test_log_line_writes_to_stdout_and_file(self):
         tmp_dir = self.make_workspace_temp_dir()
@@ -247,6 +319,8 @@ class CronRuntimeTests(unittest.TestCase):
                 "stage": "render_segments",
                 "current_episode": 4,
                 "total_episodes": 10,
+                "current_chunk_index": 1,
+                "total_chunks": 2,
             },
         )
         append_runtime_error(
@@ -263,6 +337,8 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(entry["title_ru"], "А")
         self.assertEqual(entry["current_episode"], 4)
         self.assertEqual(entry["total_episodes"], 10)
+        self.assertEqual(entry["current_chunk_index"], 1)
+        self.assertEqual(entry["total_chunks"], 2)
         self.assertEqual(entry["stage"], "render_segments")
 
     def test_update_runtime_status_merges_nested_values(self):
@@ -785,6 +861,49 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["errors"][0]["context"], "job_failed")
         self.assertEqual(payload["errors"][0]["title_ru"], "А")
 
+    @patch("scripts.cron_run.notify_best_effort")
+    @patch("scripts.cron_run.append_runtime_error")
+    @patch(
+        "scripts.cron_run.detect_interruption_reason",
+        return_value={"reason": "OOM killer завершил процесс PID 123", "source": "kernel_journal"},
+    )
+    @patch("scripts.cron_run.log_line")
+    def test_report_interrupted_render_logs_error_and_notifies(
+        self,
+        mock_log,
+        mock_detect,
+        mock_append_error,
+        mock_notify,
+    ):
+        job = {"title": "A", "title_ru": "А", "season": 1, "episodes_range": "001-024"}
+        runtime_status = {
+            "current_stage": "final_render",
+            "current_job": {
+                **job,
+                "stage": "final_render",
+                "current_chunk_index": 2,
+                "total_chunks": 2,
+                "current_episode": 18,
+                "total_episodes": 24,
+            },
+        }
+
+        cron_run.report_interrupted_render(
+            log_path=Path("cron.log"),
+            status_path=Path("status.json"),
+            errors_path=Path("errors.json"),
+            runtime_status=runtime_status,
+            recovered_jobs=[job],
+            stale_lock_payload={"pid": 123, "started_at": "2026-07-17T14:00:00+00:00"},
+        )
+
+        self.assertEqual(mock_append_error.call_args.kwargs["context"], "render_interrupted")
+        self.assertEqual(mock_append_error.call_args.kwargs["current_chunk_index"], 2)
+        notification = mock_notify.call_args.args[1]
+        self.assertIn("OOM killer", notification)
+        self.assertIn("checkpoint", notification)
+        self.assertTrue(any("render_interrupted" in str(call.args) for call in mock_log.call_args_list))
+
     def test_build_job_identity_uses_source_signature_and_range(self):
         first = build_job_identity({
             "title": "A",
@@ -801,6 +920,7 @@ class CronRuntimeTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
+    @patch("scripts.cron_run.report_interrupted_render")
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.log_line")
     @patch("scripts.cron_run.run_discovery_once", return_value={"status": "completed", "summary": {}, "jobs_added": []})
@@ -813,6 +933,7 @@ class CronRuntimeTests(unittest.TestCase):
         mock_run_discovery_once,
         mock_log_line,
         mock_release_lock,
+        mock_report_interrupted,
     ):
         tmp_dir = self.make_workspace_temp_dir()
         mock_paths.return_value = {
@@ -836,11 +957,83 @@ class CronRuntimeTests(unittest.TestCase):
         mock_log_line.assert_called()
         mock_run_discovery_once.assert_called_once()
         mock_release_lock.assert_not_called()
+        mock_report_interrupted.assert_not_called()
+
+    @patch("scripts.cron_run.release_lock")
+    @patch("scripts.cron_run.report_interrupted_render")
+    @patch("scripts.cron_run.run_jobs")
+    @patch("scripts.cron_run.recover_running_jobs")
+    @patch("scripts.cron_run.load_runtime_status")
+    @patch("scripts.cron_run.run_discovery_once")
+    @patch("scripts.cron_run.load_jobs", return_value=[])
+    @patch("scripts.cron_run.load_config", return_value={"defaults": {}})
+    @patch("scripts.cron_run.log_line")
+    @patch("scripts.cron_run.acquire_lock")
+    @patch("scripts.cron_run.ensure_runtime_paths")
+    def test_cron_reports_recovered_render_once(
+        self,
+        mock_paths,
+        mock_acquire_lock,
+        mock_log,
+        mock_config,
+        mock_jobs,
+        mock_discovery,
+        mock_runtime_status,
+        mock_recover_jobs,
+        mock_run_jobs,
+        mock_report,
+        mock_release,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        mock_paths.return_value = {
+            "runtime_dir": tmp_dir,
+            "logs_dir": tmp_dir,
+            "lock_path": tmp_dir / "cron.lock",
+            "log_path": tmp_dir / "cron.log",
+            "telegram_log_path": tmp_dir / "telegram_bot.log",
+            "status_path": tmp_dir / "runtime_status.json",
+            "errors_path": tmp_dir / "runtime_errors.json",
+        }
+        stale_payload = {"pid": 123, "started_at": "2026-07-17T14:00:00+00:00"}
+        mock_acquire_lock.side_effect = [
+            {
+                "acquired": True,
+                "already_running": False,
+                "lock_payload": {"pid": 456},
+                "recovered_stale_lock": True,
+                "stale_lock_payload": stale_payload,
+            },
+            {
+                "acquired": True,
+                "already_running": False,
+                "lock_payload": {"pid": 789},
+                "recovered_stale_lock": False,
+                "stale_lock_payload": None,
+            },
+        ]
+        job = {"title": "A", "season": 1, "episodes_range": "001-024"}
+        mock_recover_jobs.side_effect = [[job], []]
+        mock_runtime_status.return_value = {"current_stage": "final_render", "current_job": job}
+        mock_discovery.return_value = {"status": "completed", "summary": {}, "jobs_added": []}
+        mock_run_jobs.return_value = {
+            "jobs_found": 0,
+            "jobs_processed": 0,
+            "jobs_failed": 0,
+            "jobs_skipped": 0,
+            "failed_titles": [],
+        }
+
+        cron_run.main()
+        cron_run.main()
+
+        mock_report.assert_called_once()
+        self.assertEqual(mock_report.call_args.kwargs["recovered_jobs"], [job])
+        self.assertEqual(mock_report.call_args.kwargs["stale_lock_payload"], stale_payload)
 
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.send_message_to_allowed_chats")
     @patch("scripts.cron_run.run_jobs")
-    @patch("scripts.cron_run.reset_running_jobs", return_value=0)
+    @patch("scripts.cron_run.recover_running_jobs", return_value=[])
     @patch("scripts.cron_run.run_discovery_once")
     @patch("scripts.cron_run.load_jobs")
     @patch("scripts.cron_run.load_config")
@@ -855,7 +1048,7 @@ class CronRuntimeTests(unittest.TestCase):
         mock_load_config,
         mock_load_jobs,
         mock_run_discovery_once,
-        mock_reset_running_jobs,
+        mock_recover_running_jobs,
         mock_run_jobs,
         mock_send_message,
         mock_release_lock,
@@ -905,7 +1098,7 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.send_message_to_allowed_chats")
     @patch("scripts.cron_run.run_jobs")
-    @patch("scripts.cron_run.reset_running_jobs", return_value=0)
+    @patch("scripts.cron_run.recover_running_jobs", return_value=[])
     @patch("scripts.cron_run.run_discovery_once")
     @patch("scripts.cron_run.load_jobs")
     @patch("scripts.cron_run.load_config")
@@ -920,7 +1113,7 @@ class CronRuntimeTests(unittest.TestCase):
         mock_load_config,
         mock_load_jobs,
         mock_run_discovery_once,
-        mock_reset_running_jobs,
+        mock_recover_running_jobs,
         mock_run_jobs,
         mock_send_message,
         mock_release_lock,
@@ -973,7 +1166,7 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("scripts.cron_run.release_lock")
     @patch("scripts.cron_run.send_message_to_allowed_chats")
     @patch("scripts.cron_run.run_jobs")
-    @patch("scripts.cron_run.reset_running_jobs", return_value=0)
+    @patch("scripts.cron_run.recover_running_jobs", return_value=[])
     @patch("scripts.cron_run.run_discovery_once")
     @patch("scripts.cron_run.load_jobs")
     @patch("scripts.cron_run.load_config")
@@ -988,7 +1181,7 @@ class CronRuntimeTests(unittest.TestCase):
         mock_load_config,
         mock_load_jobs,
         mock_run_discovery_once,
-        mock_reset_running_jobs,
+        mock_recover_running_jobs,
         mock_run_jobs,
         mock_send_message,
         mock_release_lock,

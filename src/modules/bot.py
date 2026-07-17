@@ -395,6 +395,49 @@ def format_error_message(context, error):
     return "\n".join(lines)
 
 
+def format_render_interrupted_message(job, reason, runtime_status, lock_payload=None):
+    runtime_status = runtime_status or {}
+    current_job = runtime_status.get("current_job") or {}
+    if current_job.get("title") != job.get("title"):
+        current_job = {}
+    lock_payload = lock_payload or {}
+
+    lines = [
+        "⚠️ *Render аварийно прерван*",
+        "",
+        f"🎬 *{escape_markdown_v2(get_display_title(job))}*",
+        f"📺 Серии: {format_markdown_code(job.get('episodes_range') or '?')}",
+        f"Причина: {format_markdown_code(reason)}",
+    ]
+    if lock_payload.get("pid"):
+        lines.append(f"PID: {format_markdown_code(lock_payload['pid'])}")
+    if lock_payload.get("started_at"):
+        lines.append(f"Старт процесса: {format_markdown_code(format_datetime_ru(lock_payload['started_at']))}")
+
+    stage = current_job.get("stage") or runtime_status.get("current_stage")
+    if stage:
+        lines.append(f"Этап: {format_markdown_code(format_runtime_stage_ru(stage))}")
+    if current_job.get("current_chunk_index"):
+        lines.append(
+            "Чанк: "
+            f"{format_markdown_code(current_job['current_chunk_index'])}/"
+            f"{format_markdown_code(current_job.get('total_chunks') or '?')}"
+        )
+    if current_job.get("current_episode"):
+        lines.append(
+            "Серия: "
+            f"{format_markdown_code(current_job['current_episode'])}/"
+            f"{format_markdown_code(current_job.get('total_episodes') or '?')}"
+        )
+
+    lines.extend([
+        "",
+        "Задача возвращена в очередь",
+        "Следующий запуск продолжит с checkpoint",
+    ])
+    return "\n".join(lines)
+
+
 def format_download_timeout_message(job):
     display_title = get_display_title(job)
     episodes_range = job.get("episodes_range", "")
@@ -922,13 +965,17 @@ def format_errors_message(limit=5):
         if item.get("current_episode"):
             total = item.get("total_episodes") or "?"
             series_text = f"Серия: {item.get('current_episode')} / {total}\n"
+        chunk_text = ""
+        if item.get("current_chunk_index"):
+            total_chunks = item.get("total_chunks") or "?"
+            chunk_text = f"Чанк: {item.get('current_chunk_index')} / {total_chunks}\n"
         lines.append(
             "\n".join([
                 f"{format_datetime_ru(item.get('created_at'))}",
                 f"Контекст: {item.get('context') or 'неизвестно'}",
                 f"Этап: {format_runtime_stage_ru(item.get('stage'))}",
                 f"Тайтл: {title}",
-                series_text + f"Ошибка: {shorten_error_message(item.get('message'))}",
+                chunk_text + series_text + f"Ошибка: {shorten_error_message(item.get('message'))}",
             ])
         )
         lines.append("")

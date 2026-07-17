@@ -1,5 +1,8 @@
 import json
 import os
+import re
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -163,6 +166,9 @@ def append_runtime_error(
     episodes_range=None,
     current_episode=None,
     total_episodes=None,
+    current_chunk_index=None,
+    total_chunks=None,
+    current_chunk_episode_range=None,
     run_status=None,
     status_path=None,
     errors_path=None,
@@ -184,6 +190,13 @@ def append_runtime_error(
         "episodes_range": episodes_range if episodes_range is not None else source_job.get("episodes_range"),
         "current_episode": current_episode if current_episode is not None else current_job.get("current_episode"),
         "total_episodes": total_episodes if total_episodes is not None else current_job.get("total_episodes"),
+        "current_chunk_index": current_chunk_index if current_chunk_index is not None else current_job.get("current_chunk_index"),
+        "total_chunks": total_chunks if total_chunks is not None else current_job.get("total_chunks"),
+        "current_chunk_episode_range": (
+            current_chunk_episode_range
+            if current_chunk_episode_range is not None
+            else current_job.get("current_chunk_episode_range")
+        ),
         "message": message,
         "error_type": error_type,
     }
@@ -321,11 +334,15 @@ def is_lock_stale(lock_path):
 
 def acquire_lock(lock_path, command):
     stale, payload = is_lock_stale(lock_path)
+    recovered_stale_lock = bool(lock_path.exists() and stale)
+    stale_lock_payload = payload if recovered_stale_lock else None
     if lock_path.exists() and not stale:
         return {
             "acquired": False,
             "already_running": True,
             "lock_payload": payload,
+            "recovered_stale_lock": False,
+            "stale_lock_payload": None,
         }
 
     if lock_path.exists() and stale:
@@ -345,6 +362,8 @@ def acquire_lock(lock_path, command):
             "acquired": False,
             "already_running": True,
             "lock_payload": None,
+            "recovered_stale_lock": False,
+            "stale_lock_payload": None,
         }
     except OSError as exc:
         raise RuntimeError(f"Failed to create lock {lock_path}: {exc}") from exc
@@ -353,7 +372,62 @@ def acquire_lock(lock_path, command):
         "acquired": True,
         "already_running": False,
         "lock_payload": payload,
+        "recovered_stale_lock": recovered_stale_lock,
+        "stale_lock_payload": stale_lock_payload,
     }
+
+
+INTERRUPTION_REASON_FALLBACK = "процесс исчез; возможны SIGKILL, OOM или перезагрузка VPS"
+
+
+def detect_interruption_reason(lock_payload, timeout=5):
+    payload = lock_payload or {}
+    pid = payload.get("pid")
+    journalctl = shutil.which("journalctl")
+    if not pid or not journalctl:
+        return {
+            "reason": INTERRUPTION_REASON_FALLBACK,
+            "source": "fallback",
+        }
+
+    command = [journalctl, "-k", "--no-pager", "-o", "cat"]
+    if payload.get("started_at"):
+        command.extend(["--since", str(payload["started_at"])])
+    else:
+        command.extend(["-n", "500"])
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "reason": INTERRUPTION_REASON_FALLBACK,
+            "source": "fallback",
+            "diagnostic_error": repr(exc),
+        }
+
+    output = result.stdout or ""
+    pid_pattern = re.compile(rf"(?:killed|reaped) process\s+{re.escape(str(pid))}\b", re.IGNORECASE)
+    oom_pattern = re.compile(r"out of memory|oom-kill|oom_reaper", re.IGNORECASE)
+    if pid_pattern.search(output) and oom_pattern.search(output):
+        return {
+            "reason": f"OOM killer завершил процесс PID {pid}",
+            "source": "kernel_journal",
+        }
+
+    response = {
+        "reason": INTERRUPTION_REASON_FALLBACK,
+        "source": "fallback",
+    }
+    if result.returncode:
+        response["diagnostic_error"] = (result.stderr or f"journalctl exited with {result.returncode}").strip()
+    return response
 
 
 def release_lock(lock_path):

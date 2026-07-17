@@ -12,12 +12,14 @@ if str(SRC) not in sys.path:
 
 from discover_jobs import run_discovery_once  # noqa: E402
 from shared.config import load_config, load_jobs  # noqa: E402
-from shared.db import init_db, reset_running_jobs  # noqa: E402
+from shared.db import init_db, recover_running_jobs  # noqa: E402
 from core.runner import run_jobs  # noqa: E402
 from shared.runtime import (
     acquire_lock,
     append_runtime_error,
+    detect_interruption_reason,
     ensure_runtime_paths,
+    load_runtime_status,
     log_line,
     mark_runtime_run_finish,
     release_lock,
@@ -31,6 +33,7 @@ from modules.bot import (  # noqa: E402
     format_download_timeout_message,
     format_error_message,
     format_publish_success_message,
+    format_render_interrupted_message,
     format_vk_publish_error_message,
     format_vk_publish_success_message,
     send_message_to_allowed_chats,
@@ -45,6 +48,69 @@ def notify_best_effort(log_path, text, context, parse_mode=None, reply_markup=No
         send_message_to_allowed_chats(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception as exc:
         log_line(log_path, f"warning telegram_notify_failed context={context} error={repr(exc)}")
+
+
+def report_interrupted_render(
+    *,
+    log_path,
+    status_path,
+    errors_path,
+    runtime_status,
+    recovered_jobs,
+    stale_lock_payload=None,
+):
+    current_job = runtime_status.get("current_job") or {}
+    jobs = list(recovered_jobs or [])
+    if not jobs:
+        jobs = [current_job or {"title": "Render worker", "episodes_range": "?"}]
+
+    diagnostic = detect_interruption_reason(stale_lock_payload)
+    reason = diagnostic["reason"]
+    if diagnostic.get("diagnostic_error"):
+        log_line(
+            log_path,
+            "warning interruption_diagnostics_unavailable "
+            f"error={diagnostic['diagnostic_error']}",
+        )
+
+    for job in jobs:
+        progress = current_job if current_job.get("title") == job.get("title") else {}
+        log_line(
+            log_path,
+            "render_interrupted " + json.dumps({
+                "title": job.get("title"),
+                "pid": (stale_lock_payload or {}).get("pid"),
+                "stage": progress.get("stage") or runtime_status.get("current_stage"),
+                "chunk": progress.get("current_chunk_index"),
+                "episode": progress.get("current_episode"),
+                "reason": reason,
+                "reason_source": diagnostic.get("source"),
+            }, ensure_ascii=False),
+        )
+        append_runtime_error(
+            context="render_interrupted",
+            message=reason,
+            error_type="ProcessInterrupted",
+            stage=progress.get("stage") or runtime_status.get("current_stage") or "recovery",
+            title=job.get("title"),
+            title_ru=job.get("title_ru"),
+            season=job.get("season"),
+            episodes_range=job.get("episodes_range"),
+            current_episode=progress.get("current_episode"),
+            total_episodes=progress.get("total_episodes"),
+            current_chunk_index=progress.get("current_chunk_index"),
+            total_chunks=progress.get("total_chunks"),
+            current_chunk_episode_range=progress.get("current_chunk_episode_range"),
+            run_status="failed",
+            status_path=status_path,
+            errors_path=errors_path,
+        )
+        notify_best_effort(
+            log_path,
+            format_render_interrupted_message(job, reason, runtime_status, stale_lock_payload),
+            f"render_interrupted:{job.get('title')}",
+            parse_mode="MarkdownV2",
+        )
 
 
 def main():
@@ -101,9 +167,19 @@ def main():
         return 0
 
     try:
-        recovered_jobs = reset_running_jobs()
+        previous_runtime_status = load_runtime_status(status_path)
+        recovered_jobs = recover_running_jobs()
         if recovered_jobs:
-            log_line(log_path, f"recovered_stale_jobs count={recovered_jobs}")
+            log_line(log_path, f"recovered_stale_jobs count={len(recovered_jobs)}")
+        if lock_result.get("recovered_stale_lock") or recovered_jobs:
+            report_interrupted_render(
+                log_path=log_path,
+                status_path=status_path,
+                errors_path=errors_path,
+                runtime_status=previous_runtime_status,
+                recovered_jobs=recovered_jobs,
+                stale_lock_payload=lock_result.get("stale_lock_payload"),
+            )
         log_line(log_path, "start render")
         update_runtime_status(
             status_path,
