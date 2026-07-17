@@ -14,7 +14,7 @@ class PipelineCleanupTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         return temp_dir
 
-    def test_cleanup_removes_downloads_and_temp_even_on_failure(self):
+    def test_cleanup_preserves_downloads_after_render_failure(self):
         tmp_dir = self.make_workspace_temp_dir()
         download_dir = tmp_dir / "downloads" / "title"
         temp_dir = tmp_dir / "temp" / "title"
@@ -29,11 +29,30 @@ class PipelineCleanupTests(unittest.TestCase):
             download_dir=download_dir,
             temp_dir=temp_dir,
             job_output_dir=output_dir,
-            success=False,
+            render_completed=False,
+            job_completed=False,
+        )
+
+        self.assertTrue(download_dir.exists())
+        self.assertFalse(temp_dir.exists())
+        self.assertTrue(output_dir.exists())
+
+    def test_cleanup_removes_downloads_but_keeps_output_after_delivery_failure(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        download_dir = tmp_dir / "downloads" / "title"
+        output_dir = tmp_dir / "output" / "title"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        cleanup_job_artifacts(
+            {"downloads": True, "temp": True, "output": True},
+            download_dir=download_dir,
+            job_output_dir=output_dir,
+            render_completed=True,
+            job_completed=False,
         )
 
         self.assertFalse(download_dir.exists())
-        self.assertFalse(temp_dir.exists())
         self.assertTrue(output_dir.exists())
 
     def test_cleanup_can_remove_output_after_success(self):
@@ -44,7 +63,8 @@ class PipelineCleanupTests(unittest.TestCase):
         cleanup_job_artifacts(
             {"downloads": True, "temp": True, "output": True},
             job_output_dir=output_dir,
-            success=True,
+            render_completed=True,
+            job_completed=True,
         )
 
         self.assertFalse(output_dir.exists())

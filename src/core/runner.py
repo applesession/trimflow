@@ -11,7 +11,7 @@ from shared.config import (
 )
 from modules.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
 from shared.db import claim_job, remove_completed_job as _db_remove_completed_job, return_job_to_pending
-from core.pipeline import process_job
+from core.pipeline import is_job_completed, process_job
 from shared.runtime import (
     append_runtime_error,
     load_runtime_status,
@@ -55,18 +55,6 @@ def remove_job_from_queue(jobs, completed_job):
             continue
         remaining.append(job)
     return remaining, removed
-
-
-def is_job_completed(job_result):
-    delivery_summary = job_result.get("delivery_summary", {})
-    vk_summary = delivery_summary.get("vk", {})
-    s3_summary = delivery_summary.get("s3", {})
-
-    if vk_summary.get("enabled"):
-        return bool(vk_summary.get("video_uploaded"))
-    if s3_summary.get("enabled"):
-        return bool(s3_summary.get("uploaded"))
-    return bool(job_result.get("output_video"))
 
 
 def build_completed_job_entry(job, job_result):

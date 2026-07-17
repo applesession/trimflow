@@ -1,10 +1,19 @@
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lib.pipeline import process_episode, process_job, split_episode_infos_into_chunks
+from lib.pipeline import (
+    build_delivery_config,
+    build_output_artifacts,
+    deliver_rendered_output,
+    load_render_checkpoint,
+    process_episode,
+    process_job,
+    split_episode_infos_into_chunks,
+)
 
 
 class PipelineChunkingTests(unittest.TestCase):
@@ -56,6 +65,123 @@ class PipelineChunkingTests(unittest.TestCase):
         chunks = split_episode_infos_into_chunks(episode_infos, 2)
 
         self.assertEqual([[item["episode"] for item in chunk] for chunk in chunks], [[1, 2], [3, 4], [5]])
+
+    @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
+    def test_load_render_checkpoint_requires_matching_complete_manifest(self, mock_duration):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir)
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        artifacts["job_output_dir"].mkdir(parents=True)
+        artifacts["output_video"].write_bytes(b"video")
+        artifacts["output_txt"].write_text("00:00:00 - 1 серия\n", encoding="utf-8")
+        artifacts["output_manifest"].write_text(json.dumps({
+            "render_complete": True,
+            "title": job["title"],
+            "season": "01",
+            "episodes_range": job["episodes_range"],
+            "output_video": artifacts["output_video"].name,
+            "output_timestamps": artifacts["output_txt"].name,
+        }), encoding="utf-8")
+
+        self.assertIsNotNone(load_render_checkpoint(job, artifacts))
+
+        legacy_manifest = json.loads(artifacts["output_manifest"].read_text(encoding="utf-8"))
+        legacy_manifest.pop("render_complete")
+        artifacts["output_manifest"].write_text(json.dumps(legacy_manifest), encoding="utf-8")
+        self.assertIsNone(load_render_checkpoint(job, artifacts))
+
+        legacy_manifest["render_complete"] = True
+        artifacts["output_manifest"].write_text(json.dumps(legacy_manifest), encoding="utf-8")
+        job["episodes_range"] = "001-004"
+        self.assertIsNone(load_render_checkpoint(job, artifacts))
+
+    @patch("lib.pipeline.get_preferred_audio_stream", return_value=0)
+    @patch("lib.pipeline.render_final", side_effect=RuntimeError("ffmpeg failed"))
+    @patch("lib.pipeline.filter_episode_files")
+    @patch("lib.pipeline.collect_episode_files")
+    @patch("lib.pipeline.reset_temp_dir")
+    def test_render_failure_preserves_downloads_without_checkpoint(
+        self,
+        mock_reset_temp_dir,
+        mock_collect_episode_files,
+        mock_filter_episode_files,
+        mock_render_final,
+        mock_audio_stream,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir, episodes_range="010")
+        job["processing_mode"] = "single_episode"
+        job["cleanup"] = {"downloads": True, "temp": True, "output": True}
+        download_dir = tmp_dir / "downloads" / "Chunk_Test"
+        temp_dir = tmp_dir / "temp" / "Chunk_Test"
+        download_dir.mkdir(parents=True)
+        temp_dir.mkdir(parents=True)
+        episode_files = [(10, Path("/tmp/ep10.mkv"))]
+        mock_reset_temp_dir.return_value = temp_dir
+        mock_collect_episode_files.return_value = (download_dir, episode_files, [])
+        mock_filter_episode_files.return_value = (episode_files, [])
+
+        with self.assertRaisesRegex(RuntimeError, "ffmpeg failed"):
+            process_job(job)
+
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        self.assertTrue(download_dir.exists())
+        self.assertFalse(temp_dir.exists())
+        self.assertFalse(artifacts["output_manifest"].exists())
+
+    @patch("lib.pipeline.render_final")
+    @patch("lib.pipeline.collect_episode_files")
+    @patch("lib.pipeline.deliver_to_vk")
+    @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
+    def test_retry_uses_render_checkpoint_and_only_retries_delivery(
+        self,
+        mock_duration,
+        mock_deliver_to_vk,
+        mock_collect_episode_files,
+        mock_render_final,
+    ):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir)
+        job["delivery"] = {"s3_enabled": False, "vk_enabled": True, "vk_preview_enabled": False}
+        job["cleanup"]["output"] = True
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        artifacts["job_output_dir"].mkdir(parents=True)
+        artifacts["output_video"].write_bytes(b"video")
+        timestamps = ["00:00:00 - 1 серия"]
+        manifest = {
+            "render_complete": True,
+            "title": job["title"],
+            "season": "01",
+            "episodes_range": job["episodes_range"],
+            "episodes_count": 3,
+            "output_video": artifacts["output_video"].name,
+            "output_timestamps": artifacts["output_txt"].name,
+            "quality_summary": {},
+        }
+        mock_deliver_to_vk.side_effect = RuntimeError("vk down")
+        first = deliver_rendered_output(
+            job,
+            build_delivery_config(job),
+            output_video=artifacts["output_video"],
+            output_txt=artifacts["output_txt"],
+            output_manifest=artifacts["output_manifest"],
+            manifest=manifest,
+            timestamps=timestamps,
+            pretty_base_name=artifacts["pretty_base_name"],
+            temp_dir=tmp_dir / "temp",
+            total_episodes=3,
+        )
+        self.assertFalse(first["delivery_summary"]["vk"]["video_uploaded"])
+        self.assertTrue(artifacts["output_video"].exists())
+
+        mock_deliver_to_vk.side_effect = None
+        mock_deliver_to_vk.return_value = {"video_uploaded": True, "post_created": True}
+        result = process_job(job)
+
+        self.assertTrue(result["delivery_summary"]["vk"]["video_uploaded"])
+        mock_collect_episode_files.assert_not_called()
+        mock_render_final.assert_not_called()
+        self.assertFalse(artifacts["output_video"].exists())
 
     @patch("lib.pipeline.cleanup_job_artifacts")
     @patch("lib.pipeline.write_outputs")
