@@ -17,6 +17,7 @@ from shared.db import (
 )
 from lib.telegram_bot import (
     add_job_from_command,
+    add_upscale_job_from_command,
     build_main_keyboard,
     build_notification_details_payload,
     build_notification_details_reply_markup,
@@ -42,6 +43,7 @@ from lib.telegram_bot import (
     load_telegram_state,
     normalize_command_text,
     parse_add_command,
+    parse_add4k_command,
     save_telegram_state,
     send_message_to_allowed_chats,
     get_telegram_proxy_url,
@@ -104,6 +106,21 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(payload["episodes_range"], "001-003")
         self.assertEqual(payload["magnet"], "magnet:?xt=urn:btih:testhash")
         self.assertEqual(payload["season"], 2)
+
+    def test_add4k_command_builds_direct_donut_job(self):
+        payload = parse_add4k_command(
+            "/add4k Test Title ; 25 ; magnet:?xt=urn:btih:testhash ; 2",
+        )
+        result = add_upscale_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            "/add4k Test Title ; 25 ; magnet:?xt=urn:btih:testhash ; 2",
+        )
+
+        self.assertEqual(payload["episodes_range"], "001-025")
+        self.assertTrue(result["added"])
+        self.assertEqual(result["job"]["processing_mode"], "upscale_4k")
+        self.assertTrue(result["job"]["delivery"]["vk_direct_donut"])
+        self.assertEqual(result["job"]["delivery"]["vk_privacy_view"], 5)
 
     def test_allowed_chat_filter_uses_whitelist(self):
         allowed = {"123", "456"}

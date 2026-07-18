@@ -733,6 +733,10 @@ def format_runtime_stage_ru(stage):
         "delivery_s3": "сохранение манифеста",
         "delivery_vk": "публикация в VK",
         "job_done": "аниме готово",
+        "upscale_download": "загрузка исходников 4K",
+        "upscale_render": "4K upscale",
+        "upscale_delivery_vk": "публикация 4K в VK",
+        "upscale_failed": "ошибка 4K-worker",
     }
     return mapping.get(stage, stage or "неизвестно")
 
@@ -949,6 +953,32 @@ def format_current_message():
     ])
 
 
+def format_upscale_message():
+    status_path = ensure_runtime_paths()["runtime_dir"] / "upscale_status.json"
+    runtime_status = load_runtime_status(status_path)
+    current_job = runtime_status.get("current_job") or {}
+    last_run = runtime_status.get("last_run") or {}
+    if runtime_status.get("run_status") == "running" and current_job:
+        return "\n".join([
+            "Текущий 4K upscale",
+            "",
+            f"Тайтл: {get_display_title(current_job)}",
+            f"Сезон: {current_job.get('season', '?')}",
+            f"Серия: {current_job.get('current_episode') or 'подготовка'} / {current_job.get('total_episodes') or '?'}",
+            f"Этап: {format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage'))}",
+            f"Старт: {format_datetime_ru(current_job.get('started_at') or runtime_status.get('run_started_at'))}",
+        ])
+    if last_run:
+        return "\n".join([
+            "4K-worker сейчас свободен",
+            "",
+            f"Последний тайтл: {get_display_title(last_run)}",
+            f"Статус: {'успешно' if last_run.get('status') == 'completed' else 'с ошибкой'}",
+            f"Последняя серия: {last_run.get('current_episode') or '?'} / {last_run.get('total_episodes') or '?'}",
+        ])
+    return "4K-worker сейчас свободен\nИстория запусков пока пуста"
+
+
 def format_errors_message(limit=5):
     runtime_errors = load_runtime_errors()
     items = list(runtime_errors.get("errors", []))[: int(limit)]
@@ -1033,7 +1063,8 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True):
     for index, job in enumerate(page_data["jobs"], start=page_data["start_index"] + 1):
         prefix = f"{index}. " if numbered else "- "
         ongoing_marker = " [ongoing]" if (job.get("automation") or {}).get("is_ongoing") else ""
-        lines.append(f"{prefix}{get_display_title(job)}{ongoing_marker}")
+        upscale_marker = " [4K]" if job.get("processing_mode") == "upscale_4k" else ""
+        lines.append(f"{prefix}{get_display_title(job)}{ongoing_marker}{upscale_marker}")
         lines.append(f"  Сезон: {job.get('season', 1)}")
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
@@ -1073,9 +1104,10 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
         eps = job.get("episodes_range", "?")
         is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
         eps_label = "серия" if is_single else "серии"
+        mode_label = " · `4K`" if job.get("processing_mode") == "upscale_4k" else ""
         return [
             f"*{index}\\. {title}*",
-            f"└ {season} · {eps_label} `{eps}`",
+            f"└ {season} · {eps_label} `{eps}`{mode_label}",
         ]
 
     title_word = "тайтл" if total == 1 else ("тайтла" if 2 <= total <= 4 else "тайтлов")
@@ -1733,6 +1765,44 @@ def parse_add_command(text):
     }
 
 
+def parse_add4k_command(text):
+    if not text.startswith("/add4k "):
+        raise RuntimeError("Команда должна начинаться с /add4k")
+
+    parts = [part.strip() for part in re.split(r"\s*;\s*", text[len("/add4k "):])]
+    if len(parts) not in {3, 4}:
+        raise RuntimeError("Формат: /add4k Название ; количество серий ; magnet:?xt=... ; сезон")
+
+    title, episode_count_or_range, magnet = parts[:3]
+    season = parts[3] if len(parts) == 4 else "1"
+    if not title:
+        raise RuntimeError("Нужно указать название тайтла")
+    if not magnet.startswith("magnet:?"):
+        raise RuntimeError("Magnet-ссылка должна начинаться с magnet:?")
+
+    if episode_count_or_range.isdigit():
+        episode_count = int(episode_count_or_range)
+        if episode_count < 1:
+            raise RuntimeError("Количество серий должно быть не меньше 1")
+        episodes_range = "001" if episode_count == 1 else f"001-{episode_count:03d}"
+    else:
+        episodes_range = format_episodes_range(parse_episodes_range(episode_count_or_range))
+
+    try:
+        season_value = int(season)
+    except ValueError as exc:
+        raise RuntimeError("Сезон должен быть целым числом") from exc
+    if season_value < 1:
+        raise RuntimeError("Сезон должен быть не меньше 1")
+
+    return {
+        "title": title,
+        "season": season_value,
+        "episodes_range": episodes_range,
+        "magnet": magnet,
+    }
+
+
 def build_manual_job(command_payload):
     title = command_payload["title"]
     slug = ensure_non_empty_slug(title)
@@ -1772,6 +1842,64 @@ def add_job_from_command(config, text):
     }
 
 
+def build_upscale_job(command_payload):
+    title = command_payload["title"]
+    slug = ensure_non_empty_slug(title)
+    return {
+        "title": title,
+        "season": command_payload["season"],
+        "episodes_range": command_payload["episodes_range"],
+        "processing_mode": "upscale_4k",
+        "source": {
+            "type": "magnet",
+            "magnet": command_payload["magnet"],
+            "download_dir": f"upscale_downloads/{slug}",
+        },
+        "output_dir": "./upscale_output",
+        "delivery": {
+            "s3_enabled": False,
+            "vk_enabled": True,
+            "vk_wall_post_enabled": True,
+            "vk_comment_enabled": False,
+            "vk_privacy_view": 5,
+            "vk_direct_donut": True,
+            "vk_preview_enabled": False,
+        },
+        "cleanup": {
+            "downloads": True,
+            "output": True,
+        },
+    }
+
+
+def add_upscale_job_from_command(config, text):
+    candidate_job = build_upscale_job(parse_add4k_command(text))
+    if find_matching_job(load_jobs(config), candidate_job) is not None:
+        return {"added": False, "job": candidate_job, "reason": "duplicate_job"}
+    insert_one_job(candidate_job)
+    return {"added": True, "job": candidate_job, "reason": None}
+
+
+def format_add4k_result(result):
+    job = result["job"]
+    if not result["added"]:
+        return "\n".join([
+            "4K-аниме не добавлено",
+            "",
+            f"Причина: {format_reason_ru(result['reason'])}",
+            f"Тайтл: {get_display_title(job)}",
+        ])
+    return "\n".join([
+        "4K-аниме добавлено",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+        f"Сезон: {job['season']}",
+        f"Эпизоды: {job['episodes_range']}",
+        "Режим: 1080p → 4K, без вырезов и watermark",
+        "VK доступ: только Donut",
+    ])
+
+
 def format_add_result(result):
     job = result["job"]
     if not result["added"]:
@@ -1803,6 +1931,7 @@ def build_help_message():
         "/start - краткая справка",
         "/status - статус очереди и runtime",
         "/current - текущее или последнее выполнение",
+        "/upscale - состояние 4K-worker",
         "/jobs - показать аниме в очереди (с приоритетом выполнения)",
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
@@ -1817,6 +1946,7 @@ def build_help_message():
         "",
         "Пример:",
         "/add Название тайтла ; Серия (001-012) ; magnet-ссылка ; сезон (1/2/3) ; тип приватности (0 - для всех; 5 - для донов)",
+        "/add4k Название тайтла ; количество серий ; magnet-ссылка ; сезон",
     ])
 
 
@@ -1830,6 +1960,8 @@ def handle_command(config, text):
         return format_status_message(config)
     if text.startswith("/current"):
         return format_current_message()
+    if text.startswith("/upscale"):
+        return format_upscale_message()
     if text.startswith("/errors"):
         return format_errors_message()
     if text.startswith("/log"):
@@ -1911,6 +2043,8 @@ def handle_command(config, text):
                 candidate["job"],
             ),
         }
+    if text.startswith("/add4k "):
+        return format_add4k_result(add_upscale_job_from_command(config, text))
     if text.startswith("/add "):
         return format_add_result(add_job_from_command(config, text))
     return "Неизвестная команда. Напиши /help"

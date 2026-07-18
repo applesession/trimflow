@@ -168,7 +168,7 @@ def main():
 
     try:
         previous_runtime_status = load_runtime_status(status_path)
-        recovered_jobs = recover_running_jobs()
+        recovered_jobs = recover_running_jobs(exclude_processing_modes={"upscale_4k"})
         if recovered_jobs:
             log_line(log_path, f"recovered_stale_jobs count={len(recovered_jobs)}")
         if lock_result.get("recovered_stale_lock") or recovered_jobs:
@@ -197,7 +197,7 @@ def main():
         )
 
         config = load_config()
-        jobs = load_jobs(config, status="pending")
+        jobs = load_jobs(config, status="pending", exclude_processing_modes={"upscale_4k"})
 
         update_runtime_status(status_path, current_stage="processing", queue_progress={"total_jobs": len(jobs)})
         processing_summary = run_jobs(
@@ -238,6 +238,7 @@ def main():
                 f"job_failed:{job.get('title')}",
                 parse_mode="MarkdownV2",
             ),
+            exclude_processing_modes={"upscale_4k"},
         )
 
         log_line(

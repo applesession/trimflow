@@ -14,3 +14,5 @@ config.json
 data.db
 data.db-shm
 data.db-wal
+upscale_downloads/
+upscale_output/

@@ -342,13 +342,23 @@ def _job_to_row(job):
     )
 
 
-def load_jobs(status=None):
+def load_jobs(status=None, processing_mode=None, exclude_processing_modes=None):
     """Replaces JSON load_jobs — reads from SQLite."""
     conn = _get_conn()
-    if status is None:
-        rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM jobs WHERE status = ? ORDER BY id", (status,)).fetchall()
+    clauses = []
+    params = []
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if processing_mode is not None:
+        clauses.append("processing_mode = ?")
+        params.append(str(processing_mode).strip().lower())
+    excluded = [str(value).strip().lower() for value in (exclude_processing_modes or []) if str(value).strip()]
+    if excluded:
+        clauses.append(f"processing_mode NOT IN ({','.join('?' for _ in excluded)})")
+        params.extend(excluded)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(f"SELECT * FROM jobs{where} ORDER BY id", params).fetchall()
     conn.close()
     return [_job_from_row(r) for r in rows]
 
@@ -495,14 +505,24 @@ def return_job_to_pending(queue_id):
     conn.close()
 
 
-def recover_running_jobs():
+def recover_running_jobs(processing_mode=None, exclude_processing_modes=None):
     conn = _get_conn()
+    clauses = ["status = 'running'"]
+    params = []
+    if processing_mode is not None:
+        clauses.append("processing_mode = ?")
+        params.append(str(processing_mode).strip().lower())
+    excluded = [str(value).strip().lower() for value in (exclude_processing_modes or []) if str(value).strip()]
+    if excluded:
+        clauses.append(f"processing_mode NOT IN ({','.join('?' for _ in excluded)})")
+        params.extend(excluded)
+    where = " AND ".join(clauses)
     with _write_lock:
         conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute("SELECT * FROM jobs WHERE status = 'running' ORDER BY id").fetchall()
+        rows = conn.execute(f"SELECT * FROM jobs WHERE {where} ORDER BY id", params).fetchall()
         conn.execute(
-            "UPDATE jobs SET status = 'pending', updated_at = ? WHERE status = 'running'",
-            (_utc_now_iso(),),
+            f"UPDATE jobs SET status = 'pending', updated_at = ? WHERE {where}",
+            [_utc_now_iso(), *params],
         )
         conn.commit()
     conn.close()

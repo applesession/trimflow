@@ -18,6 +18,7 @@ src/
 ├── core/            # Бизнес-логика (pipeline, media, detector, discovery, runner)
 ├── modules/         # Фичи (autojobs discovery, telegram bot logic)
 ├── cron_run.py      # Cron: discovery → render-lock → processing → TG уведомления
+├── upscale_run.py   # Независимый worker: серия → Video2X 4K → VK Donut
 ├── discover_jobs.py # Автономный discovery
 └── telegram_bot.py  # Long-polling бот
 main.py              # Точка входа: ручной запуск
@@ -60,7 +61,7 @@ pip install -r requirements.txt
 - `VK_ACCESS_TOKEN`
 - `VK_PUBLIC_GROUP_ID`
 - `VK_PRIVATE_GROUP_ID` — обязателен для приватных/donut-релизов с `vk_privacy_view = 5`
-- `VK_DONUT_LEVEL_ID` — нужен только если используется `video.save` с `vk_privacy_view = 5`
+- `VK_DONUT_LEVEL_ID` — обязателен для прямой загрузки 4K-видео Donut в основной паблик
 - `VK_API_VERSION`
 - `TELEGRAM_BOT_TOKEN` — токен бота для уведомлений и команд
 - `TELEGRAM_ALLOWED_CHAT_IDS` — список разрешённых `chat_id` через запятую
@@ -184,6 +185,14 @@ Runtime-файлы:
 */5 * * * * cd /path/to/workspace-gojo-satoru && python src/cron_run.py
 ```
 
+4K-worker использует отдельный lock и запускается параллельно:
+
+```bash
+*/5 * * * * cd /path/to/workspace-gojo-satoru && python src/upscale_run.py
+```
+
+Его runtime-файлы: `.runtime/upscale.lock`, `.runtime/upscale_status.json`, `.runtime/upscale_errors.json`, `logs/upscale.log`.
+
 ## Telegram Bot
 
 ```bash
@@ -200,8 +209,10 @@ python src/telegram_bot.py
 - `/start` — краткая справка
 - `/help` — формат команд
 - `/status` — lock, количество job'ов, время последнего discovery
+- `/upscale` — состояние 4K-worker
 - `/jobs` — последние job'ы из очереди
-- `/add Название : 001-003 : magnet:?xt=... : 2` — ручное добавление job
+- `/add Название ; 001-003 ; magnet:?xt=... ; 2` — обычный render
+- `/add4k Название ; 25 ; magnet:?xt=... ; 2` — серии `001-025` в 4K для Donut
 
 Замечания:
 - бот использует `long polling`, не webhook;
@@ -221,6 +232,8 @@ python src/telegram_bot.py
 VK-доставка теперь поддерживает два сценария:
 - публичные релизы — видео + пост в основном паблике;
 - приватные/donut-релизы (`vk_privacy_view = 5`) — видео в приватном паблике, donut-пост со ссылкой в основном паблике.
+
+4K job не использует OP/ED detector и watermark. Video2X обрабатывает исходные серии по одной через `realesr-animevideov3`, сохраняет FPS/audio/subtitles и загружает видео напрямую в основной паблик с Donut-доступом. `upscale_manifest.json` позволяет после ошибки повторить только незавершённый render или VK delivery.
 
 ## Примечания
 

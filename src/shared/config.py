@@ -53,8 +53,12 @@ def build_default_state():
     }
 
 
-def load_jobs(config, status=None):
-    return _db_load_jobs(status=status)
+def load_jobs(config, status=None, processing_mode=None, exclude_processing_modes=None):
+    return _db_load_jobs(
+        status=status,
+        processing_mode=processing_mode,
+        exclude_processing_modes=exclude_processing_modes,
+    )
 
 
 def load_state(config):

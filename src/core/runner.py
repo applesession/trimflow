@@ -144,6 +144,7 @@ def run_jobs(
     log=None,
     on_job_success=None,
     on_job_failure=None,
+    exclude_processing_modes=None,
 ):
     log = log or print
     active_jobs = list(jobs or [])
@@ -185,7 +186,11 @@ def run_jobs(
         if dynamic_queue:
             pending_jobs = [
                 job
-                for job in load_jobs(config, status="pending")
+                for job in load_jobs(
+                    config,
+                    status="pending",
+                    exclude_processing_modes=exclude_processing_modes,
+                )
                 if job.get("_queue_id") not in attempted_queue_ids
             ]
             seen_queue_ids.update(job.get("_queue_id") for job in pending_jobs)

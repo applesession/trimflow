@@ -71,6 +71,10 @@
       "audio_codec": "aac"
     }
   },
+  "upscale": {
+    "video2x_path": "~/tools/video2x/6.4.0/Video2X-x86_64.AppImage",
+    "appimage_extract_and_run": true
+  },
   "automation": {
     "enabled": true,
     "provider": "aniliberty",
