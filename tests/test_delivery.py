@@ -13,7 +13,12 @@ from lib.helpers import (
     sanitize_filename,
 )
 from lib.pipeline import build_compact_manifest, build_delivery_config
-from lib.vk import create_wall_comment, publish_private_video_link_to_vk, publish_video_to_vk
+from lib.vk import (
+    create_wall_comment,
+    publish_private_video_link_to_vk,
+    publish_video_to_vk,
+    upload_video_file,
+)
 
 
 class DeliveryTests(unittest.TestCase):
@@ -24,6 +29,35 @@ class DeliveryTests(unittest.TestCase):
         temp_dir.mkdir(parents=True, exist_ok=True)
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         return temp_dir
+
+    @patch("lib.vk.requests.post")
+    def test_upload_video_file_streams_multipart(self, mock_post):
+        tmp_dir = self.make_workspace_temp_dir()
+        video_path = tmp_dir / "test.mkv"
+        video_path.write_bytes(b"video")
+        mock_post.return_value.json.return_value = {"ok": 1}
+
+        result = upload_video_file("https://upload.vk.test", video_path)
+
+        kwargs = mock_post.call_args.kwargs
+        self.assertNotIn("files", kwargs)
+        self.assertNotIsInstance(kwargs["data"], bytes)
+        self.assertEqual(kwargs["data"].fields["video_file"][0], "test.mkv")
+        self.assertEqual(kwargs["data"].fields["video_file"][2], "video/x-matroska")
+        self.assertTrue(kwargs["headers"]["Content-Type"].startswith("multipart/form-data; boundary="))
+        self.assertEqual(kwargs["timeout"], 3600)
+        self.assertEqual(result, {"ok": 1})
+        mock_post.return_value.raise_for_status.assert_called_once_with()
+
+    @patch("lib.vk.requests.post")
+    def test_upload_video_file_propagates_http_error(self, mock_post):
+        tmp_dir = self.make_workspace_temp_dir()
+        video_path = tmp_dir / "test.mkv"
+        video_path.write_bytes(b"video")
+        mock_post.return_value.raise_for_status.side_effect = RuntimeError("upload failed")
+
+        with self.assertRaisesRegex(RuntimeError, "upload failed"):
+            upload_video_file("https://upload.vk.test", video_path)
 
     def test_build_compilation_display_name_prefers_title_ru(self):
         result = build_compilation_display_name(

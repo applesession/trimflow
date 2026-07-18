@@ -107,8 +107,24 @@ def request_video_upload(title, description, privacy_view=0, *, group_id=None):
 
 
 def upload_video_file(upload_url, local_path):
-    with open(local_path, "rb") as file:
-        response = requests.post(upload_url, files={"video_file": file}, timeout=3600)
+    try:
+        from requests_toolbelt import MultipartEncoder
+    except ImportError as exc:
+        raise RuntimeError(
+            "requests-toolbelt is not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+    local_path = Path(local_path)
+    with local_path.open("rb") as file:
+        encoder = MultipartEncoder(
+            fields={"video_file": (local_path.name, file, "video/x-matroska")}
+        )
+        response = requests.post(
+            upload_url,
+            data=encoder,
+            headers={"Content-Type": encoder.content_type},
+            timeout=3600,
+        )
     response.raise_for_status()
     return response.json()
 

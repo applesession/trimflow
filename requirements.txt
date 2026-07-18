@@ -1,4 +1,5 @@
 requests
+requests-toolbelt
 PySocks
 python-dotenv
 boto3
