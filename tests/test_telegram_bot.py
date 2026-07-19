@@ -10,6 +10,7 @@ from lib import reset_test_db
 from lib.config import load_completed_jobs, load_jobs, save_completed_jobs, save_jobs, save_state
 from shared.db import (
     add_to_blacklist,
+    claim_job,
     get_discovery_blacklist,
     get_episode_tracking_dicts,
     mark_episodes_completed,
@@ -632,6 +633,29 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(load_jobs(config), [])
         queued, _ = get_episode_tracking_dicts()
         self.assertEqual(queued, {})
+
+    @patch("lib.telegram_bot.send_message")
+    @patch("lib.telegram_bot.is_allowed_chat", return_value=True)
+    def test_remove_deletes_running_job(self, _mock_allowed, mock_send_message):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        save_jobs(config, [{"title": "Active", "season": 1, "episodes_range": "001"}])
+        job = load_jobs(config)[0]
+        self.assertTrue(claim_job(job["_queue_id"]))
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            handle_update(config, {
+                "update_id": 1,
+                "message": {"chat": {"id": 123}, "text": "/remove 1"},
+            })
+            handle_update(config, {
+                "update_id": 2,
+                "message": {"chat": {"id": 123}, "text": "Подтвердить удаление"},
+            })
+
+        self.assertEqual(load_jobs(config), [])
+        self.assertIn("Активная обработка останавливается", mock_send_message.call_args.args[1])
 
     @patch("lib.telegram_bot.send_message")
     @patch("lib.telegram_bot.is_allowed_chat", return_value=True)

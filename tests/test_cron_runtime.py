@@ -2,6 +2,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -31,11 +32,13 @@ from shared.db import (
     insert_one_job,
     load_jobs as load_db_jobs,
     load_ongoing_progress,
+    remove_job,
     recover_running_jobs,
     reset_running_jobs,
     save_jobs as save_db_jobs,
     sync_discovered_jobs,
 )
+from shared.helpers import JobCancelled, cancellation_scope, raise_if_cancelled, run
 
 
 class CronRuntimeTests(unittest.TestCase):
@@ -107,6 +110,36 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(summary["jobs_failed"], 1)
         remaining = load_db_jobs()
         self.assertEqual([(job["title"], job["_queue_status"]) for job in remaining], [("Fails", "pending")])
+
+    @patch("lib.runner.cleanup_cancelled_job_artifacts")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    @patch("lib.runner.process_job")
+    def test_running_job_removed_from_queue_is_cancelled(
+        self, mock_process_job, _env, _tools, _files, mock_cleanup,
+    ):
+        save_db_jobs([{
+            "title": "Cancel me", "season": 1, "episodes_range": "001",
+            "source": {"type": "magnet", "magnet": "cancel"},
+        }])
+
+        def cancel(job, runtime_status_path=None):
+            self.assertTrue(remove_job(job))
+            raise_if_cancelled()
+
+        mock_process_job.side_effect = cancel
+        summary = run_jobs({"defaults": {}}, load_db_jobs(status="pending"))
+
+        self.assertEqual(summary["jobs_cancelled"], 1)
+        self.assertEqual(summary["jobs_failed"], 0)
+        self.assertEqual(load_db_jobs(), [])
+        mock_cleanup.assert_called_once()
+
+    def test_cancellation_stops_active_subprocess(self):
+        with cancellation_scope(lambda: True):
+            with self.assertRaises(JobCancelled):
+                run([sys.executable, "-c", "import time; time.sleep(30)"])
 
     def test_discovery_sync_never_changes_running_row(self):
         original = {

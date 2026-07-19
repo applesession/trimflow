@@ -3,6 +3,8 @@ import os
 import boto3
 from botocore.config import Config
 
+from shared.helpers import raise_if_cancelled
+
 
 def upload_file_to_s3(local_path, s3_key):
     s3 = boto3.client(
@@ -21,4 +23,4 @@ def upload_file_to_s3(local_path, s3_key):
     bucket = os.getenv("S3_BUCKET_NAME")
 
     print(f"[S3 UPLOAD] {local_path} -> s3://{bucket}/{s3_key}")
-    s3.upload_file(str(local_path), bucket, s3_key)
+    s3.upload_file(str(local_path), bucket, s3_key, Callback=lambda _bytes: raise_if_cancelled())

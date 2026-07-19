@@ -1,6 +1,64 @@
 import re
+import os
+import signal
 import subprocess
+import time
+from contextlib import contextmanager
 from pathlib import Path
+
+
+class JobCancelled(RuntimeError):
+    pass
+
+
+_cancel_check = None
+_last_cancel_check = 0.0
+
+
+@contextmanager
+def cancellation_scope(cancel_check):
+    global _cancel_check, _last_cancel_check
+    previous = _cancel_check
+    previous_check_time = _last_cancel_check
+    _cancel_check = cancel_check
+    _last_cancel_check = 0.0
+    try:
+        yield
+    finally:
+        _cancel_check = previous
+        _last_cancel_check = previous_check_time
+
+
+def raise_if_cancelled():
+    global _last_cancel_check
+    if not _cancel_check:
+        return
+    now = time.monotonic()
+    if now - _last_cancel_check < 0.5:
+        return
+    _last_cancel_check = now
+    if _cancel_check():
+        raise JobCancelled("Job removed from queue")
+
+
+def _stop_process(process):
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        else:
+            process.kill()
+        process.wait()
 
 
 def slugify(value: str) -> str:
@@ -94,16 +152,36 @@ def build_vk_comment_text(template: str) -> str:
 def run(cmd, timeout=None):
     print("\n[RUN]", " ".join(map(str, cmd)))
     str_cmd = [str(arg) for arg in cmd]
+    process = subprocess.Popen(str_cmd, start_new_session=os.name == "posix")
+    deadline = time.monotonic() + timeout if timeout is not None else None
     try:
-        subprocess.run(str_cmd, check=True, timeout=timeout)
+        while True:
+            raise_if_cancelled()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise subprocess.TimeoutExpired(str_cmd, timeout)
+            try:
+                process.wait(timeout=min(0.5, remaining) if remaining is not None else 0.5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, str_cmd)
+    except JobCancelled:
+        _stop_process(process)
+        raise
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
             f"ffmpeg exited with code {exc.returncode}: {' '.join(str_cmd)}"
         ) from exc
     except subprocess.TimeoutExpired as exc:
+        _stop_process(process)
         raise RuntimeError(
             f"Command timed out after {timeout}s: {' '.join(str_cmd)}"
         ) from exc
+    except BaseException:
+        _stop_process(process)
+        raise
 
 
 def parse_episodes_range(episodes_range: str):

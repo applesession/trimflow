@@ -10,17 +10,18 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from core.runner import build_completed_job_entry  # noqa: E402
-from core.upscale import process_upscale_job  # noqa: E402
+from core.upscale import cleanup_cancelled_upscale_job, process_upscale_job  # noqa: E402
 from modules.bot import send_message_to_allowed_chats  # noqa: E402
 from shared.config import load_completed_jobs, load_config, load_jobs, save_completed_jobs  # noqa: E402
 from shared.db import (  # noqa: E402
     claim_job,
     init_db,
+    job_exists,
     recover_running_jobs,
     remove_completed_job,
     return_job_to_pending,
 )
-from shared.helpers import get_display_title  # noqa: E402
+from shared.helpers import JobCancelled, cancellation_scope, get_display_title, raise_if_cancelled  # noqa: E402
 from shared.runtime import (  # noqa: E402
     acquire_lock,
     append_runtime_error,
@@ -116,19 +117,22 @@ def main():
             )
             log_line(log_path, f"START 4K JOB: {get_display_title(job)}")
             try:
-                result = process_upscale_job(
-                    config,
-                    job,
-                    runtime_status_path=status_path,
-                    on_episode_success=lambda current_job, episode, vk_result: _notify(
-                        log_path,
-                        _format_episode_success(current_job, episode, vk_result),
-                        f"upscale_episode_success:{get_display_title(current_job)}:{episode}",
-                    ),
-                )
+                with cancellation_scope(lambda: not job_exists(queue_id)):
+                    result = process_upscale_job(
+                        config,
+                        job,
+                        runtime_status_path=status_path,
+                        on_episode_success=lambda current_job, episode, vk_result: _notify(
+                            log_path,
+                            _format_episode_success(current_job, episode, vk_result),
+                            f"upscale_episode_success:{get_display_title(current_job)}:{episode}",
+                        ),
+                    )
+                    raise_if_cancelled()
                 if not result.get("completed"):
                     raise RuntimeError("4K job did not complete all episodes")
-                remove_completed_job(job)
+                if not remove_completed_job(job):
+                    raise JobCancelled("Job removed before completion was recorded")
                 completed_jobs = load_completed_jobs(config)
                 completed_entry = build_completed_job_entry(job, result)
                 completed_entry["partial_vk"] = False
@@ -147,7 +151,26 @@ def main():
                     jobs_failed=failed,
                 )
                 log_line(log_path, f"FINISH 4K JOB: {get_display_title(job)}")
+            except JobCancelled:
+                cleanup_cancelled_upscale_job(job)
+                current_job = load_runtime_status(status_path).get("current_job") or {}
+                mark_runtime_job_finish(
+                    status_path,
+                    job,
+                    status="cancelled",
+                    stage="job_cancelled",
+                    current_episode=current_job.get("current_episode"),
+                    total_episodes=current_job.get("total_episodes"),
+                    jobs_processed=processed,
+                    jobs_failed=failed,
+                )
+                log_line(log_path, f"CANCEL 4K JOB: {get_display_title(job)}")
+                continue
             except Exception as exc:
+                if not job_exists(queue_id):
+                    cleanup_cancelled_upscale_job(job)
+                    log_line(log_path, f"CANCEL 4K JOB: {get_display_title(job)}")
+                    continue
                 return_job_to_pending(queue_id)
                 attempted.add(queue_id)
                 failed += 1

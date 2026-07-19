@@ -28,10 +28,12 @@ from shared.helpers import (
     ensure_non_empty_slug,
     get_display_title,
     parse_episodes_range,
+    raise_if_cancelled,
     sanitize_filename,
     seconds_to_timestamp,
     run,
 )
+from shared.constants import TEMP_ROOT
 from core.media import (
     cap_subsegment_durations,
     get_preferred_audio_stream,
@@ -1413,7 +1415,18 @@ def cleanup_job_artifacts(
         shutil.rmtree(job_output_dir, ignore_errors=True)
 
 
+def cleanup_cancelled_job_artifacts(job):
+    title_slug = ensure_non_empty_slug(job["title"])
+    source = job.get("source") or {}
+    if source.get("type") == "magnet":
+        download_dir = Path(source.get("download_dir") or f"./downloads/{title_slug}")
+        shutil.rmtree(download_dir, ignore_errors=True)
+    shutil.rmtree(TEMP_ROOT / title_slug, ignore_errors=True)
+    shutil.rmtree(Path(job.get("output_dir") or "./output") / title_slug, ignore_errors=True)
+
+
 def set_runtime_stage(runtime_status_path, stage, **current_job_updates):
+    raise_if_cancelled()
     if not runtime_status_path:
         return
 

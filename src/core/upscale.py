@@ -10,7 +10,14 @@ from pathlib import Path
 from api.vk import publish_video_to_vk
 from core.discovery import filter_episode_files, find_episode_files
 from core.pipeline import download_magnet
-from shared.helpers import ensure_non_empty_slug, get_display_title, parse_episodes_range, sanitize_filename
+from shared.helpers import (
+    ensure_non_empty_slug,
+    get_display_title,
+    parse_episodes_range,
+    raise_if_cancelled,
+    run,
+    sanitize_filename,
+)
 from shared.runtime import update_runtime_status
 
 
@@ -18,6 +25,7 @@ DEFAULT_VIDEO2X_PATH = "~/tools/video2x/6.4.0/Video2X-x86_64.AppImage"
 
 
 def _update_status(status_path, **changes):
+    raise_if_cancelled()
     if status_path:
         update_runtime_status(status_path, **changes)
 
@@ -150,7 +158,14 @@ def validate_upscale_environment(config):
 
 
 def run_video2x(config, source_path, output_path):
-    subprocess.run(build_video2x_command(config, source_path, output_path), check=True)
+    run(build_video2x_command(config, source_path, output_path))
+
+
+def cleanup_cancelled_upscale_job(job):
+    title_slug = ensure_non_empty_slug(job["title"])
+    source = job.get("source") or {}
+    shutil.rmtree(Path(source.get("download_dir") or f"./upscale_downloads/{title_slug}"), ignore_errors=True)
+    shutil.rmtree(Path(job.get("output_dir") or "./upscale_output") / title_slug, ignore_errors=True)
 
 
 def _build_episode_title(job, episode):

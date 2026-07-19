@@ -24,7 +24,13 @@ from modules.autojobs import (
 )
 from shared.config import load_completed_jobs, load_jobs, load_state, save_completed_jobs, save_jobs, save_state
 from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
-from shared.db import get_discovery_blacklist, get_episode_tracking_counts, insert_one_job, remove_pending_job as _db_remove_job
+from shared.db import (
+    get_discovery_blacklist,
+    get_episode_tracking_counts,
+    insert_one_job,
+    remove_job as _db_cancel_job,
+    remove_pending_job as _db_remove_job,
+)
 from shared.helpers import ensure_non_empty_slug, parse_episodes_range
 from core.runner import build_execution_order
 from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
@@ -737,6 +743,7 @@ def format_runtime_stage_ru(stage):
         "upscale_render": "4K upscale",
         "upscale_delivery_vk": "публикация 4K в VK",
         "upscale_failed": "ошибка 4K-worker",
+        "job_cancelled": "отменено пользователем",
     }
     return mapping.get(stage, stage or "неизвестно")
 
@@ -1391,7 +1398,10 @@ def format_remove_result(jobs):
         if len(jobs) == 0:
             return "Ничего не удалено"
         titles = [get_display_title(j) for j in jobs]
-        return f"Удалено из очереди: {len(jobs)} шт.\n\n" + "\n".join(f"• {t}" for t in titles)
+        message = f"Удалено из очереди: {len(jobs)} шт.\n\n" + "\n".join(f"• {t}" for t in titles)
+        if any(job.get("_queue_status") == "running" for job in jobs):
+            message += "\n\nАктивная обработка останавливается"
+        return message
     return "\n".join([
         "Аниме удалено из очереди",
         "",
@@ -1555,7 +1565,7 @@ def add_job_to_blacklist(config, job):
 
     jobs = load_jobs(config)
     if find_matching_job(jobs, job) is not None:
-        remove_job_by_identity(config, build_job_identity(job))
+        remove_job_by_identity(config, build_job_identity(job), cancel_running=True)
     return already_blacklisted
 
 
@@ -1566,7 +1576,7 @@ def get_blacklist_entry_by_index(config, index):
     return entries[index - 1]
 
 
-def remove_job_by_identity(config, job_identity):
+def remove_job_by_identity(config, job_identity, cancel_running=False):
     jobs = load_jobs(config)
     removed_job = None
     for job in jobs:
@@ -1574,7 +1584,9 @@ def remove_job_by_identity(config, job_identity):
             removed_job = job
     if not removed_job:
         raise RuntimeError("Актуальная запись для удаления не найдена")
-    _db_remove_job(removed_job)
+    removed = _db_cancel_job(removed_job) if cancel_running else _db_remove_job(removed_job)
+    if not removed:
+        raise RuntimeError("Задача уже изменилась; обнови /jobs и повтори удаление")
     state = load_state(config)
     updated_state = unmark_job_episodes_queued(state, removed_job)
     save_state(config, updated_state)
@@ -1676,7 +1688,7 @@ def confirm_pending_action(config, chat_id, text):
     if action_type == "remove":
         removed = []
         for job in pending.get("job_snapshots", []):
-            removed.append(remove_job_by_identity(config, build_job_identity(job)))
+            removed.append(remove_job_by_identity(config, build_job_identity(job), cancel_running=True))
         return format_remove_result(removed)
 
     if action_type == "complete":
@@ -1935,7 +1947,7 @@ def build_help_message():
         "/jobs - показать аниме в очереди (с приоритетом выполнения)",
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
-        "/remove <номер> - удалить аниме из очереди (можно диапазон: 1-10, 1,5,8-10)",
+        "/remove <номер> - удалить из очереди и остановить активную обработку (можно диапазон: 1-10, 1,5,8-10)",
         "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
         "/blacklist - показать discovery blacklist",

@@ -211,6 +211,7 @@ python src/telegram_bot.py
 - `/status` — lock, количество job'ов, время последнего discovery
 - `/upscale` — состояние 4K-worker
 - `/jobs` — последние job'ы из очереди
+- `/remove <номер>` — удалить job; активная обработка будет остановлена
 - `/add Название ; 001-003 ; magnet:?xt=... ; 2` — обычный render
 - `/add4k Название ; 25 ; magnet:?xt=... ; 2` — серии `001-025` в 4K для Donut
 

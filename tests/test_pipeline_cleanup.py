@@ -2,8 +2,9 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from lib.pipeline import cleanup_job_artifacts
+from lib.pipeline import cleanup_cancelled_job_artifacts, cleanup_job_artifacts
 
 
 class PipelineCleanupTests(unittest.TestCase):
@@ -82,6 +83,26 @@ class PipelineCleanupTests(unittest.TestCase):
         )
 
         self.assertFalse(output_dir.exists())
+
+    def test_cancelled_job_cleanup_removes_all_local_artifacts(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        download_dir = tmp_dir / "downloads" / "Title"
+        temp_root = tmp_dir / "temp"
+        output_root = tmp_dir / "output"
+        for path in (download_dir, temp_root / "Title", output_root / "Title"):
+            path.mkdir(parents=True)
+
+        job = {
+            "title": "Title",
+            "source": {"type": "magnet", "download_dir": str(download_dir)},
+            "output_dir": str(output_root),
+        }
+        with patch("lib.pipeline.TEMP_ROOT", temp_root):
+            cleanup_cancelled_job_artifacts(job)
+
+        self.assertFalse(download_dir.exists())
+        self.assertFalse((temp_root / "Title").exists())
+        self.assertFalse((output_root / "Title").exists())
 
 
 if __name__ == "__main__":

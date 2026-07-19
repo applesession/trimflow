@@ -42,8 +42,9 @@ class DeliveryTests(unittest.TestCase):
         kwargs = mock_post.call_args.kwargs
         self.assertNotIn("files", kwargs)
         self.assertNotIsInstance(kwargs["data"], bytes)
-        self.assertEqual(kwargs["data"].fields["video_file"][0], "test.mkv")
-        self.assertEqual(kwargs["data"].fields["video_file"][2], "video/x-matroska")
+        encoder = kwargs["data"].encoder
+        self.assertEqual(encoder.fields["video_file"][0], "test.mkv")
+        self.assertEqual(encoder.fields["video_file"][2], "video/x-matroska")
         self.assertTrue(kwargs["headers"]["Content-Type"].startswith("multipart/form-data; boundary="))
         self.assertEqual(kwargs["timeout"], 3600)
         self.assertEqual(result, {"ok": 1})

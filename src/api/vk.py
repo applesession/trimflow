@@ -4,6 +4,8 @@ from pathlib import Path
 
 import requests
 
+from shared.helpers import raise_if_cancelled
+
 
 VK_API_BASE = "https://api.vk.com/method"
 
@@ -108,7 +110,7 @@ def request_video_upload(title, description, privacy_view=0, *, group_id=None):
 
 def upload_video_file(upload_url, local_path):
     try:
-        from requests_toolbelt import MultipartEncoder
+        from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
     except ImportError as exc:
         raise RuntimeError(
             "requests-toolbelt is not installed. Run: pip install -r requirements.txt"
@@ -119,10 +121,11 @@ def upload_video_file(upload_url, local_path):
         encoder = MultipartEncoder(
             fields={"video_file": (local_path.name, file, "video/x-matroska")}
         )
+        monitor = MultipartEncoderMonitor(encoder, lambda _monitor: raise_if_cancelled())
         response = requests.post(
             upload_url,
-            data=encoder,
-            headers={"Content-Type": encoder.content_type},
+            data=monitor,
+            headers={"Content-Type": monitor.content_type},
             timeout=3600,
         )
     response.raise_for_status()

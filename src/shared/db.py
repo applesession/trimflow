@@ -495,6 +495,13 @@ def claim_job(queue_id):
     return claimed
 
 
+def job_exists(queue_id):
+    conn = _get_conn()
+    row = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (int(queue_id),)).fetchone()
+    conn.close()
+    return row is not None
+
+
 def return_job_to_pending(queue_id):
     conn = _get_conn()
     conn.execute(
@@ -558,12 +565,12 @@ def remove_completed_job(job):
     conn = _get_conn()
     queue_id = job.get("_queue_id")
     if queue_id is not None:
-        conn.execute("DELETE FROM jobs WHERE id = ? AND status = 'running'", (int(queue_id),))
+        cursor = conn.execute("DELETE FROM jobs WHERE id = ? AND status = 'running'", (int(queue_id),))
         conn.commit()
         conn.close()
-        return
+        return cursor.rowcount > 0
     source = job.get("source", {})
-    conn.execute(
+    cursor = conn.execute(
         """DELETE FROM jobs
            WHERE status = 'running' AND title = ? AND season = ?
              AND source_type = ? AND source_magnet IS ?
@@ -576,6 +583,7 @@ def remove_completed_job(job):
     )
     conn.commit()
     conn.close()
+    return cursor.rowcount > 0
 
 
 def remove_pending_job(job):
@@ -597,8 +605,35 @@ def remove_pending_job(job):
                 str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
             ),
         )
+    removed = conn.total_changes > 0
     conn.commit()
     conn.close()
+    return removed
+
+
+def remove_job(job):
+    """Remove pending or running job; active worker observes missing row and stops."""
+    conn = _get_conn()
+    queue_id = job.get("_queue_id")
+    if queue_id is not None:
+        cursor = conn.execute("DELETE FROM jobs WHERE id = ?", (int(queue_id),))
+    else:
+        source = job.get("source", {})
+        cursor = conn.execute(
+            """DELETE FROM jobs
+               WHERE title = ? AND season = ?
+                 AND source_type = ? AND source_magnet IS ?
+                 AND processing_mode = ?""",
+            (
+                job.get("title", ""), int(job.get("season", 1)),
+                source.get("type", "magnet"), source.get("magnet", ""),
+                str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
+            ),
+        )
+    conn.commit()
+    removed = cursor.rowcount > 0
+    conn.close()
+    return removed
 
 
 def load_completed_jobs():
