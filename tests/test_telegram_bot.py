@@ -108,6 +108,14 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(payload["magnet"], "magnet:?xt=urn:btih:testhash")
         self.assertEqual(payload["season"], 2)
 
+    def test_add_command_stores_optional_source_path_filter(self):
+        command = "/add Test Title ; 001-003 ; magnet:?xt=urn:btih:testhash ; 2 ; 0 ; HEVC/TV"
+        payload = parse_add_command(command)
+        result = add_job_from_command(self.make_config(self.make_workspace_temp_dir()), command)
+
+        self.assertEqual(payload["source_path_contains"], "HEVC/TV")
+        self.assertEqual(result["job"]["processing"]["source_path_contains"], "HEVC/TV")
+
     def test_add4k_command_builds_direct_donut_job(self):
         payload = parse_add4k_command(
             "/add4k Test Title ; 25 ; magnet:?xt=urn:btih:testhash ; 2",
@@ -122,6 +130,14 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(result["job"]["processing_mode"], "upscale_4k")
         self.assertTrue(result["job"]["delivery"]["vk_direct_donut"])
         self.assertEqual(result["job"]["delivery"]["vk_privacy_view"], 5)
+
+    def test_add4k_command_stores_optional_source_path_filter(self):
+        command = "/add4k Test Title ; 001-003 ; magnet:?xt=urn:btih:testhash ; 2 ; HEVC/TV"
+        payload = parse_add4k_command(command)
+        result = add_upscale_job_from_command(self.make_config(self.make_workspace_temp_dir()), command)
+
+        self.assertEqual(payload["source_path_contains"], "HEVC/TV")
+        self.assertEqual(result["job"]["processing"]["source_path_contains"], "HEVC/TV")
 
     def test_allowed_chat_filter_uses_whitelist(self):
         allowed = {"123", "456"}

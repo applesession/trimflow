@@ -18,6 +18,7 @@ from core.detector import (
     normalize_timing_detection_config,
 )
 from core.discovery import filter_episode_files, find_episode_files
+from core.torrent import download_selected_episodes
 from shared.helpers import (
     build_compilation_display_name,
     build_single_episode_display_name,
@@ -31,7 +32,6 @@ from shared.helpers import (
     raise_if_cancelled,
     sanitize_filename,
     seconds_to_timestamp,
-    run,
 )
 from shared.constants import TEMP_ROOT
 from core.media import (
@@ -52,23 +52,6 @@ from api.storage import upload_file_to_s3
 from api.wavespeed import run_edit_prediction
 from shared.validation import prepare_temp_dir, reset_temp_dir
 from api.vk import publish_private_video_link_to_vk, publish_video_to_vk
-
-
-def download_magnet(magnet: str, download_dir: Path, timeout=None):
-    download_dir.mkdir(parents=True, exist_ok=True)
-
-    run([
-        "aria2c",
-        "--dir", download_dir,
-        "--seed-time=0",
-        "--summary-interval=30",
-        "--max-connection-per-server=16",
-        "--split=16",
-        "--continue=true",
-        "--allow-overwrite=true",
-        "--auto-file-renaming=false",
-        magnet,
-    ], timeout=timeout)
 
 
 def build_source_summary(selected_episodes, excluded_files):
@@ -479,10 +462,16 @@ def build_prefetched_empty_aniskip_results(episode_infos, reason):
     }
 
 
-def collect_episode_files(source, title_slug, download_timeout=None):
+def collect_episode_files(source, title_slug, allowed_episodes, processing=None, download_timeout=None):
     if source["type"] == "magnet":
         download_dir = Path(source.get("download_dir", f"./downloads/{title_slug}"))
-        download_magnet(source["magnet"], download_dir, timeout=download_timeout)
+        download_selected_episodes(
+            source["magnet"],
+            download_dir,
+            allowed_episodes,
+            path_filter=(processing or {}).get("source_path_contains"),
+            timeout=download_timeout,
+        )
         detected_episode_files, ignored_files = find_episode_files(download_dir)
         return download_dir, detected_episode_files, ignored_files
 
@@ -1583,6 +1572,8 @@ def process_job(job, runtime_status_path=None):
         download_dir, detected_episode_files, ignored_files = collect_episode_files(
             source,
             title_slug,
+            allowed_episodes,
+            processing=processing,
             download_timeout=download_timeout,
         )
 

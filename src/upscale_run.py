@@ -203,6 +203,7 @@ def main():
                 log_line(log_path, "upscale_job_failed " + json.dumps({
                     "title": get_display_title(job),
                     "error": repr(exc),
+                    "details": getattr(exc, "details", None),
                 }, ensure_ascii=False))
                 _notify(
                     log_path,

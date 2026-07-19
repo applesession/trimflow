@@ -1741,12 +1741,13 @@ def parse_add_command(text):
 
     raw_payload = text[len("/add "):]
     parts = [part.strip() for part in re.split(r"\s*;\s*", raw_payload)]
-    if len(parts) not in {3, 4, 5}:
-        raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; 1 ; 5")
+    if len(parts) not in {3, 4, 5, 6}:
+        raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; сезон ; privacy ; фильтр пути")
 
     title, episodes_range, magnet = parts[:3]
     season = parts[3] if len(parts) >= 4 else "1"
-    privacy_view = parts[4] if len(parts) == 5 else "0"
+    privacy_view = parts[4] if len(parts) >= 5 else "0"
+    path_filter = parts[5] if len(parts) == 6 else None
 
     if not title:
         raise RuntimeError("Нужно указать название тайтла")
@@ -1767,6 +1768,8 @@ def parse_add_command(text):
         raise RuntimeError("privacy_view должен быть целым числом") from exc
     if privacy_value not in VALID_PRIVACY_VALUES:
         raise RuntimeError(f"privacy_view должен быть одним из: {', '.join(map(str, sorted(VALID_PRIVACY_VALUES)))}")
+    if path_filter is not None and not path_filter:
+        raise RuntimeError("Фильтр пути не должен быть пустым")
 
     return {
         "title": title,
@@ -1774,6 +1777,7 @@ def parse_add_command(text):
         "episodes_range": format_episodes_range(validated_episodes),
         "magnet": magnet,
         "privacy_view": privacy_value,
+        "source_path_contains": path_filter,
     }
 
 
@@ -1782,11 +1786,12 @@ def parse_add4k_command(text):
         raise RuntimeError("Команда должна начинаться с /add4k")
 
     parts = [part.strip() for part in re.split(r"\s*;\s*", text[len("/add4k "):])]
-    if len(parts) not in {3, 4}:
-        raise RuntimeError("Формат: /add4k Название ; количество серий ; magnet:?xt=... ; сезон")
+    if len(parts) not in {3, 4, 5}:
+        raise RuntimeError("Формат: /add4k Название ; количество серий ; magnet:?xt=... ; сезон ; фильтр пути")
 
     title, episode_count_or_range, magnet = parts[:3]
-    season = parts[3] if len(parts) == 4 else "1"
+    season = parts[3] if len(parts) >= 4 else "1"
+    path_filter = parts[4] if len(parts) == 5 else None
     if not title:
         raise RuntimeError("Нужно указать название тайтла")
     if not magnet.startswith("magnet:?"):
@@ -1806,12 +1811,15 @@ def parse_add4k_command(text):
         raise RuntimeError("Сезон должен быть целым числом") from exc
     if season_value < 1:
         raise RuntimeError("Сезон должен быть не меньше 1")
+    if path_filter is not None and not path_filter:
+        raise RuntimeError("Фильтр пути не должен быть пустым")
 
     return {
         "title": title,
         "season": season_value,
         "episodes_range": episodes_range,
         "magnet": magnet,
+        "source_path_contains": path_filter,
     }
 
 
@@ -1831,6 +1839,8 @@ def build_manual_job(command_payload):
     privacy_view = command_payload.get("privacy_view", 0)
     if privacy_view != 0:
         job["delivery"] = {"vk_privacy_view": privacy_view}
+    if command_payload.get("source_path_contains"):
+        job["processing"] = {"source_path_contains": command_payload["source_path_contains"]}
     return job
 
 
@@ -1857,7 +1867,7 @@ def add_job_from_command(config, text):
 def build_upscale_job(command_payload):
     title = command_payload["title"]
     slug = ensure_non_empty_slug(title)
-    return {
+    job = {
         "title": title,
         "season": command_payload["season"],
         "episodes_range": command_payload["episodes_range"],
@@ -1882,6 +1892,9 @@ def build_upscale_job(command_payload):
             "output": True,
         },
     }
+    if command_payload.get("source_path_contains"):
+        job["processing"] = {"source_path_contains": command_payload["source_path_contains"]}
+    return job
 
 
 def add_upscale_job_from_command(config, text):
@@ -1957,8 +1970,8 @@ def build_help_message():
         "Порядок в /jobs — по приоритету выполнения (ongoing → manual).",
         "",
         "Пример:",
-        "/add Название тайтла ; Серия (001-012) ; magnet-ссылка ; сезон (1/2/3) ; тип приватности (0 - для всех; 5 - для донов)",
-        "/add4k Название тайтла ; количество серий ; magnet-ссылка ; сезон",
+        "/add Название ; серии ; magnet ; сезон ; privacy ; необязательный фильтр пути",
+        "/add4k Название ; серии ; magnet ; сезон ; необязательный фильтр пути",
     ])
 
 

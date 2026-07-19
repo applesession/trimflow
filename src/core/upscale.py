@@ -9,7 +9,7 @@ from pathlib import Path
 
 from api.vk import publish_video_to_vk
 from core.discovery import filter_episode_files, find_episode_files
-from core.pipeline import download_magnet
+from core.torrent import download_selected_episodes
 from shared.helpers import (
     ensure_non_empty_slug,
     get_display_title,
@@ -68,6 +68,7 @@ def _job_fingerprint(job):
         "codec": "h264_nvenc",
         "preset": "fast",
         "cq": 23,
+        "source_path_contains": (job.get("processing") or {}).get("source_path_contains"),
     }
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -219,11 +220,16 @@ def process_upscale_job(config, job, runtime_status_path=None, on_episode_succes
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "upscale_manifest.json"
     manifest = _load_manifest(job, manifest_path)
+    requested_episodes = parse_episodes_range(job["episodes_range"])
 
     _update_status(runtime_status_path, current_stage="upscale_download", current_job={"stage": "upscale_download"})
-    download_magnet(source["magnet"], download_dir)
+    download_selected_episodes(
+        source["magnet"],
+        download_dir,
+        requested_episodes,
+        path_filter=(job.get("processing") or {}).get("source_path_contains"),
+    )
     detected, _ = find_episode_files(download_dir)
-    requested_episodes = parse_episodes_range(job["episodes_range"])
     episode_files, _ = filter_episode_files(detected, requested_episodes)
     found_episodes = [episode for episode, _ in episode_files]
     duplicates = sorted(episode for episode, count in Counter(found_episodes).items() if count > 1)

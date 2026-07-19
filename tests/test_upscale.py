@@ -87,7 +87,7 @@ class UpscaleTests(unittest.TestCase):
     @patch("core.upscale.validate_upscale_environment")
     @patch("core.upscale.publish_video_to_vk")
     @patch("core.upscale.run_video2x")
-    @patch("core.upscale.download_magnet")
+    @patch("core.upscale.download_selected_episodes")
     def test_delivery_retry_reuses_episode_checkpoint(
         self,
         _mock_download,
