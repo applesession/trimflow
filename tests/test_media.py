@@ -1,10 +1,20 @@
 import unittest
 from unittest.mock import patch
 
-from lib.media import get_nvenc_fallback_codec, get_preferred_audio_stream
+from lib.media import get_nvenc_fallback_codec, get_preferred_audio_stream, render_segment_copy
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    @patch("lib.media.run")
+    def test_copy_segment_normalizes_audio_without_reencoding_video(self, mock_run):
+        render_segment_copy("episode.mkv", "segment.mkv", 10, 20)
+
+        command = mock_run.call_args.args[0]
+        self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+        self.assertEqual(command[command.index("-ar") + 1], "48000")
+        self.assertEqual(command[command.index("-ac") + 1], "2")
+
     def test_nvenc_fallback_keeps_codec_family(self):
         self.assertEqual(get_nvenc_fallback_codec("h264_nvenc"), "libx264")
         self.assertEqual(get_nvenc_fallback_codec("hevc_nvenc"), "libx265")

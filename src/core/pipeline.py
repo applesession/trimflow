@@ -202,6 +202,8 @@ def build_segment_encoding(encoding):
         "cq": encoding.get("segment_cq", 18 if "nvenc" in segment_video_codec else 15),
         "audio_codec": encoding.get("segment_audio_codec", encoding.get("audio_codec", "aac")),
         "audio_bitrate": encoding.get("segment_audio_bitrate", "192k"),
+        "audio_sample_rate": int(encoding.get("segment_audio_sample_rate", 48000)),
+        "audio_channels": int(encoding.get("segment_audio_channels", 2)),
         "pixel_format": encoding.get("segment_pixel_format", default_pixel_format),
         "cut_mode": encoding.get("segment_cut_mode", "precise"),
         "boundary_reencode_seconds": float(encoding.get("boundary_reencode_seconds", 3.0)),
@@ -1798,7 +1800,7 @@ def process_job(job, runtime_status_path=None):
                         concat_output=processed["chunk_output"],
                         watermark_path=watermark_path,
                         output_video=rendered_chunk,
-                        encoding=encoding,
+                        encoding={**encoding, "audio_codec": "copy"},
                     )
                     save_chunk_checkpoint(
                         work_dir,

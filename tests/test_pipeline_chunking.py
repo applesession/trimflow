@@ -438,6 +438,10 @@ class PipelineChunkingTests(unittest.TestCase):
         )
         self.assertEqual(mock_render_concat.call_count, 3)
         self.assertEqual(mock_render_final.call_count, 2)
+        self.assertTrue(all(
+            call.kwargs["encoding"]["audio_codec"] == "copy"
+            for call in mock_render_final.call_args_list
+        ))
         self.assertFalse(mock_render_concat.call_args.kwargs["allow_reencode"])
         manifest_episodes = mock_build_compact_manifest.call_args.kwargs["manifest_episodes"]
         self.assertEqual([item["episode"] for item in manifest_episodes], [1, 2, 3])

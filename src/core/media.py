@@ -330,7 +330,8 @@ def snap_remove_segments_to_keyframes(remove_segments, keyframes):
     return snapped
 
 
-def render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=0):
+def render_segment_copy(ep_file, segment_output, start, end, segment_encoding=None, audio_stream_index=0):
+    encoding = segment_encoding or {}
     cmd = [
         "ffmpeg",
         "-y",
@@ -340,7 +341,11 @@ def render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=
         "-map", "0:v:0",
         "-map", f"0:a:{audio_stream_index}?",
         "-map", "0:s?",
-        "-c", "copy",
+        "-c:v", "copy",
+        "-c:a", encoding.get("audio_codec", "aac"),
+        "-b:a", str(encoding.get("audio_bitrate", "192k")),
+        "-ar", str(encoding.get("audio_sample_rate", 48000)),
+        "-ac", str(encoding.get("audio_channels", 2)),
         "-c:s", "copy",
         segment_output,
     ]
@@ -355,6 +360,8 @@ def _build_segment_precise_cmd(ep_file, segment_output, start, end, segment_enco
     cq = str(encoding.get("cq", 18 if "nvenc" in video_codec else 15))
     audio_codec = encoding.get("audio_codec", "aac")
     audio_bitrate = encoding.get("audio_bitrate", "192k")
+    audio_sample_rate = str(encoding.get("audio_sample_rate", 48000))
+    audio_channels = str(encoding.get("audio_channels", 2))
     pixel_format = encoding.get("pixel_format")
 
     cmd = [
@@ -380,6 +387,8 @@ def _build_segment_precise_cmd(ep_file, segment_output, start, end, segment_enco
     cmd += [
         "-c:a", audio_codec,
         "-b:a", audio_bitrate,
+        "-ar", audio_sample_rate,
+        "-ac", audio_channels,
         "-c:s", "copy",
         segment_output,
     ]
@@ -430,7 +439,14 @@ def render_segment(ep_file, segment_output, start, end, segment_encoding=None, a
         render_segment_precise(ep_file, segment_output, start, end, segment_encoding=segment_encoding, audio_stream_index=audio_stream_index)
         return
 
-    render_segment_copy(ep_file, segment_output, start, end, audio_stream_index=audio_stream_index)
+    render_segment_copy(
+        ep_file,
+        segment_output,
+        start,
+        end,
+        segment_encoding=segment_encoding,
+        audio_stream_index=audio_stream_index,
+    )
 
 
 def render_concat(concat_file, concat_output, audio_stream_index=0, allow_reencode=True):
