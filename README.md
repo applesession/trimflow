@@ -201,6 +201,7 @@ python src/telegram_bot.py
 
 Что делает бот:
 - работает отдельным long-running process рядом с `cron_run.py`;
+- использует `.runtime/telegram_bot.lock`, поэтому второй экземпляр не запускается;
 - читает `jobs.json` и `state.json` для операторских команд;
 - отправляет уведомления о новых job'ах, ошибках и успешной обработке;
 - принимает ручное добавление job в очередь.
@@ -221,7 +222,8 @@ python src/telegram_bot.py
 - бот использует `long polling`, не webhook;
 - доступ ограничен только чатами из `TELEGRAM_ALLOWED_CHAT_IDS`;
 - для быстрых действий бот показывает reply-кнопки `Статус`, `Очередь`, `Помощь`;
-- `telegram_state.json` хранит `last_update_id` и не должен коммититься в git.
+- `telegram_state.json` хранит `last_update_id`, записывается атомарно и не должен коммититься в git;
+- повреждённый state сохраняется как `telegram_state.json.corrupt.<timestamp>`, бот запускается с default state.
 
 ## Что будет на выходе
 

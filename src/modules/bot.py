@@ -202,8 +202,16 @@ def load_telegram_state():
     if not path.exists():
         return build_default_telegram_state()
 
-    with open(path, "r", encoding="utf-8") as file:
-        data = json.load(file)
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        backup = path.with_name(
+            f"{path.name}.corrupt.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        )
+        os.replace(path, backup)
+        print(f"[TELEGRAM STATE] Corrupt state moved to {backup}: {exc}")
+        return build_default_telegram_state()
 
     if not isinstance(data, dict):
         raise RuntimeError(f"{path} must contain a JSON object")
@@ -219,9 +227,16 @@ def load_telegram_state():
 def save_telegram_state(state):
     path = get_telegram_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(state, file, indent=2, ensure_ascii=False)
-        file.write("\n")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as file:
+            json.dump(state, file, indent=2, ensure_ascii=False)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def update_telegram_state_progress(*, last_update_id=None, last_handled_at=None):

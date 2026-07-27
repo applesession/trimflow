@@ -173,6 +173,32 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(loaded["last_update_id"], 42)
         self.assertEqual(loaded["last_handled_at"], "2026-06-07T10:00:00+00:00")
 
+    def test_corrupt_telegram_state_is_quarantined_and_reset(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        state_path.write_text("", encoding="utf-8")
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            loaded = load_telegram_state()
+
+        self.assertIsNone(loaded["last_update_id"])
+        self.assertFalse(state_path.exists())
+        self.assertEqual(len(list(tmp_dir.glob("telegram_state.json.corrupt.*"))), 1)
+
+    def test_failed_atomic_state_replace_preserves_previous_file(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        state_path = (tmp_dir / "telegram_state.json").resolve()
+        original = '{"last_update_id": 41}\n'
+        state_path.write_text(original, encoding="utf-8")
+
+        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+            with patch("lib.telegram_bot.os.replace", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    save_telegram_state({"last_update_id": 42})
+
+        self.assertEqual(state_path.read_text(encoding="utf-8"), original)
+        self.assertEqual(list(tmp_dir.glob(".*.tmp")), [])
+
     def test_add_job_from_command_creates_and_deduplicates_job(self):
         tmp_dir = self.make_workspace_temp_dir()
         config = self.make_config(tmp_dir)
