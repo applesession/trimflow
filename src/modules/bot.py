@@ -840,9 +840,24 @@ def clear_jobs_pagination_page(chat_id):
 
 
 def tail_lines(path, limit):
-    with open(path, "r", encoding="utf-8") as file:
-        lines = file.read().splitlines()
-    return lines[-int(limit):]
+    limit = max(0, int(limit))
+    if not limit:
+        return []
+
+    with open(path, "rb") as file:
+        file.seek(0, os.SEEK_END)
+        position = file.tell()
+        chunks = []
+        separators = 0
+        while position > 0 and separators <= limit:
+            chunk_size = min(64 * 1024, position)
+            position -= chunk_size
+            file.seek(position)
+            chunk = file.read(chunk_size)
+            chunks.append(chunk)
+            separators += chunk.count(b"\n") + chunk.count(b"\r")
+
+    return b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()[-limit:]
 
 
 def escape_markdown_v2(text):
@@ -872,43 +887,16 @@ def sanitize_code_block_content(text):
     return str(text or "").replace("```", "``\u200b`")
 
 
-def find_job_by_title(jobs, title):
-    normalized = str(title or "").strip()
-    if not normalized:
-        return None
-    for job in jobs:
-        if str(job.get("title", "")).strip() == normalized:
-            return job
-    return None
-
-
-def detect_active_job_title(jobs, runtime_paths):
-    lock_path = runtime_paths["lock_path"]
-    log_path = runtime_paths["log_path"]
-    if not lock_path.exists() or not log_path.exists():
-        return None
-
-    try:
-        lines = log_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-
-    pattern = re.compile(r"START JOB \d+/\d+: (?P<title>.+)$")
-    for line in reversed(lines):
-        match = pattern.search(line)
-        if not match:
-            continue
-        matched_job = find_job_by_title(jobs, match.group("title").strip())
-        return get_display_title(matched_job or {"title": match.group("title").strip()})
-
-    return None
-
-
 def format_status_message(config):
     jobs = load_jobs(config)
     state = load_state(config)
-    runtime_paths = ensure_runtime_paths()
-    active_title = detect_active_job_title(jobs, runtime_paths)
+    runtime_status = load_runtime_status()
+    current_job = runtime_status.get("current_job") or {}
+    active_title = (
+        get_display_title(current_job)
+        if runtime_status.get("run_status") == "running" and current_job
+        else None
+    )
     episode_counts = get_episode_tracking_counts()
 
     lines = [
@@ -1035,8 +1023,8 @@ def format_errors_message(limit=5):
     return "\n".join(lines).rstrip()
 
 
-def get_jobs_page_data(config, page=1, page_size=15):
-    jobs = load_jobs(config)
+def get_jobs_page_data(config, page=1, page_size=15, jobs=None):
+    jobs = load_jobs(config) if jobs is None else jobs
     if not jobs:
         return {
             "jobs": [],
@@ -1069,8 +1057,8 @@ def get_jobs_page_data(config, page=1, page_size=15):
     }
 
 
-def format_jobs_message(config, page=1, page_size=15, numbered=True):
-    page_data = get_jobs_page_data(config, page=page, page_size=page_size)
+def format_jobs_message(config, page=1, page_size=15, numbered=True, jobs=None):
+    page_data = get_jobs_page_data(config, page=page, page_size=page_size, jobs=jobs)
     if not page_data["jobs"]:
         return "Очередь пуста"
 
@@ -1092,8 +1080,8 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True):
     return "\n".join(lines)
 
 
-def format_jobs_message_markdown(config, page=1, page_size=15):
-    jobs = load_jobs(config)
+def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
+    jobs = load_jobs(config) if jobs is None else jobs
     if not jobs:
         return "Очередь пуста"
 
@@ -1153,7 +1141,8 @@ def format_jobs_message_markdown(config, page=1, page_size=15):
 
 
 def build_jobs_message_response(config, chat_id, page=1, page_size=15):
-    page_data = get_jobs_page_data(config, page=page, page_size=page_size)
+    jobs = load_jobs(config)
+    page_data = get_jobs_page_data(config, page=page, page_size=page_size, jobs=jobs)
     if not page_data["jobs"]:
         clear_jobs_pagination_page(chat_id)
         return "Очередь пуста"
@@ -1164,6 +1153,7 @@ def build_jobs_message_response(config, chat_id, page=1, page_size=15):
             config,
             page=page_data["page"],
             page_size=page_data["page_size"],
+            jobs=jobs,
         ),
         "reply_markup": build_jobs_pagination_keyboard(
             page_data["has_previous"],
@@ -2019,11 +2009,12 @@ def handle_command(config, text):
                 raise RuntimeError("Формат: /jobs или /jobs <страница>") from exc
             if page < 1:
                 raise RuntimeError("Номер страницы должен быть не меньше 1")
-        page_data = get_jobs_page_data(config, page=page)
+        jobs = load_jobs(config)
+        page_data = get_jobs_page_data(config, page=page, jobs=jobs)
         if not page_data["jobs"]:
             return "Очередь пуста"
         return {
-            "text": format_jobs_message_markdown(config, page=page),
+            "text": format_jobs_message_markdown(config, page=page, jobs=jobs),
             "parse_mode": "MarkdownV2",
             "reply_markup": build_jobs_inline_keyboard(
                 page_data["has_previous"], page_data["has_next"],
@@ -2117,7 +2108,7 @@ def _handle_jobs_callback(config, chat_id, message_id, callback_query_id, page):
     total_pages = max(1, (total + page_size - 1) // page_size)
     p = max(1, min(page, total_pages))
 
-    text = format_jobs_message_markdown(config, page=p)
+    text = format_jobs_message_markdown(config, page=p, jobs=jobs)
     markup = build_jobs_inline_keyboard(p > 1, p < total_pages, p, total_pages)
     edit_message_text(chat_id, message_id, text, reply_markup=markup, parse_mode="MarkdownV2")
 

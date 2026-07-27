@@ -443,7 +443,27 @@ def format_log_line(message):
     return f"[{utc_now_iso()}] {message}"
 
 
+def trim_log_file(log_path, max_bytes=50 * 1024 * 1024, keep_bytes=10 * 1024 * 1024):
+    path = Path(log_path)
+    try:
+        if not path.exists() or path.stat().st_size <= max_bytes:
+            return False
+        with open(path, "rb+") as file:
+            file.seek(-min(keep_bytes, path.stat().st_size), os.SEEK_END)
+            tail = file.read()
+            newline = tail.find(b"\n")
+            if newline >= 0:
+                tail = tail[newline + 1 :]
+            file.seek(0)
+            file.write(tail)
+            file.truncate()
+        return True
+    except OSError:
+        return False
+
+
 def log_line(log_path, message):
+    trim_log_file(log_path)
     line = format_log_line(message)
     print(line)
     with open(log_path, "a", encoding="utf-8") as file:

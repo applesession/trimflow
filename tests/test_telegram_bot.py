@@ -306,20 +306,10 @@ class TelegramBotTests(unittest.TestCase):
         mark_episodes_queued(1, [3])
         mark_episodes_completed(1, [1, 2])
 
-        runtime_paths = {
-            "runtime_dir": tmp_dir,
-            "logs_dir": tmp_dir,
-            "lock_path": tmp_dir / "cron.lock",
-            "log_path": tmp_dir / "cron.log",
-            "telegram_log_path": tmp_dir / "telegram_bot.log",
-            "status_path": tmp_dir / "runtime_status.json",
-        }
-        runtime_paths["lock_path"].write_text("locked", encoding="utf-8")
-        runtime_paths["log_path"].write_text(
-            "[2026-06-07T10:01:00+00:00] START JOB 1/1: A\n",
-            encoding="utf-8",
-        )
-        with patch("lib.telegram_bot.ensure_runtime_paths", return_value=runtime_paths):
+        with patch("lib.telegram_bot.load_runtime_status", return_value={
+            "run_status": "running",
+            "current_job": {"title": "A"},
+        }):
             message = format_status_message(config)
 
         self.assertIn("Активная задача: A", message)
@@ -609,6 +599,21 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertIn("line 29", message)
         self.assertNotIn("line 0", message)
+
+    def test_log_message_reads_carriage_return_tail(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        runtime_paths = {
+            "log_path": tmp_dir / "cron.log",
+        }
+        runtime_paths["log_path"].write_bytes(
+            b"old\r" + b"x" * (128 * 1024) + b"\rframe=1\rframe=2\r"
+        )
+
+        with patch("lib.telegram_bot.ensure_runtime_paths", return_value=runtime_paths):
+            message = format_log_message(lines_limit=2)
+
+        self.assertIn("frame=2", message)
+        self.assertNotIn("old", message)
 
     def test_log_message_markdown_wraps_content_in_code_block(self):
         tmp_dir = self.make_workspace_temp_dir()

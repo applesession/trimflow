@@ -43,6 +43,9 @@ def main():
                 continue
 
             for update in updates:
+                started_at = time.monotonic()
+                message = update.get("message") or {}
+                command = str(message.get("text") or "").split(maxsplit=1)[0][:32]
                 try:
                     update_id = update.get("update_id")
                     handled = handle_update(config, update)
@@ -50,8 +53,19 @@ def main():
                         last_update_id=update_id,
                         last_handled_at=update.get("message", {}).get("date") if handled else None,
                     )
+                    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+                    log_line(
+                        log_path,
+                        f"telegram_update_completed update_id={update_id} command={command!r} "
+                        f"handled={handled} elapsed_ms={elapsed_ms}",
+                    )
                 except Exception as exc:
-                    log_line(log_path, f"telegram_update_failed error={repr(exc)} update_id={update.get('update_id')}")
+                    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+                    log_line(
+                        log_path,
+                        f"telegram_update_failed error={repr(exc)} update_id={update.get('update_id')} "
+                        f"command={command!r} elapsed_ms={elapsed_ms}",
+                    )
                     state = update_telegram_state_progress(last_update_id=update.get("update_id"))
     finally:
         release_lock(lock_path)

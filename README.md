@@ -177,7 +177,7 @@ python src/cron_run.py
 Runtime-файлы:
 - `.runtime/discovery.lock` — lock активного discovery
 - `.runtime/cron.lock` — lock активного render
-- `logs/cron.log` — append-only лог раннера
+- `logs/*.log` — логи ограничиваются 50 МБ на файл; после лимита сохраняются последние 10 МБ
 
 Рекомендуемая команда для crontab:
 
