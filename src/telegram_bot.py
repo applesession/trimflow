@@ -44,9 +44,11 @@ def main():
 
             for update in updates:
                 started_at = time.monotonic()
-                message = update.get("message") or {}
-                command = str(message.get("text") or "").split(maxsplit=1)[0][:32]
+                command = ""
                 try:
+                    message = update.get("message") or {}
+                    text = str(message.get("text") or "").strip()
+                    command = text.split(maxsplit=1)[0][:32] if text else ""
                     update_id = update.get("update_id")
                     handled = handle_update(config, update)
                     state = update_telegram_state_progress(
