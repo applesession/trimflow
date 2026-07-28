@@ -13,9 +13,6 @@
       "temp": true,
       "output": true
     },
-    "processing": {
-      "chunk_size_episodes": 12
-    },
     "timing_detection": {
       "enabled": true,
       "mode": "audio_fingerprint",
@@ -62,12 +59,6 @@
       "video_codec": "h264_nvenc",
       "preset": "fast",
       "cq": 23,
-      "segment_video_codec": "h264_nvenc",
-      "segment_preset": "fast",
-      "segment_cut_mode": "copy",
-      "segment_max_render_seconds": 150,
-      "segment_cq": 18,
-      "segment_pixel_format": "yuv420p",
       "audio_codec": "aac"
     }
   },

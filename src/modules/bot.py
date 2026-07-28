@@ -749,6 +749,7 @@ def format_runtime_stage_ru(stage):
         "episode_scan": "поиск серий",
         "detector": "поиск OP/ED",
         "render_segments": "вырезка сегментов",
+        "render_episode": "рендер серии",
         "concat": "склейка частей",
         "final_render": "финальный рендер",
         "delivery_s3": "сохранение манифеста",

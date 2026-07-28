@@ -96,7 +96,8 @@ def ffprobe_media_signature(path):
         result = subprocess.check_output([
             "ffprobe", "-v", "error",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,channel_layout",
+            "stream=codec_type,codec_name,width,height,pix_fmt,r_frame_rate,"
+            "time_base,sample_fmt,sample_rate,channels,channel_layout",
             "-of", "json",
             str(path),
         ], encoding="utf-8", errors="replace")
@@ -111,12 +112,106 @@ def ffprobe_media_signature(path):
     return {
         "video": {
             key: video.get(key)
-            for key in ["codec_name", "width", "height", "pix_fmt"]
+            for key in [
+                "codec_name",
+                "width",
+                "height",
+                "pix_fmt",
+                "r_frame_rate",
+                "time_base",
+            ]
         },
         "audio": {
             key: audio.get(key)
-            for key in ["codec_name", "sample_rate", "channels", "channel_layout"]
+            for key in [
+                "codec_name",
+                "sample_fmt",
+                "sample_rate",
+                "channels",
+                "channel_layout",
+                "time_base",
+            ]
         } if audio else None,
+    }
+
+
+def ffprobe_episode_timeline(path):
+    result = subprocess.check_output([
+        "ffprobe", "-v", "error",
+        "-show_entries",
+        "stream=index,codec_type:packet=stream_index,pts_time,duration_time",
+        "-of", "json",
+        str(path),
+    ], encoding="utf-8", errors="replace")
+    data = json.loads(result)
+    stream_types = {
+        int(stream["index"]): stream.get("codec_type")
+        for stream in data.get("streams", [])
+        if stream.get("codec_type") in {"video", "audio"}
+    }
+    packet_times = {stream_index: [] for stream_index in stream_types}
+    for packet in data.get("packets", []):
+        stream_index = int(packet.get("stream_index", -1))
+        if stream_index not in packet_times or packet.get("pts_time") is None:
+            continue
+        start = float(packet["pts_time"])
+        duration = max(0.0, float(packet.get("duration_time") or 0.0))
+        packet_times[stream_index].append((start, start + duration))
+
+    timeline = {}
+    for stream_type in ("video", "audio"):
+        stream_index = next(
+            (index for index, kind in stream_types.items() if kind == stream_type),
+            None,
+        )
+        if stream_index is None:
+            timeline[stream_type] = None
+            continue
+        packets = sorted(packet_times[stream_index])
+        if not packets:
+            raise RuntimeError(f"Episode checkpoint has no {stream_type} packets: {path}")
+        max_gap = max(
+            (current[0] - previous[1] for previous, current in zip(packets, packets[1:])),
+            default=0.0,
+        )
+        timeline[stream_type] = {
+            "start": packets[0][0],
+            "duration": max(end for _, end in packets) - packets[0][0],
+            "max_packet_gap": max(0.0, max_gap),
+        }
+    return timeline
+
+
+def validate_episode_render(path):
+    duration = ffprobe_duration(path)
+    signature = ffprobe_media_signature(path)
+    timeline = ffprobe_episode_timeline(path)
+    if duration <= 0 or not signature or timeline["video"] is None:
+        raise RuntimeError(f"Episode checkpoint failed media validation: {path}")
+
+    for stream_type in ("video", "audio"):
+        stream = timeline[stream_type]
+        if stream is None:
+            continue
+        if abs(stream["start"]) > 0.1:
+            raise RuntimeError(
+                f"Episode checkpoint {stream_type} starts at {stream['start']:.3f}s: {path}"
+            )
+        if stream["max_packet_gap"] > 0.5:
+            raise RuntimeError(
+                f"Episode checkpoint {stream_type} packet gap "
+                f"{stream['max_packet_gap']:.3f}s: {path}"
+            )
+
+    if timeline["audio"] is not None:
+        difference = abs(timeline["video"]["duration"] - timeline["audio"]["duration"])
+        if difference > 0.25:
+            raise RuntimeError(f"Episode checkpoint A/V duration mismatch {difference:.3f}s: {path}")
+
+    return {
+        "duration": duration,
+        "media_signature": signature,
+        "timeline": timeline,
     }
 
 
@@ -511,6 +606,140 @@ def get_nvenc_fallback_codec(video_codec):
     if "hevc" in normalized or "h265" in normalized:
         return "libx265"
     return "libx264"
+
+
+def _build_episode_render_cmd(
+    ep_file,
+    output,
+    keep_segments,
+    watermark_path,
+    encoding,
+    audio_stream_index,
+):
+    if not keep_segments:
+        raise RuntimeError(f"Episode has no ranges to render: {ep_file}")
+
+    video_codec = encoding.get("video_codec", "h264_nvenc")
+    preset = encoding.get("preset", "fast")
+    cq = str(encoding.get("cq", 23))
+    audio_codec = encoding.get("audio_codec", "aac")
+    if audio_codec == "copy":
+        audio_codec = "aac"
+
+    filters = []
+    segment_count = len(keep_segments)
+    if segment_count > 1:
+        filters.append(
+            f"[0:v:0]split={segment_count}"
+            + "".join(f"[vsrc{index}]" for index in range(segment_count))
+        )
+        if audio_stream_index is not None:
+            filters.append(
+                f"[0:a:{audio_stream_index}]asplit={segment_count}"
+                + "".join(f"[asrc{index}]" for index in range(segment_count))
+            )
+
+    for index, (start, end) in enumerate(keep_segments):
+        video_input = f"[vsrc{index}]" if segment_count > 1 else "[0:v:0]"
+        filters.append(
+            f"{video_input}trim=start={start:.6f}:end={end:.6f},"
+            f"setpts=PTS-STARTPTS[v{index}]"
+        )
+        if audio_stream_index is not None:
+            audio_input = f"[asrc{index}]" if segment_count > 1 else f"[0:a:{audio_stream_index}]"
+            filters.append(
+                f"{audio_input}atrim=start={start:.6f}:end={end:.6f},"
+                f"asetpts=PTS-STARTPTS[a{index}]"
+            )
+
+    if segment_count > 1:
+        inputs = "".join(
+            f"[v{index}]" + (f"[a{index}]" if audio_stream_index is not None else "")
+            for index in range(segment_count)
+        )
+        filters.append(
+            f"{inputs}concat=n={segment_count}:v=1:a={1 if audio_stream_index is not None else 0}"
+            + ("[vcat][acat]" if audio_stream_index is not None else "[vcat]")
+        )
+    else:
+        filters.append("[v0]null[vcat]")
+        if audio_stream_index is not None:
+            filters.append("[a0]anull[acat]")
+
+    filters.extend([
+        "[vcat]format=yuv420p[base]",
+        "[1:v]scale=160:-1,format=rgba[wm]",
+        "[base][wm]overlay=W-w-20:20,format=yuv420p[vout]",
+    ])
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(ep_file),
+        "-i", str(watermark_path),
+        "-filter_complex", ";".join(filters),
+        "-map", "[vout]",
+        "-map_metadata", "-1",
+        "-map_chapters", "-1",
+    ]
+    if audio_stream_index is not None:
+        cmd += ["-map", "[acat]"]
+    cmd += ["-c:v", video_codec]
+    if "nvenc" in video_codec:
+        cmd += ["-preset", preset, "-cq", cq]
+    elif video_codec in {"libx264", "libx265"}:
+        cmd += ["-preset", preset, "-crf", cq]
+    pixel_format = encoding.get("pixel_format")
+    if pixel_format:
+        cmd += ["-pix_fmt", str(pixel_format)]
+    if audio_stream_index is not None:
+        cmd += [
+            "-c:a", audio_codec,
+            "-b:a", str(encoding.get("audio_bitrate", "192k")),
+            "-ar", str(encoding.get("audio_sample_rate", 48000)),
+            "-ac", str(encoding.get("audio_channels", 2)),
+        ]
+    cmd.append(str(output))
+    return cmd
+
+
+def render_episode(
+    ep_file,
+    output,
+    keep_segments,
+    watermark_path,
+    encoding,
+    audio_stream_index=None,
+):
+    cmd = _build_episode_render_cmd(
+        ep_file,
+        output,
+        keep_segments,
+        watermark_path,
+        encoding,
+        audio_stream_index,
+    )
+    video_codec = encoding.get("video_codec", "h264_nvenc")
+    try:
+        run(cmd)
+        return
+    except RuntimeError as exc:
+        called_process = exc.__cause__
+        exit_code = called_process.returncode if isinstance(
+            called_process, subprocess.CalledProcessError
+        ) else None
+        if "nvenc" not in str(video_codec).lower() or exit_code not in NVENC_FALLBACK_CODES:
+            raise
+
+    fallback_codec = get_nvenc_fallback_codec(video_codec)
+    print(f"[EPISODE RENDER] NVENC failed (code {exit_code}), falling back to {fallback_codec}")
+    fallback_encoding = {**encoding, "video_codec": fallback_codec, "preset": "fast"}
+    run(_build_episode_render_cmd(
+        ep_file,
+        output,
+        keep_segments,
+        watermark_path,
+        fallback_encoding,
+        audio_stream_index,
+    ))
 
 
 def _build_final_cmd(concat_output, watermark_path, output_video, encoding, audio_stream_index):

@@ -225,8 +225,15 @@ def seconds_to_timestamp(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def create_concat_file(segment_files, path: Path):
+def create_concat_file(segment_files, path: Path, durations=None):
+    if durations is not None and len(segment_files) != len(durations):
+        raise ValueError("segment_files and durations must have equal length")
+
     with open(path, "w", encoding="utf-8") as file:
-        for segment in segment_files:
+        if durations is not None:
+            file.write("ffconcat version 1.0\n")
+        for index, segment in enumerate(segment_files):
             resolved = str(segment.resolve()).replace("'", r"'\''")
             file.write(f"file '{resolved}'\n")
+            if durations is not None:
+                file.write(f"duration {float(durations[index]):.6f}\n")

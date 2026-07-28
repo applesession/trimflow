@@ -33,7 +33,7 @@ main.py              # Точка входа: ручной запуск
 - `assets/watermark.png` — watermark для итогового видео
 - `input/` — локальные исходники, если источник `local`
 - `downloads/` — временные загрузки из magnet
-- `temp/` — промежуточные сегменты и concat-файлы
+- `temp/` — готовые episode-checkpoints и concat-файлы
 - `output/` — готовые результаты
 
 ## Что нужно для работы
@@ -120,9 +120,9 @@ pip install -r requirements.txt
 - `max_segment_seconds`
 - `auto_cut_min_confidence`
 
-`encoding` может отдельно управлять финальным и промежуточным encode:
-- `video_codec` / `preset` / `cq` — финальный рендер
-- `segment_video_codec` / `segment_preset` / `segment_cq` / `segment_pixel_format` — нарезка сегментов перед склейкой
+`encoding` управляет encode каждой готовой серии:
+- `video_codec` / `preset` / `cq`
+- `audio_codec`
 
 `delivery` управляет выходными каналами:
 - `s3_enabled`
@@ -249,7 +249,8 @@ VK-доставка теперь поддерживает два сценари�
 - По умолчанию `AniSkip` сейчас выключен через `timing_providers.aniskip_enabled = false`, и pipeline опирается на `AniLiberty + local detector`.
 - Если включён `timing_detection`, скрипт пытается достроить отсутствующие `OP/ED` локальным audio-detector'ом по нескольким сериям сезона.
 - Detector режет автоматически только интервалы с `high` confidence; всё остальное помечается как `manual_review` в `timing_info`.
-- Сегменты теперь режутся с точным seek через re-encode, чтобы `op/ed` обрезались аккуратнее, чем при `-c copy`.
+- Каждая серия за один encode получает точные OP/ED-вырезы, обнулённые PTS и watermark; soft subtitles в VK-компиляцию не переносятся.
 - После успешной обработки временные папки могут очищаться автоматически, если это включено в `cleanup`.
-- При ошибке compilation render готовые финальные чанки остаются в `temp/` и используются следующим запуском; итоговая сборка выполняется через `ffmpeg -c copy`.
+- При ошибке compilation render готовые episode-checkpoints остаются в `temp/`; retry повторяет только повреждённую/неготовую серию, а итоговая сборка выполняется через `ffmpeg -c copy`.
+- Тайминги VK считаются по фактической `ffprobe`-длительности episode-checkpoints.
 - Если render-процесс аварийно исчез, следующий cron вернёт job в очередь, запишет `render_interrupted` и отправит Telegram; OOM определяется через `journalctl` best-effort.
