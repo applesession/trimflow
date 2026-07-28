@@ -3,13 +3,13 @@ import json
 import os
 import shutil
 import subprocess
-from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path
 
 from api.vk import publish_video_to_vk
 from core.discovery import filter_episode_files, find_episode_files
-from core.torrent import download_selected_episodes
+from core.torrent import download_torrent_episode, prepare_torrent_episode_downloads
 from shared.helpers import (
     ensure_non_empty_slug,
     get_display_title,
@@ -206,6 +206,27 @@ def _valid_render_checkpoint(source_path, output_path, episode_state):
     return True
 
 
+def _download_upscale_source(torrent_path, download_dir, selected, *, prefetch=False):
+    episode = int(selected["episode"])
+    slot_dir = Path(download_dir) / f"episode_{episode:03d}"
+    label = "4K PREFETCH" if prefetch else "4K DOWNLOAD"
+    print(f"[{label} START] episode={episode} slot={slot_dir}")
+    try:
+        download_torrent_episode(torrent_path, slot_dir, selected)
+        detected, _ = find_episode_files(slot_dir)
+        episode_files, _ = filter_episode_files(detected, {episode})
+        if len(episode_files) != 1:
+            raise RuntimeError(
+                f"Expected one source file for episode {episode}, found {len(episode_files)}"
+            )
+        source_path = Path(episode_files[0][1])
+        print(f"[{label} READY] episode={episode} source={source_path}")
+        return source_path
+    except Exception as exc:
+        print(f"[{label} FAILED] episode={episode} error={repr(exc)}")
+        raise
+
+
 def process_upscale_job(config, job, runtime_status_path=None, on_episode_success=None):
     if job.get("processing_mode") != "upscale_4k":
         raise RuntimeError("Not an upscale_4k job")
@@ -224,88 +245,119 @@ def process_upscale_job(config, job, runtime_status_path=None, on_episode_succes
     requested_episodes = parse_episodes_range(job["episodes_range"])
 
     _update_status(runtime_status_path, current_stage="upscale_download", current_job={"stage": "upscale_download"})
-    download_selected_episodes(
+    torrent_path, selected_episodes = prepare_torrent_episode_downloads(
         source["magnet"],
         download_dir,
         requested_episodes,
         path_filter=(job.get("processing") or {}).get("source_path_contains"),
     )
-    detected, _ = find_episode_files(download_dir)
-    episode_files, _ = filter_episode_files(detected, requested_episodes)
-    found_episodes = [episode for episode, _ in episode_files]
-    duplicates = sorted(episode for episode, count in Counter(found_episodes).items() if count > 1)
-    missing = sorted(requested_episodes - set(found_episodes))
-    if duplicates:
-        raise RuntimeError(f"Multiple source files found for episodes: {duplicates}")
-    if missing:
-        raise RuntimeError(f"Source episodes not found: {missing}")
-    total = len(episode_files)
-
-    for episode, source_path in episode_files:
-        episode_key = str(int(episode))
-        episode_state = manifest["episodes"].get(episode_key) or {}
+    cleanup = job.get("cleanup") or {}
+    total = len(selected_episodes)
+    remaining = []
+    for selected in selected_episodes:
+        episode = int(selected["episode"])
+        episode_state = manifest["episodes"].get(str(episode)) or {}
         if (episode_state.get("delivery") or {}).get("video_uploaded"):
+            if cleanup.get("downloads", True):
+                shutil.rmtree(download_dir / f"episode_{episode:03d}", ignore_errors=True)
             continue
+        remaining.append(selected)
 
-        pretty_name = _build_episode_title(job, episode)
-        output_path = output_dir / f"{sanitize_filename(pretty_name)}.mkv"
-        work_path = output_path.with_suffix(".work.mkv")
-        _update_status(
-            runtime_status_path,
-            current_stage="upscale_render",
-            current_job={
-                "stage": "upscale_render",
-                "current_episode": int(episode),
-                "total_episodes": total,
-                "current_episode_file": Path(source_path).name,
-            },
-        )
+    current_source = (
+        _download_upscale_source(torrent_path, download_dir, remaining[0])
+        if remaining
+        else None
+    )
+    with ThreadPoolExecutor(max_workers=1) as download_pool:
+        for position, selected in enumerate(remaining):
+            episode = int(selected["episode"])
+            next_selected = remaining[position + 1] if position + 1 < len(remaining) else None
+            next_download = (
+                download_pool.submit(
+                    _download_upscale_source,
+                    torrent_path,
+                    download_dir,
+                    next_selected,
+                    prefetch=True,
+                )
+                if next_selected
+                else None
+            )
+            episode_key = str(episode)
+            episode_state = manifest["episodes"].get(episode_key) or {}
+            pretty_name = _build_episode_title(job, episode)
+            output_path = output_dir / f"{sanitize_filename(pretty_name)}.mkv"
+            work_path = output_path.with_suffix(".work.mkv")
+            _update_status(
+                runtime_status_path,
+                current_stage="upscale_render",
+                current_job={
+                    "stage": "upscale_render",
+                    "current_episode": episode,
+                    "total_episodes": total,
+                    "current_episode_file": Path(current_source).name,
+                },
+            )
+            try:
+                validate_upscale_source(current_source)
 
-        validate_upscale_source(source_path)
+                if not _valid_render_checkpoint(current_source, output_path, episode_state):
+                    work_path.unlink(missing_ok=True)
+                    run_video2x(config, current_source, work_path)
+                    media = validate_upscale_output(current_source, work_path)
+                    os.replace(work_path, output_path)
+                    episode_state = {
+                        "episode": int(episode),
+                        "source": _source_fingerprint(current_source),
+                        "output": str(output_path),
+                        "render_complete": True,
+                        "media": media,
+                        "delivery": {},
+                    }
+                    manifest["episodes"][episode_key] = episode_state
+                    _atomic_write_json(manifest_path, manifest)
 
-        if not _valid_render_checkpoint(source_path, output_path, episode_state):
-            work_path.unlink(missing_ok=True)
-            run_video2x(config, source_path, work_path)
-            media = validate_upscale_output(source_path, work_path)
-            os.replace(work_path, output_path)
-            episode_state = {
-                "episode": int(episode),
-                "source": _source_fingerprint(source_path),
-                "output": str(output_path),
-                "render_complete": True,
-                "media": media,
-                "delivery": {},
-            }
-            manifest["episodes"][episode_key] = episode_state
-            _atomic_write_json(manifest_path, manifest)
+                _update_status(
+                    runtime_status_path,
+                    current_stage="upscale_delivery_vk",
+                    current_job={"stage": "upscale_delivery_vk", "current_episode": int(episode)},
+                )
+                vk_result = publish_video_to_vk(
+                    output_path,
+                    pretty_name,
+                    pretty_name,
+                    wall_post_text=pretty_name,
+                    privacy_view=5,
+                )
+                episode_state["delivery"] = vk_result
+                manifest["episodes"][episode_key] = episode_state
+                _atomic_write_json(manifest_path, manifest)
+                if not vk_result.get("video_uploaded"):
+                    raise RuntimeError(vk_result.get("error") or "VK video upload failed")
+                if cleanup.get("downloads", True):
+                    shutil.rmtree(download_dir / f"episode_{episode:03d}", ignore_errors=True)
+                if cleanup.get("output", True):
+                    output_path.unlink(missing_ok=True)
+                if on_episode_success:
+                    on_episode_success(job, episode, vk_result)
+            except Exception:
+                if next_download:
+                    try:
+                        next_download.result()
+                    except Exception:
+                        pass
+                raise
 
-        _update_status(
-            runtime_status_path,
-            current_stage="upscale_delivery_vk",
-            current_job={"stage": "upscale_delivery_vk", "current_episode": int(episode)},
-        )
-        vk_result = publish_video_to_vk(
-            output_path,
-            pretty_name,
-            pretty_name,
-            wall_post_text=pretty_name,
-            privacy_view=5,
-        )
-        episode_state["delivery"] = vk_result
-        manifest["episodes"][episode_key] = episode_state
-        _atomic_write_json(manifest_path, manifest)
-        if not vk_result.get("video_uploaded"):
-            raise RuntimeError(vk_result.get("error") or "VK video upload failed")
-        if (job.get("cleanup") or {}).get("output", True):
-            output_path.unlink(missing_ok=True)
-        if on_episode_success:
-            on_episode_success(job, int(episode), vk_result)
+            if next_download:
+                current_source = next_download.result()
 
     completed = all(
-        (manifest["episodes"].get(str(int(episode))) or {}).get("delivery", {}).get("video_uploaded")
-        for episode, _ in episode_files
+        (manifest["episodes"].get(str(int(selected["episode"]))) or {})
+        .get("delivery", {})
+        .get("video_uploaded")
+        for selected in selected_episodes
     )
-    if completed and (job.get("cleanup") or {}).get("downloads", True):
+    if completed and cleanup.get("downloads", True):
         shutil.rmtree(download_dir, ignore_errors=True)
     return {
         "completed": completed,

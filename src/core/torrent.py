@@ -157,13 +157,43 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
     return selected
 
 
-def download_selected_episodes(magnet, download_dir, allowed_episodes, path_filter=None, timeout=None):
+def prepare_torrent_episode_downloads(
+    magnet,
+    download_dir,
+    allowed_episodes,
+    path_filter=None,
+    timeout=None,
+):
     download_dir, marker_path, marker = _prepare_download_dir(download_dir, magnet, path_filter)
     torrent_path = _ensure_torrent_metadata(magnet, download_dir, marker_path, marker, timeout=timeout)
     selected = select_torrent_episode_files(
         list_torrent_files(torrent_path),
         allowed_episodes,
         path_filter=path_filter,
+    )
+    return torrent_path, selected
+
+
+def download_torrent_episode(torrent_path, slot_dir, selected, timeout=None):
+    slot_dir = Path(slot_dir)
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    print("[TORRENT SELECT] " + json.dumps([selected], ensure_ascii=False))
+    run([
+        "aria2c",
+        *_aria_common_options(slot_dir),
+        f"--select-file={int(selected['index'])}",
+        "--bt-remove-unselected-file=true",
+        str(torrent_path),
+    ], timeout=timeout)
+
+
+def download_selected_episodes(magnet, download_dir, allowed_episodes, path_filter=None, timeout=None):
+    torrent_path, selected = prepare_torrent_episode_downloads(
+        magnet,
+        download_dir,
+        allowed_episodes,
+        path_filter=path_filter,
+        timeout=timeout,
     )
     indices = ",".join(str(item["index"]) for item in selected)
     print("[TORRENT SELECT] " + json.dumps(selected, ensure_ascii=False))

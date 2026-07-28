@@ -1,13 +1,18 @@
+import json
 import shutil
+import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
 from lib import reset_test_db
 from core.runner import run_jobs
-from core.upscale import build_video2x_command, process_upscale_job
+from core.upscale import build_video2x_command, cleanup_cancelled_upscale_job, process_upscale_job
 from shared.db import claim_job, insert_one_job, load_jobs, recover_running_jobs
+from shared.helpers import JobCancelled, cancellation_scope, run
 
 
 class UpscaleTests(unittest.TestCase):
@@ -83,15 +88,57 @@ class UpscaleTests(unittest.TestCase):
         self.assertIn("cq=23", command)
         self.assertNotIn("watermark", " ".join(command).lower())
 
+    def test_cancellation_stops_render_and_prefetch_subprocesses_and_cleans_slots(self):
+        job = self.make_job()
+        download_dir = Path(job["source"]["download_dir"])
+        output_dir = Path(job["output_dir"]) / "Test_Anime"
+        (download_dir / "episode_001").mkdir(parents=True)
+        (download_dir / "episode_002").mkdir(parents=True)
+        output_dir.mkdir(parents=True)
+
+        with cancellation_scope(lambda: True):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(run, [sys.executable, "-c", "import time; time.sleep(30)"])
+                    for _ in range(2)
+                ]
+                for future in futures:
+                    with self.assertRaises(JobCancelled):
+                        future.result(timeout=5)
+
+        cleanup_cancelled_upscale_job(job)
+        self.assertFalse(download_dir.exists())
+        self.assertFalse(output_dir.exists())
+
+    def _selected(self, count):
+        return [
+            {
+                "episode": episode,
+                "index": episode * 10,
+                "path": f"Release/Show [{episode:03d}].mkv",
+            }
+            for episode in range(1, count + 1)
+        ]
+
+    def _fake_source_download(self, _torrent, download_dir, selected, **_kwargs):
+        episode = int(selected["episode"])
+        source = Path(download_dir) / f"episode_{episode:03d}" / f"episode_{episode:03d}.mkv"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        if not source.exists():
+            source.write_bytes(f"episode-{episode}".encode())
+        return source
+
     @patch("core.upscale.validate_upscale_output", return_value={"duration": 120, "video": {"width": 3840}})
     @patch("core.upscale.validate_upscale_source", return_value={"duration": 120, "video": {"width": 1920}})
     @patch("core.upscale.validate_upscale_environment")
     @patch("core.upscale.publish_video_to_vk")
     @patch("core.upscale.run_video2x")
-    @patch("core.upscale.download_selected_episodes")
-    def test_delivery_retry_reuses_episode_checkpoint(
+    @patch("core.upscale._download_upscale_source")
+    @patch("core.upscale.prepare_torrent_episode_downloads")
+    def test_delivery_retry_reuses_prefetched_source_and_output_checkpoint(
         self,
-        _mock_download,
+        mock_prepare,
+        mock_download,
         mock_video2x,
         mock_publish,
         _mock_environment,
@@ -101,11 +148,8 @@ class UpscaleTests(unittest.TestCase):
         job = self.make_job()
         download_dir = Path(job["source"]["download_dir"])
         download_dir.mkdir(parents=True)
-        episode_files = []
-        for episode in (1, 2):
-            path = download_dir / f"episode_{episode:02d}.mkv"
-            path.write_bytes(f"episode-{episode}".encode())
-            episode_files.append((episode, path))
+        mock_prepare.return_value = (download_dir / "release.torrent", self._selected(2))
+        mock_download.side_effect = self._fake_source_download
 
         def fake_render(_config, _source, output):
             Path(output).write_bytes(b"4k-video")
@@ -119,23 +163,147 @@ class UpscaleTests(unittest.TestCase):
         }
         mock_publish.side_effect = [success, RuntimeError("vk down")]
 
-        with patch("core.upscale.find_episode_files", return_value=(episode_files, [])):
-            with self.assertRaisesRegex(RuntimeError, "vk down"):
-                process_upscale_job({}, job)
+        with self.assertRaisesRegex(RuntimeError, "vk down"):
+            process_upscale_job({}, job)
 
-            self.assertEqual(mock_video2x.call_count, 2)
-            mock_video2x.reset_mock()
-            mock_publish.reset_mock()
-            mock_publish.side_effect = None
-            mock_publish.return_value = success
+        self.assertEqual(mock_video2x.call_count, 2)
+        self.assertFalse((download_dir / "episode_001").exists())
+        self.assertTrue((download_dir / "episode_002").exists())
+        mock_video2x.reset_mock()
+        mock_publish.reset_mock()
+        mock_publish.side_effect = None
+        mock_publish.return_value = success
 
-            result = process_upscale_job({}, job)
+        result = process_upscale_job({}, job)
 
         self.assertTrue(result["completed"])
         mock_video2x.assert_not_called()
         mock_publish.assert_called_once()
         self.assertEqual(mock_publish.call_args.kwargs["privacy_view"], 5)
         self.assertFalse(download_dir.exists())
+
+    @patch("core.upscale.validate_upscale_output", return_value={"duration": 120, "video": {"width": 3840}})
+    @patch("core.upscale.validate_upscale_source", return_value={"duration": 120, "video": {"width": 1920}})
+    @patch("core.upscale.validate_upscale_environment")
+    @patch("core.upscale.publish_video_to_vk", return_value={"video_uploaded": True})
+    @patch("core.upscale.run_video2x")
+    @patch("core.upscale._download_upscale_source")
+    @patch("core.upscale.prepare_torrent_episode_downloads")
+    def test_prefetch_keeps_only_one_episode_ahead(
+        self,
+        mock_prepare,
+        mock_download,
+        mock_video2x,
+        _mock_publish,
+        _mock_environment,
+        _mock_source,
+        _mock_validate,
+    ):
+        job = self.make_job("001-003")
+        download_dir = Path(job["source"]["download_dir"])
+        mock_prepare.return_value = (download_dir / "release.torrent", self._selected(3))
+        events = []
+        episode_two_ready = threading.Event()
+
+        def fake_download(torrent, root, selected, **kwargs):
+            episode = int(selected["episode"])
+            events.append(f"download:{episode}")
+            source = self._fake_source_download(torrent, root, selected)
+            if episode == 2:
+                episode_two_ready.set()
+            return source
+
+        def fake_render(_config, source, output):
+            episode = int(Path(source).stem.rsplit("_", 1)[-1])
+            events.append(f"render_start:{episode}")
+            if episode == 1:
+                self.assertTrue(episode_two_ready.wait(timeout=1))
+                self.assertNotIn("download:3", events)
+            if episode == 2:
+                self.assertFalse((download_dir / "episode_001").exists())
+            Path(output).write_bytes(b"4k")
+            events.append(f"render_end:{episode}")
+
+        mock_download.side_effect = fake_download
+        mock_video2x.side_effect = fake_render
+
+        result = process_upscale_job({}, job)
+
+        self.assertTrue(result["completed"])
+        self.assertLess(events.index("download:2"), events.index("render_end:1"))
+        self.assertGreater(events.index("download:3"), events.index("render_end:1"))
+        self.assertFalse(download_dir.exists())
+
+    @patch("core.upscale.validate_upscale_output", return_value={"duration": 120, "video": {"width": 3840}})
+    @patch("core.upscale.validate_upscale_source", return_value={"duration": 120, "video": {"width": 1920}})
+    @patch("core.upscale.validate_upscale_environment")
+    @patch("core.upscale.publish_video_to_vk", return_value={"video_uploaded": True})
+    @patch("core.upscale.run_video2x")
+    @patch("core.upscale._download_upscale_source")
+    @patch("core.upscale.prepare_torrent_episode_downloads")
+    def test_prefetch_failure_does_not_cancel_current_publish(
+        self,
+        mock_prepare,
+        mock_download,
+        mock_video2x,
+        mock_publish,
+        _mock_environment,
+        _mock_source,
+        _mock_validate,
+    ):
+        job = self.make_job()
+        download_dir = Path(job["source"]["download_dir"])
+        mock_prepare.return_value = (download_dir / "release.torrent", self._selected(2))
+
+        def fake_download(torrent, root, selected, **kwargs):
+            if int(selected["episode"]) == 2:
+                raise RuntimeError("prefetch failed")
+            return self._fake_source_download(torrent, root, selected)
+
+        mock_download.side_effect = fake_download
+        mock_video2x.side_effect = lambda _config, _source, output: Path(output).write_bytes(b"4k")
+
+        with self.assertRaisesRegex(RuntimeError, "prefetch failed"):
+            process_upscale_job({}, job)
+
+        mock_publish.assert_called_once()
+        manifest = next((Path(job["output_dir"])).rglob("upscale_manifest.json"))
+        state = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertTrue(state["episodes"]["1"]["delivery"]["video_uploaded"])
+        self.assertFalse((download_dir / "episode_001").exists())
+
+    @patch("core.upscale.validate_upscale_source", return_value={"duration": 120, "video": {"width": 1920}})
+    @patch("core.upscale.validate_upscale_environment")
+    @patch("core.upscale.run_video2x", side_effect=RuntimeError("render failed"))
+    @patch("core.upscale._download_upscale_source")
+    @patch("core.upscale.prepare_torrent_episode_downloads")
+    def test_render_failure_preserves_current_and_prefetched_sources(
+        self,
+        mock_prepare,
+        mock_download,
+        _mock_video2x,
+        _mock_environment,
+        _mock_source,
+    ):
+        job = self.make_job()
+        download_dir = Path(job["source"]["download_dir"])
+        mock_prepare.return_value = (download_dir / "release.torrent", self._selected(2))
+        next_ready = threading.Event()
+
+        def fake_download(torrent, root, selected, **kwargs):
+            source = self._fake_source_download(torrent, root, selected)
+            if int(selected["episode"]) == 2:
+                next_ready.set()
+            return source
+
+        mock_download.side_effect = fake_download
+
+        with self.assertRaisesRegex(RuntimeError, "render failed"):
+            process_upscale_job({}, job)
+
+        self.assertTrue(next_ready.is_set())
+        self.assertTrue((download_dir / "episode_001").exists())
+        self.assertTrue((download_dir / "episode_002").exists())
 
 
 if __name__ == "__main__":

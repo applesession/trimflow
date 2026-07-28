@@ -9,6 +9,8 @@ from lib import reset_test_db  # noqa: F401 - initializes src on sys.path
 from core.torrent import (
     SOURCE_MARKER_NAME,
     download_selected_episodes,
+    download_torrent_episode,
+    prepare_torrent_episode_downloads,
     select_torrent_episode_files,
 )
 
@@ -104,6 +106,49 @@ class TorrentSelectionTests(unittest.TestCase):
         self.assertIn("--select-file=1,2,3", calls[1])
         self.assertIn("--bt-remove-unselected-file=true", calls[1])
         self.assertTrue(str(calls[1][-1]).endswith("release.torrent"))
+
+    @patch("core.torrent.subprocess.check_output")
+    @patch("core.torrent.run")
+    def test_prepare_validates_full_range_without_payload_download(self, mock_run, mock_show):
+        download_dir = self.make_temp_dir() / "downloads"
+
+        def fake_run(command, timeout=None):
+            (download_dir / "release.torrent").write_bytes(b"metadata")
+
+        mock_run.side_effect = fake_run
+        mock_show.return_value = "\n".join([
+            " 1|Release/Show [001] [1080p].mkv",
+            " 2|Release/Show [002] [1080p].mkv",
+        ])
+
+        torrent_path, selected = prepare_torrent_episode_downloads(
+            "magnet:?xt=urn:btih:first",
+            download_dir,
+            {1, 2},
+        )
+
+        self.assertEqual(torrent_path, download_dir / "release.torrent")
+        self.assertEqual([item["index"] for item in selected], [1, 2])
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertIn("--bt-metadata-only=true", mock_run.call_args.args[0])
+
+    @patch("core.torrent.run")
+    def test_single_episode_download_uses_isolated_slot_and_one_index(self, mock_run):
+        root = self.make_temp_dir()
+        torrent_path = root / "release.torrent"
+        torrent_path.write_bytes(b"metadata")
+        slot_dir = root / "episode_002"
+
+        download_torrent_episode(
+            torrent_path,
+            slot_dir,
+            {"episode": 2, "index": 42, "path": "Release/Show [002].mkv"},
+        )
+
+        command = mock_run.call_args.args[0]
+        self.assertEqual(command[command.index("--dir") + 1], str(slot_dir))
+        self.assertIn("--select-file=42", command)
+        self.assertIn("--bt-remove-unselected-file=true", command)
 
     @patch("core.torrent.subprocess.check_output")
     @patch("core.torrent.run")
