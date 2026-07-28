@@ -78,6 +78,7 @@ class UpscaleTests(unittest.TestCase):
         self.assertIn("--appimage-extract-and-run", command)
         self.assertIn("realesr-animevideov3", command)
         self.assertIn("h264_nvenc", command)
+        self.assertEqual(command[command.index("--pix-fmt") + 1], "yuv420p")
         self.assertIn("preset=fast", command)
         self.assertIn("cq=23", command)
         self.assertNotIn("watermark", " ".join(command).lower())

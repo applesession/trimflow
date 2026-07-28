@@ -139,6 +139,7 @@ def build_video2x_command(config, source_path, output_path):
         "-s", "2",
         "--realesrgan-model", "realesr-animevideov3",
         "-c", "h264_nvenc",
+        "--pix-fmt", "yuv420p",
         "-e", "preset=fast",
         "-e", "cq=23",
     ])
