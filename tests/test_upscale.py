@@ -173,12 +173,16 @@ class UpscaleTests(unittest.TestCase):
         mock_publish.reset_mock()
         mock_publish.side_effect = None
         mock_publish.return_value = success
+        job["processing"] = {
+            "naming": {"navigation_label": "Перерождение", "source": "manual"},
+        }
 
         result = process_upscale_job({}, job)
 
         self.assertTrue(result["completed"])
         mock_video2x.assert_not_called()
         mock_publish.assert_called_once()
+        self.assertIn("Перерождение", mock_publish.call_args.args[1])
         self.assertEqual(mock_publish.call_args.kwargs["privacy_view"], 5)
         self.assertFalse(download_dir.exists())
 

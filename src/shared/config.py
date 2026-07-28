@@ -50,6 +50,7 @@ def build_default_state():
         "job_index": {},
         "skipped_items": [],
         "ongoing_progress": {},
+        "release_naming_overrides": {},
     }
 
 
@@ -84,6 +85,7 @@ def load_state(config):
     state.setdefault("job_index", {})
     state.setdefault("skipped_items", [])
     state.setdefault("ongoing_progress", {})
+    state.setdefault("release_naming_overrides", {})
     state.pop("seen_release_episodes", None)
     return state
 

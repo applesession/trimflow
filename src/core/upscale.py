@@ -12,6 +12,7 @@ from core.discovery import filter_episode_files, find_episode_files
 from core.torrent import download_torrent_episode, prepare_torrent_episode_downloads
 from shared.helpers import (
     ensure_non_empty_slug,
+    build_single_episode_display_name,
     get_display_title,
     parse_episodes_range,
     raise_if_cancelled,
@@ -171,10 +172,7 @@ def cleanup_cancelled_upscale_job(job):
 
 
 def _build_episode_title(job, episode):
-    return (
-        f"{get_display_title(job)} - {int(job.get('season', 1))} Сезон "
-        f"{int(episode)} Серия [4K]"
-    )
+    return f"{build_single_episode_display_name(job, job.get('season', 1), episode)} [4K]"
 
 
 def _load_manifest(job, manifest_path):
@@ -287,6 +285,11 @@ def process_upscale_job(config, job, runtime_status_path=None, on_episode_succes
             episode_state = manifest["episodes"].get(episode_key) or {}
             pretty_name = _build_episode_title(job, episode)
             output_path = output_dir / f"{sanitize_filename(pretty_name)}.mkv"
+            checkpoint_output = episode_state.get("output")
+            if episode_state.get("render_complete") and checkpoint_output:
+                checkpoint_output = Path(checkpoint_output)
+                if checkpoint_output.is_file():
+                    output_path = checkpoint_output
             work_path = output_path.with_suffix(".work.mkv")
             _update_status(
                 runtime_status_path,

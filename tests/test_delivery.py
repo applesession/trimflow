@@ -10,6 +10,7 @@ from lib.helpers import (
     build_vk_comment_text,
     build_vk_wall_post_text,
     format_episodes_label,
+    get_navigation_label,
     sanitize_filename,
 )
 from lib.pipeline import build_compact_manifest, build_delivery_config
@@ -67,7 +68,7 @@ class DeliveryTests(unittest.TestCase):
             "001-011",
         )
 
-        self.assertEqual(result, "Звёздное дитя - 1 Сезон 1-11 Серия [Без OP/ED]")
+        self.assertEqual(result, "Звёздное дитя - Сезон 1 1-11 Серия [Без OP/ED]")
 
     def test_build_compilation_display_name_falls_back_to_title(self):
         result = build_compilation_display_name(
@@ -76,7 +77,55 @@ class DeliveryTests(unittest.TestCase):
             "001,003,005-007",
         )
 
-        self.assertEqual(result, "Yomi no Tsugai - 1 Сезон 1,3,5-7 Серия [Без OP/ED]")
+        self.assertEqual(result, "Yomi no Tsugai - Сезон 1 1,3,5-7 Серия [Без OP/ED]")
+
+    def test_navigation_label_requires_confirmed_season_or_release_type(self):
+        self.assertEqual(
+            get_navigation_label({
+                "title": "Seihantai na Kimi to Boku 2nd Season",
+                "title_ru": "Ты и я — полные противоположности 2",
+                "season": 1,
+                "automation": {"release_id": 10237, "release_type": "TV"},
+            }),
+            "Сезон 2",
+        )
+        self.assertEqual(
+            get_navigation_label({
+                "title": "Evangelion: 2.22 You Can (Not) Advance",
+                "title_ru": "Евангелион: 2.22 Ты (не) пройдёшь",
+                "automation": {"release_id": 5009, "release_type": "MOVIE"},
+            }),
+            "Фильм",
+        )
+        self.assertEqual(
+            get_navigation_label({
+                "title": "86",
+                "title_ru": "86",
+                "automation": {"release_id": 86, "release_type": "TV"},
+            }),
+            None,
+        )
+        self.assertEqual(
+            get_navigation_label({
+                "title": "Wrong 3rd Season",
+                "title_ru": "Несовпадение 2",
+                "automation": {"release_id": 3, "release_type": "TV"},
+            }),
+            None,
+        )
+
+    def test_unknown_navigation_label_is_omitted_from_display_name(self):
+        result = build_compilation_display_name(
+            {
+                "title": "86",
+                "title_ru": "86",
+                "automation": {"release_id": 86, "release_type": "TV"},
+            },
+            1,
+            "001-012",
+        )
+
+        self.assertEqual(result, "86 - 1-12 Серия [Без OP/ED]")
 
     def test_build_timestamps_description_matches_txt_format(self):
         timestamps = [

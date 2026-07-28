@@ -30,8 +30,16 @@ from shared.db import (
     insert_one_job,
     remove_job as _db_cancel_job,
     remove_pending_job as _db_remove_job,
+    update_job_processing,
 )
-from shared.helpers import ensure_non_empty_slug, parse_episodes_range
+from shared.helpers import (
+    clear_navigation_label,
+    ensure_non_empty_slug,
+    get_display_title,
+    get_navigation_label,
+    parse_episodes_range,
+    set_navigation_label,
+)
 from core.runner import build_execution_order
 from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
 
@@ -39,18 +47,19 @@ from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runti
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
 
-def get_display_title(job):
-    if not isinstance(job, dict):
-        return "Без названия"
-    for key in ["title_ru", "title"]:
-        value = job.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return "Без названия"
-
-
 def format_bool_ru(value):
     return "да" if value else "нет"
+
+
+def _navigation_lines(job, prefix="Метка: "):
+    label = get_navigation_label(job)
+    return [f"{prefix}{label}"] if label else []
+
+
+def _job_inline_details(job):
+    return " ".join(
+        part for part in [get_navigation_label(job), job.get("episodes_range", "?")] if part
+    )
 
 
 def format_reason_ru(reason):
@@ -926,7 +935,7 @@ def format_current_message():
             "Текущая обработка",
             "",
             f"Тайтл: {get_display_title(current_job)}",
-            f"Сезон: {current_job.get('season', '?')}",
+            *_navigation_lines(current_job),
             f"Эпизоды: {current_job.get('episodes_range', '?')}",
             f"Этап: {format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage'))}",
             (
@@ -974,7 +983,7 @@ def format_upscale_message():
             "Текущий 4K upscale",
             "",
             f"Тайтл: {get_display_title(current_job)}",
-            f"Сезон: {current_job.get('season', '?')}",
+            *_navigation_lines(current_job),
             f"Серия: {current_job.get('current_episode') or 'подготовка'} / {current_job.get('total_episodes') or '?'}",
             f"Этап: {format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage'))}",
             f"Старт: {format_datetime_ru(current_job.get('started_at') or runtime_status.get('run_started_at'))}",
@@ -1076,7 +1085,7 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True, jobs=None):
         ongoing_marker = " [ongoing]" if (job.get("automation") or {}).get("is_ongoing") else ""
         upscale_marker = " [4K]" if job.get("processing_mode") == "upscale_4k" else ""
         lines.append(f"{prefix}{get_display_title(job)}{ongoing_marker}{upscale_marker}")
-        lines.append(f"  Сезон: {job.get('season', 1)}")
+        lines.extend(_navigation_lines(job, "  Метка: "))
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
 
@@ -1111,14 +1120,17 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
 
     def _job_line(index, job):
         title = escape_markdown_v2(get_display_title(job))
-        season = f"S{job.get('season', 1)}"
+        navigation_label = get_navigation_label(job)
         eps = job.get("episodes_range", "?")
         is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
         eps_label = "серия" if is_single else "серии"
         mode_label = " · `4K`" if job.get("processing_mode") == "upscale_4k" else ""
+        details = [f"{eps_label} `{eps}`"]
+        if navigation_label:
+            details.insert(0, escape_markdown_v2(navigation_label))
         return [
             f"*{index}\\. {title}*",
-            f"└ {season} · {eps_label} `{eps}`{mode_label}",
+            f"└ {' · '.join(details)}{mode_label}",
         ]
 
     title_word = "тайтл" if total == 1 else ("тайтла" if 2 <= total <= 4 else "тайтлов")
@@ -1238,6 +1250,59 @@ def parse_index_command(text, command_name):
     return parse_index_range(text, command_name)[0]
 
 
+def parse_label_command(text):
+    if not str(text or "").startswith("/label "):
+        raise RuntimeError("Формат: /label <номер> ; <метка|auto>")
+    parts = [part.strip() for part in text[len("/label "):].split(";", 1)]
+    if len(parts) != 2:
+        raise RuntimeError("Формат: /label <номер> ; <метка|auto>")
+    try:
+        index = int(parts[0])
+    except ValueError as exc:
+        raise RuntimeError("Номер должен быть целым числом") from exc
+    if index < 1:
+        raise RuntimeError("Номер должен быть не меньше 1")
+    label = parts[1]
+    if not label:
+        raise RuntimeError("Метка не должна быть пустой")
+    if len(label) > 50:
+        raise RuntimeError("Метка должна быть не длиннее 50 символов")
+    return index, label
+
+
+def update_job_navigation_label(config, text):
+    index, label = parse_label_command(text)
+    job, _ = get_job_by_index(config, index)
+    release_id = get_job_release_id(job)
+    state = load_state(config)
+    overrides = dict(state.get("release_naming_overrides", {}))
+
+    if label.casefold() == "auto":
+        clear_navigation_label(job)
+        if release_id is not None:
+            overrides.pop(str(release_id), None)
+    else:
+        set_navigation_label(job, label, source="manual")
+        if release_id is not None:
+            overrides[str(release_id)] = label
+
+    queue_id = job.get("_queue_id")
+    if queue_id is None or not update_job_processing(queue_id, job.get("processing")):
+        raise RuntimeError("Задача уже изменилась; обнови /jobs и повтори")
+
+    state["release_naming_overrides"] = overrides
+    save_state(config, state)
+    lines = [
+        "Навигационная метка обновлена",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+    ]
+    lines.extend(_navigation_lines(job))
+    if not get_navigation_label(job):
+        lines.append("Метка удалена")
+    return "\n".join(lines)
+
+
 def _get_execution_order(config):
     jobs = load_jobs(config)
     return build_execution_order(jobs, defaults=config.get("defaults", {}))
@@ -1320,7 +1385,7 @@ def format_retry_candidates_message(config):
         job = candidate["job"]
         lines.append(f"{index}. {get_display_title(job)}")
         lines.append(f"  Источник: {candidate['label']}")
-        lines.append(f"  Сезон: {job.get('season', 1)}")
+        lines.extend(_navigation_lines(job, "  Метка: "))
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     lines.extend(["", "Формат: /retry <номер>"])
     return "\n".join(lines)
@@ -1367,7 +1432,7 @@ def _format_job_list(jobs, indices):
     """Format a list of jobs with their indices for confirmation dialogs."""
     lines = []
     for idx, job in zip(indices, jobs):
-        lines.append(f"{idx}. {get_display_title(job)} — S{job.get('season', 1)} {job.get('episodes_range', '?')}")
+        lines.append(f"{idx}. {get_display_title(job)} — {_job_inline_details(job)}")
     return "\n".join(lines)
 
 
@@ -1392,7 +1457,7 @@ def format_retry_confirmation(candidate, index):
         f"Номер: {index}",
         f"Источник: {candidate['label']}",
         f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
+        *_navigation_lines(job),
         f"Эпизоды: {job.get('episodes_range', '?')}",
         "",
         "Подтверди повтор кнопкой ниже",
@@ -1412,7 +1477,7 @@ def format_remove_result(jobs):
         "Аниме удалено из очереди",
         "",
         f"Тайтл: {get_display_title(jobs)}",
-        f"Сезон: {jobs.get('season', 1)}",
+        *_navigation_lines(jobs),
         f"Эпизоды: {jobs.get('episodes_range', '?')}",
     ])
 
@@ -1444,7 +1509,7 @@ def format_retry_result(job, already_exists=False):
         "Аниме повторно поставлено в очередь",
         "",
         f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
+        *_navigation_lines(job),
         f"Эпизоды: {job.get('episodes_range', '?')}",
     ])
 
@@ -1479,7 +1544,7 @@ def format_blacklist_list(config):
         title = item.get("title_ru") or item.get("title") or "Без названия"
         lines.append(f"{index}. {title}")
         lines.append(f"  Release ID: {item.get('release_id')}")
-        lines.append(f"  Сезон: {item.get('season', 1)}")
+        lines.extend(_navigation_lines(item, "  Метка: "))
     lines.extend(["", "Формат: /unblacklist <номер>"])
     return "\n".join(lines)
 
@@ -1498,7 +1563,7 @@ def format_blacklist_result(results):
         "Тайтл добавлен в discovery blacklist" if not already_blacklisted else "Тайтл уже был в discovery blacklist",
         "",
         f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
+        *_navigation_lines(job),
     ]
     return "\n".join(lines)
 
@@ -1533,7 +1598,7 @@ def format_complete_result(results):
             return "Ничего не завершено"
         titles = []
         for job, _already in results:
-            titles.append(f"• {get_display_title(job)} — S{job.get('season', 1)} {job.get('episodes_range', '?')}")
+            titles.append(f"• {get_display_title(job)} — {_job_inline_details(job)}")
         return f"Завершено: {len(results)} шт.\n\n" + "\n".join(titles)
 
     job, already_archived = results, False
@@ -1543,14 +1608,14 @@ def format_complete_result(results):
             "",
             "Запись уже была в completed_jobs.json, дубль не добавлен",
             f"Тайтл: {get_display_title(job)}",
-            f"Сезон: {job.get('season', 1)}",
+            *_navigation_lines(job),
             f"Эпизоды: {job.get('episodes_range', '?')}",
         ])
     return "\n".join([
         "Аниме перенесено в completed_jobs.json",
         "",
         f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job.get('season', 1)}",
+        *_navigation_lines(job),
         f"Эпизоды: {job.get('episodes_range', '?')}",
     ])
 
@@ -1924,7 +1989,7 @@ def format_add4k_result(result):
         "4K-аниме добавлено",
         "",
         f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job['season']}",
+        *_navigation_lines(job),
         f"Эпизоды: {job['episodes_range']}",
         "Режим: 1080p → 4K, без вырезов и watermark",
         "VK доступ: только Donut",
@@ -1948,7 +2013,7 @@ def format_add_result(result):
         "Аниме добавлено",
         "",
         f"Тайтл: {get_display_title(job)}",
-        f"Сезон: {job['season']}",
+        *_navigation_lines(job),
         f"Эпизоды: {job['episodes_range']}",
         f"VK доступ: {privacy_labels.get(privacy_view, privacy_view)}",
     ]
@@ -1969,6 +2034,7 @@ def build_help_message():
         "/remove <номер> - удалить из очереди и остановить активную обработку (можно диапазон: 1-10, 1,5,8-10)",
         "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
+        "/label <номер> ; <метка|auto> - изменить навигационную метку",
         "/blacklist - показать discovery blacklist",
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
         "/unblacklist <номер> - убрать тайтл из discovery blacklist",
@@ -2022,6 +2088,8 @@ def handle_command(config, text):
                 page_data["page"], page_data["total_pages"],
             ),
         }
+    if text.startswith("/label"):
+        return update_job_navigation_label(config, text)
     if text.startswith("/remove"):
         indices = parse_index_range(text, "remove")
         jobs_list, _ = get_jobs_by_indices(config, indices)

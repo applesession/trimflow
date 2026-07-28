@@ -21,7 +21,13 @@ from shared.db import (  # noqa: E402
     remove_completed_job,
     return_job_to_pending,
 )
-from shared.helpers import JobCancelled, cancellation_scope, get_display_title, raise_if_cancelled  # noqa: E402
+from shared.helpers import (  # noqa: E402
+    JobCancelled,
+    cancellation_scope,
+    get_display_title,
+    get_navigation_label,
+    raise_if_cancelled,
+)
 from shared.runtime import (  # noqa: E402
     acquire_lock,
     append_runtime_error,
@@ -52,8 +58,9 @@ def _format_episode_success(job, episode, vk_result):
         "✅ 4K-серия опубликована в VK",
         "",
         f"🎬 {get_display_title(job)}",
-        f"📺 Сезон {job.get('season', 1)}, серия {episode}",
     ]
+    navigation_label = get_navigation_label(job)
+    lines.append(f"📺 {navigation_label + ', ' if navigation_label else ''}серия {episode}")
     if vk_result.get("video_url"):
         lines.extend(["", f"🔗 {vk_result['video_url']}"])
     if not vk_result.get("post_created") and (vk_result.get("errors_by_stage") or {}).get("wall_post"):

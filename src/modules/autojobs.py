@@ -5,7 +5,7 @@ from pathlib import Path
 
 from api.anilibria import extract_release_poster_url, get_release_details, list_recent_releases
 from shared.config import normalize_automation_config
-from shared.helpers import ensure_non_empty_slug, parse_episodes_range
+from shared.helpers import ensure_non_empty_slug, parse_episodes_range, set_navigation_label
 from shared.db import (
     build_seen_episode_key,
     get_tracked_episode_keys,
@@ -283,6 +283,7 @@ def discover_jobs(config, jobs, state):
     updated_state.setdefault("skipped_items", [])
     updated_state.setdefault("ongoing_progress", {})
     updated_state.setdefault("discovery_blacklist", [])
+    updated_state.setdefault("release_naming_overrides", {})
     _get_episode_tracking_maps(updated_state)
     running_release_ids = {
         get_job_release_id(job)
@@ -447,6 +448,9 @@ def discover_jobs(config, jobs, state):
             ))
 
         for candidate_job in release_jobs:
+            naming_override = updated_state["release_naming_overrides"].get(str(release_id))
+            if naming_override:
+                set_navigation_label(candidate_job, naming_override, source="manual")
             queue_result = queue_discovered_job(updated_jobs, candidate_job)
             if queue_result == "created":
                 created_jobs += 1
@@ -545,6 +549,14 @@ def build_job_from_release(
         job["mal_id"] = mal_id
     poster_url = extract_release_poster_url(release_payload)
     automation_payload = deepcopy(automation_context or {})
+    release_type = release_payload.get("type")
+    if isinstance(release_type, dict):
+        release_type = release_type.get("value")
+    if release_type:
+        automation_payload["release_type"] = str(release_type)
+    provider_season = release_payload.get("season_number") or release_payload.get("seasonNumber")
+    if provider_season is not None:
+        automation_payload["season_number"] = provider_season
     if poster_url:
         automation_payload["poster_url"] = poster_url
         automation_payload["poster_fetched_at"] = utc_now_iso()

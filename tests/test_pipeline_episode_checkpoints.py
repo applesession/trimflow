@@ -144,6 +144,22 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             artifacts["output_manifest"].write_text(json.dumps(manifest), encoding="utf-8")
             self.assertIsNotNone(load_render_checkpoint(job, artifacts))
 
+    def test_navigation_label_change_reuses_existing_output_paths(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir)
+        original = build_output_artifacts(job, job["output_dir"])
+        original["job_output_dir"].mkdir(parents=True)
+        original["output_video"].write_bytes(b"video")
+        job["processing"]["naming"] = {
+            "navigation_label": "Перерождение",
+            "source": "manual",
+        }
+
+        renamed = build_output_artifacts(job, job["output_dir"])
+
+        self.assertEqual(renamed["output_video"], original["output_video"])
+        self.assertIn("Перерождение", renamed["pretty_base_name"])
+
     @patch("lib.pipeline.validate_episode_render", return_value=VALIDATION)
     def test_episode_checkpoint_rejects_changed_or_corrupt_media(self, mock_validate):
         tmp_dir = self.make_workspace_temp_dir()

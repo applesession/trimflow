@@ -85,6 +85,97 @@ def get_display_title(payload) -> str:
     return "Без названия"
 
 
+def _confirmed_title_season(payload):
+    title_ru = str((payload or {}).get("title_ru") or "").strip()
+    title = str((payload or {}).get("title") or "").strip()
+    ru_match = re.search(r"(?:^|\s)(\d+)\s*$", title_ru)
+    en_match = re.search(
+        r"\b(?:(\d+)(?:st|nd|rd|th)\s+season|season\s+(\d+))\b",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if not ru_match or not en_match:
+        return None
+    russian_number = int(ru_match.group(1))
+    english_number = int(en_match.group(1) or en_match.group(2))
+    return russian_number if russian_number == english_number else None
+
+
+def get_automatic_navigation_label(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    automation = payload.get("automation") or {}
+    provider_season = automation.get("season_number")
+    try:
+        if provider_season is not None and int(provider_season) > 0:
+            return f"Сезон {int(provider_season)}"
+    except (TypeError, ValueError):
+        pass
+
+    confirmed_season = _confirmed_title_season(payload)
+    if confirmed_season is not None:
+        return f"Сезон {confirmed_season}"
+
+    release_type = str(automation.get("release_type") or "").strip().upper()
+    type_labels = {
+        "MOVIE": "Фильм",
+        "OVA": "OVA",
+        "ONA": "ONA",
+        "SPECIAL": "Спешл",
+    }
+    if release_type in type_labels:
+        return type_labels[release_type]
+
+    if automation.get("release_id") is not None:
+        return None
+
+    try:
+        return f"Сезон {int(payload.get('season', 1))}"
+    except (TypeError, ValueError):
+        return None
+
+
+def get_navigation_label(payload):
+    if isinstance(payload, dict):
+        direct_label = payload.get("navigation_label")
+        if isinstance(direct_label, str) and direct_label.strip():
+            return direct_label.strip()
+        naming = (payload.get("processing") or {}).get("naming") or {}
+        explicit_label = naming.get("navigation_label")
+        if isinstance(explicit_label, str) and explicit_label.strip():
+            return explicit_label.strip()
+    return get_automatic_navigation_label(payload)
+
+
+def set_navigation_label(payload, label, source="manual"):
+    processing = dict(payload.get("processing") or {})
+    naming = dict(processing.get("naming") or {})
+    naming.update({
+        "navigation_label": str(label).strip(),
+        "source": str(source).strip() or "manual",
+    })
+    processing["naming"] = naming
+    payload["processing"] = processing
+    return payload
+
+
+def clear_navigation_label(payload):
+    processing = dict(payload.get("processing") or {})
+    naming = dict(processing.get("naming") or {})
+    naming.pop("navigation_label", None)
+    naming.pop("source", None)
+    if naming:
+        processing["naming"] = naming
+    else:
+        processing.pop("naming", None)
+    if processing:
+        payload["processing"] = processing
+    else:
+        payload.pop("processing", None)
+    return payload
+
+
 def _normalize_episode_part(part: str) -> str:
     if "-" in part:
         start_raw, end_raw = [item.strip() for item in part.split("-", 1)]
@@ -106,15 +197,19 @@ def format_episodes_label(episodes_range: str) -> str:
 
 def build_compilation_display_name(job, season, episodes_range, suffix="[Без OP/ED]") -> str:
     display_title = get_display_title(job)
-    season_number = int(str(season))
     episodes_label = format_episodes_label(episodes_range)
-    return f"{display_title} - {season_number} Сезон {episodes_label} {suffix}".strip()
+    details = " ".join(
+        part for part in [get_navigation_label(job), episodes_label, suffix] if part
+    )
+    return f"{display_title} - {details}"
 
 
 def build_single_episode_display_name(job, season, episode_number) -> str:
     display_title = get_display_title(job)
-    season_number = int(str(season))
-    return f"{display_title} - {season_number} Сезон {int(episode_number)} Серия".strip()
+    details = " ".join(
+        part for part in [get_navigation_label(job), f"{int(episode_number)} Серия"] if part
+    )
+    return f"{display_title} - {details}"
 
 
 def sanitize_filename(value: str, max_bytes: int = 200) -> str:

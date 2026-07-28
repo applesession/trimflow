@@ -410,6 +410,22 @@ def insert_one_job(job):
     conn.close()
 
 
+def update_job_processing(queue_id, processing):
+    conn = _get_conn()
+    with _write_lock:
+        cursor = conn.execute(
+            "UPDATE jobs SET processing = ?, updated_at = ? WHERE id = ?",
+            (
+                json.dumps(processing) if processing else None,
+                _utc_now_iso(),
+                int(queue_id),
+            ),
+        )
+        conn.commit()
+    conn.close()
+    return cursor.rowcount == 1
+
+
 def sync_discovered_jobs(jobs):
     """Upsert discovery results without replacing or changing running jobs."""
     conn = _get_conn()

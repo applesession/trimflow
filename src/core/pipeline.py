@@ -27,6 +27,8 @@ from shared.helpers import (
     build_vk_wall_post_text,
     create_concat_file,
     ensure_non_empty_slug,
+    format_episodes_label,
+    get_automatic_navigation_label,
     get_display_title,
     parse_episodes_range,
     raise_if_cancelled,
@@ -1289,6 +1291,45 @@ def build_output_artifacts(job, output_root):
 
     job_output_dir = Path(output_root) / ensure_non_empty_slug(job["title"])
     file_base_name = sanitize_filename(pretty_base_name)
+    automatic_label = get_automatic_navigation_label(job)
+    if processing_mode == "single_episode":
+        automatic_details = " ".join(
+            part for part in [automatic_label, f"{int(episodes[0])} Серия"] if part
+        )
+        automatic_name = f"{get_display_title(job)} - {automatic_details}"
+        legacy_name = (
+            f"{get_display_title(job)} - {int(job['season'])} Сезон "
+            f"{int(episodes[0])} Серия"
+        )
+    else:
+        automatic_details = " ".join(
+            part
+            for part in [
+                automatic_label,
+                format_episodes_label(episodes_range),
+                "[Без OP/ED]",
+            ]
+            if part
+        )
+        automatic_name = f"{get_display_title(job)} - {automatic_details}"
+        legacy_name = (
+            f"{get_display_title(job)} - {int(job['season'])} Сезон "
+            f"{format_episodes_label(episodes_range)} [Без OP/ED]"
+        )
+    for existing_base_name in dict.fromkeys([
+        sanitize_filename(automatic_name),
+        sanitize_filename(legacy_name),
+    ]):
+        if existing_base_name == file_base_name:
+            continue
+        existing_paths = [
+            job_output_dir / f"{existing_base_name}.mkv",
+            job_output_dir / f"{existing_base_name}.txt",
+            job_output_dir / f"{existing_base_name}_manifest.json",
+        ]
+        if any(path.exists() for path in existing_paths):
+            file_base_name = existing_base_name
+            break
     return {
         "job_output_dir": job_output_dir,
         "pretty_base_name": pretty_base_name,

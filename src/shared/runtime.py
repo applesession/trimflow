@@ -17,6 +17,7 @@ from shared.constants import (
     DEFAULT_RUNTIME_STATUS_NAME,
     DEFAULT_TELEGRAM_LOG_NAME,
 )
+from shared.helpers import get_navigation_label
 
 
 def utc_now_iso():
@@ -187,6 +188,7 @@ def append_runtime_error(
         "title": title if title is not None else source_job.get("title"),
         "title_ru": title_ru if title_ru is not None else source_job.get("title_ru"),
         "season": season if season is not None else source_job.get("season"),
+        "navigation_label": source_job.get("navigation_label"),
         "episodes_range": episodes_range if episodes_range is not None else source_job.get("episodes_range"),
         "current_episode": current_episode if current_episode is not None else current_job.get("current_episode"),
         "total_episodes": total_episodes if total_episodes is not None else current_job.get("total_episodes"),
@@ -230,6 +232,7 @@ def mark_runtime_job_start(
             "title": job.get("title"),
             "title_ru": job.get("title_ru"),
             "season": job.get("season"),
+            "navigation_label": get_navigation_label(job),
             "episodes_range": job.get("episodes_range"),
             "stage": "job_start",
             "started_at": utc_now_iso(),
@@ -269,6 +272,7 @@ def mark_runtime_job_finish(
             "title": job.get("title"),
             "title_ru": job.get("title_ru"),
             "season": job.get("season"),
+            "navigation_label": get_navigation_label(job),
             "episodes_range": job.get("episodes_range"),
             "stage": stage,
             "current_episode": current_episode,

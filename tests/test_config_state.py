@@ -666,6 +666,8 @@ class ConfigStateTests(unittest.TestCase):
         job = build_job_from_release(
             {
                 "name": {"english": "English Title", "main": "Русский тайтл"},
+                "type": {"value": "TV"},
+                "season_number": 2,
                 "poster": {
                     "optimized": {"src": "/storage/releases/posters/100/optimized.webp"},
                     "src": "/storage/releases/posters/100/source.jpg",
@@ -684,10 +686,48 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(job["title"], "English Title")
         self.assertEqual(job["title_ru"], "Русский тайтл")
         self.assertEqual(job["source"]["variant_codec"], "avc")
+        self.assertEqual(job["automation"]["release_type"], "TV")
+        self.assertEqual(job["automation"]["season_number"], 2)
         self.assertEqual(
             job["automation"]["poster_url"],
             "https://aniliberty.top/storage/releases/posters/100/optimized.webp",
         )
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
+    def test_discovery_applies_persistent_release_naming_override(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 77, "alias": "named-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 77,
+                "alias": "named-release",
+                "is_ongoing": True,
+                "name": {"english": "Named Release", "main": "Именное продолжение"},
+                "type": {"value": "TV"},
+                "episodes": [{"number": 1}],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:named",
+                }],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/named-release",
+        }
+        state = build_default_state()
+        state["release_naming_overrides"] = {"77": "Перерождение"}
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], state)
+
+        naming = result["jobs"][0]["processing"]["naming"]
+        self.assertEqual(naming["navigation_label"], "Перерождение")
+        self.assertEqual(naming["source"], "manual")
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")

@@ -45,6 +45,7 @@ from lib.telegram_bot import (
     normalize_command_text,
     parse_add_command,
     parse_add4k_command,
+    update_job_navigation_label,
     save_telegram_state,
     send_message_to_allowed_chats,
     get_telegram_proxy_url,
@@ -328,7 +329,7 @@ class TelegramBotTests(unittest.TestCase):
             "title_ru": "Русский тайтл",
             "season": 1,
             "episodes_range": "001",
-            "automation": {"is_ongoing": True},
+            "automation": {"release_id": 1, "is_ongoing": True, "release_type": "TV"},
         }])
 
         message = format_jobs_message(config)
@@ -336,8 +337,36 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("Очередь аниме", message)
         self.assertIn("Русский тайтл [ongoing]", message)
         self.assertNotIn("English Title |", message)
-        self.assertIn("Сезон: 1", message)
+        self.assertNotIn("Метка:", message)
         self.assertIn("Эпизоды: 001", message)
+
+    def test_label_command_persists_release_override_and_auto_clears_it(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [{
+            "title": "Named sequel",
+            "title_ru": "Именное продолжение",
+            "season": 1,
+            "episodes_range": "001",
+            "automation": {"release_id": 77, "is_ongoing": True, "release_type": "TV"},
+        }])
+
+        result = update_job_navigation_label(config, "/label 1; Перерождение")
+
+        self.assertIn("Метка: Перерождение", result)
+        self.assertEqual(
+            load_jobs(config)[0]["processing"]["naming"]["navigation_label"],
+            "Перерождение",
+        )
+        state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["release_naming_overrides"]["77"], "Перерождение")
+
+        result = update_job_navigation_label(config, "/label 1; auto")
+
+        self.assertIn("Метка удалена", result)
+        self.assertNotIn("naming", load_jobs(config)[0].get("processing", {}))
+        state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertNotIn("77", state["release_naming_overrides"])
 
     def test_get_display_title_falls_back_to_title(self):
         self.assertEqual(get_display_title({"title_ru": "Русский", "title": "English"}), "Русский")
