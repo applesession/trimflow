@@ -3,7 +3,7 @@ import json
 import re
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from core.discovery import extract_episode_number
 from shared.constants import SUPPORTED_VIDEO_EXTENSIONS
@@ -116,6 +116,10 @@ def _looks_1080p(path):
     return re.search(r"(?<!\d)(?:1080p?|1920[x×]1080)(?!\d)", str(path), flags=re.IGNORECASE) is not None
 
 
+def _is_episode_path(path):
+    return "episodes" in (part.casefold() for part in PurePosixPath(str(path).replace("\\", "/")).parts[:-1])
+
+
 def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=None):
     requested = sorted(int(episode) for episode in allowed_episodes)
     filter_text = str(path_filter or "").strip().casefold()
@@ -140,10 +144,13 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
     for episode in requested:
         items = candidates[episode]
         if len(items) > 1:
+            episode_paths = [item for item in items if _is_episode_path(item["path"])]
+            if episode_paths:
+                items = episode_paths
             preferred = [item for item in items if _looks_1080p(item["path"])]
             if len(preferred) == 1:
                 items = preferred
-            else:
+            elif len(items) > 1:
                 details = json.dumps({"episode": episode, "candidates": items}, ensure_ascii=False)
                 print("[TORRENT CANDIDATES] " + details)
                 preview = "; ".join(f"[{item['index']}] {item['path']}" for item in items[:3])

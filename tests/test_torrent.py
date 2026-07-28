@@ -61,6 +61,15 @@ class TorrentSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected[0]["index"], 2)
 
+    def test_episode_directory_wins_over_opening_and_ending(self):
+        selected = select_torrent_episode_files([
+            {"index": 3, "path": "Release [1080p]/Episodes/Show - 003.mkv"},
+            {"index": 174, "path": "Release [1080p]/Openings & Endings/Show - NCED 03.mkv"},
+            {"index": 189, "path": "Release [1080p]/Openings & Endings/Show - NCOP 03.mkv"},
+        ], {3})
+
+        self.assertEqual(selected[0]["index"], 3)
+
     def test_ambiguous_1080p_candidates_fail_before_download(self):
         with self.assertRaisesRegex(RuntimeError, "Multiple torrent files.*AVC.*HEVC"):
             select_torrent_episode_files([
