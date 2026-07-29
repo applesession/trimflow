@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from lib.helpers import (
     build_compilation_display_name,
+    build_single_episode_display_name,
     build_timestamps_description,
     build_vk_comment_text,
     build_vk_wall_post_text,
@@ -78,6 +79,15 @@ class DeliveryTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "Yomi no Tsugai - Сезон 1 1,3,5-7 Серия [Без OP/ED]")
+
+    def test_build_single_episode_name_puts_episode_before_season(self):
+        result = build_single_episode_display_name(
+            {"title": "Test", "season": 1},
+            1,
+            5,
+        )
+
+        self.assertEqual(result, "Test - 5 Серия 1 Сезон")
 
     def test_navigation_label_requires_confirmed_season_or_release_type(self):
         self.assertEqual(

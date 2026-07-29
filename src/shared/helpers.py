@@ -206,8 +206,12 @@ def build_compilation_display_name(job, season, episodes_range, suffix="[Без 
 
 def build_single_episode_display_name(job, season, episode_number) -> str:
     display_title = get_display_title(job)
+    navigation_label = get_navigation_label(job)
+    season_match = re.fullmatch(r"Сезон\s+(\d+)", navigation_label or "", flags=re.IGNORECASE)
+    if season_match:
+        navigation_label = f"{season_match.group(1)} Сезон"
     details = " ".join(
-        part for part in [get_navigation_label(job), f"{int(episode_number)} Серия"] if part
+        part for part in [f"{int(episode_number)} Серия", navigation_label] if part
     )
     return f"{display_title} - {details}"
 
