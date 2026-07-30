@@ -34,6 +34,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("atrim=start=100.000000:end=200.000000", graph)
         self.assertIn("asetpts=PTS-STARTPTS", graph)
         self.assertIn("concat=n=2:v=1:a=1", graph)
+        self.assertIn("-shortest", command)
         self.assertIn("overlay=W-w-20:20", graph)
         self.assertNotIn("0:s", command)
 
@@ -199,7 +200,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 subprocess.run([
                     "ffmpeg", "-v", "error", "-y",
                     "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
-                    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=4.1",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=2.9",
                     "-i", str(subtitle),
                     "-map", "0:v", "-map", "1:a", "-map", "2:s",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",

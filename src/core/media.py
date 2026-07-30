@@ -696,6 +696,7 @@ def _build_episode_render_cmd(
             "-b:a", str(encoding.get("audio_bitrate", "192k")),
             "-ar", str(encoding.get("audio_sample_rate", 48000)),
             "-ac", str(encoding.get("audio_channels", 2)),
+            "-shortest",
         ]
     cmd.append(str(output))
     return cmd
