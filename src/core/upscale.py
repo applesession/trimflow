@@ -210,9 +210,20 @@ def _download_upscale_source(torrent_path, download_dir, selected, *, prefetch=F
     label = "4K PREFETCH" if prefetch else "4K DOWNLOAD"
     print(f"[{label} START] episode={episode} slot={slot_dir}")
     try:
-        download_torrent_episode(torrent_path, slot_dir, selected)
-        detected, _ = find_episode_files(slot_dir)
-        episode_files, _ = filter_episode_files(detected, {episode})
+        episode_files = []
+        if slot_dir.is_dir() and not any(slot_dir.glob("*.aria2")):
+            try:
+                detected, _ = find_episode_files(slot_dir)
+                episode_files, _ = filter_episode_files(detected, {episode})
+                if len(episode_files) == 1:
+                    validate_upscale_source(episode_files[0][1])
+                    print(f"[{label} CACHED] episode={episode} source={episode_files[0][1]}")
+            except (RuntimeError, OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                episode_files = []
+        if not episode_files:
+            download_torrent_episode(torrent_path, slot_dir, selected)
+            detected, _ = find_episode_files(slot_dir)
+            episode_files, _ = filter_episode_files(detected, {episode})
         if len(episode_files) != 1:
             raise RuntimeError(
                 f"Expected one source file for episode {episode}, found {len(episode_files)}"

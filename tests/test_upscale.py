@@ -10,7 +10,12 @@ from uuid import uuid4
 
 from lib import reset_test_db
 from core.runner import run_jobs
-from core.upscale import build_video2x_command, cleanup_cancelled_upscale_job, process_upscale_job
+from core.upscale import (
+    _download_upscale_source,
+    build_video2x_command,
+    cleanup_cancelled_upscale_job,
+    process_upscale_job,
+)
 from shared.db import claim_job, insert_one_job, load_jobs, recover_running_jobs
 from shared.helpers import JobCancelled, cancellation_scope, run
 
@@ -127,6 +132,23 @@ class UpscaleTests(unittest.TestCase):
         if not source.exists():
             source.write_bytes(f"episode-{episode}".encode())
         return source
+
+    @patch("core.upscale.validate_upscale_source", return_value={"duration": 120})
+    @patch("core.upscale.download_torrent_episode")
+    def test_download_reuses_completed_prefetch_after_worker_restart(self, mock_download, _mock_validate):
+        slot = self.root / "downloads" / "episode_021"
+        source = slot / "Release" / "Show [021].mkv"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"complete")
+
+        result = _download_upscale_source(
+            self.root / "release.torrent",
+            self.root / "downloads",
+            {"episode": 21, "index": 21, "path": "Release/Show [021].mkv"},
+        )
+
+        self.assertEqual(result, source)
+        mock_download.assert_not_called()
 
     @patch("core.upscale.validate_upscale_output", return_value={"duration": 120, "video": {"width": 3840}})
     @patch("core.upscale.validate_upscale_source", return_value={"duration": 120, "video": {"width": 1920}})
