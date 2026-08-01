@@ -8,6 +8,7 @@ from unittest.mock import patch
 from lib.pipeline import (
     RENDER_PIPELINE_VERSION,
     build_delivery_config,
+    build_episode_infos,
     build_episode_fingerprint,
     build_output_artifacts,
     build_timestamps_from_episodes,
@@ -17,6 +18,7 @@ from lib.pipeline import (
     load_render_checkpoint,
     process_job,
     save_episode_checkpoint,
+    select_compilation_frame_rate,
 )
 
 
@@ -89,7 +91,12 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         source = tmp_dir / "episode.mkv"
         source.write_bytes(b"source")
         job = self.make_job(tmp_dir, "001")
-        episode_infos = [{"episode": 1, "path": str(source), "duration": 10.0}]
+        episode_infos = [{
+            "episode": 1,
+            "path": str(source),
+            "duration": 10.0,
+            "frame_rate": "30/1",
+        }]
 
         def fingerprint():
             return build_episode_fingerprint(
@@ -106,6 +113,41 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         self.assertEqual(original, fingerprint())
         job["encoding"]["cq"] = 24
         self.assertNotEqual(original, fingerprint())
+
+        job["encoding"]["cq"] = 23
+        episode_infos[0]["frame_rate"] = "24000/1001"
+        self.assertNotEqual(original, fingerprint())
+
+    @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
+    @patch("lib.pipeline.ffprobe_media_signature")
+    def test_episode_scan_stores_frame_rate(self, mock_signature, mock_duration):
+        mock_signature.return_value = {
+            "video": {"r_frame_rate": "24000/1001"},
+            "audio": None,
+        }
+
+        infos = build_episode_infos([(1, Path("episode.mkv"))])
+
+        self.assertEqual(infos[0]["frame_rate"], "24000/1001")
+
+    def test_compilation_frame_rate_uses_majority_and_first_on_tie(self):
+        self.assertEqual(select_compilation_frame_rate([
+            {"frame_rate": "30/1"},
+            {"frame_rate": "24000/1001"},
+            {"frame_rate": "30/1"},
+        ]), "30/1")
+        self.assertEqual(select_compilation_frame_rate([
+            {"frame_rate": "24000/1001"},
+            {"frame_rate": "30/1"},
+        ]), "24000/1001")
+        self.assertEqual(select_compilation_frame_rate([
+            {"frame_rate": "24000/1001"},
+            {"frame_rate": "24000/1001"},
+        ]), "24000/1001")
+
+    def test_compilation_frame_rate_requires_detected_video_rate(self):
+        with self.assertRaisesRegex(RuntimeError, "Unable to determine compilation frame rate"):
+            select_compilation_frame_rate([{"frame_rate": None}, {"frame_rate": "0/0"}])
 
     def test_pipeline_v1_root_and_output_checkpoints_are_invalid(self):
         tmp_dir = self.make_workspace_temp_dir()
@@ -242,8 +284,8 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         temp_dir.mkdir(parents=True)
         job = self.make_job(tmp_dir)
         episode_infos = [
-            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0},
-            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0},
+            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0, "frame_rate": "30/1"},
+            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0, "frame_rate": "24000/1001"},
         ]
         for item in episode_infos:
             Path(item["path"]).write_bytes(b"source")
@@ -280,6 +322,10 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
         self.assertTrue(result["output_video"].endswith(".mkv"))
         self.assertEqual(render_mock.call_count, 3)
+        self.assertTrue(all(
+            call.args[4]["frame_rate"] == "30/1"
+            for call in render_mock.call_args_list
+        ))
         concat_mock.assert_called_once()
         concat_text = (temp_dir / "concat.txt").read_text(encoding="utf-8")
         self.assertTrue(concat_text.startswith("ffconcat version 1.0"))
@@ -293,8 +339,8 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         job = self.make_job(tmp_dir)
         job["delivery"] = {"s3_enabled": False, "vk_enabled": True}
         episode_infos = [
-            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0},
-            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0},
+            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0, "frame_rate": "30/1"},
+            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0, "frame_rate": "30/1"},
         ]
         for item in episode_infos:
             Path(item["path"]).write_bytes(b"source")

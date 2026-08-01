@@ -666,8 +666,9 @@ def _build_episode_render_cmd(
         if audio_stream_index is not None:
             filters.append("[a0]anull[acat]")
 
+    frame_rate = encoding.get("frame_rate")
     filters.extend([
-        "[vcat]format=yuv420p[base]",
+        f"[vcat]{f'fps=fps={frame_rate},' if frame_rate else ''}format=yuv420p[base]",
         "[1:v]scale=160:-1,format=rgba[wm]",
         "[base][wm]overlay=W-w-20:20,format=yuv420p[vout]",
     ])

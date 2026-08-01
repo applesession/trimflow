@@ -2,6 +2,7 @@ import json
 import hashlib
 import shutil
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 
 import requests
@@ -274,6 +275,7 @@ def build_episode_fingerprint(
             {
                 "episode": item["episode"],
                 "duration": round(float(item["duration"]), 3),
+                "frame_rate": item.get("frame_rate"),
                 "file": _file_identity(item["path"]),
             }
             for item in episode_infos
@@ -392,12 +394,30 @@ def build_timing_sources_summary(prefetched_anilibria_results, prefetched_aniski
 def build_episode_infos(episode_files):
     episode_infos = []
     for episode_number, path in episode_files:
+        signature = ffprobe_media_signature(path)
         episode_infos.append({
             "episode": episode_number,
             "path": str(path),
             "duration": ffprobe_duration(path),
+            "frame_rate": ((signature or {}).get("video") or {}).get("r_frame_rate"),
         })
     return episode_infos
+
+
+def select_compilation_frame_rate(episode_infos):
+    counts = {}
+    for episode_info in episode_infos:
+        try:
+            frame_rate = Fraction(str(episode_info.get("frame_rate")))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if frame_rate <= 0:
+            continue
+        counts[frame_rate] = counts.get(frame_rate, 0) + 1
+    if not counts:
+        raise RuntimeError("Unable to determine compilation frame rate")
+    selected = max(counts, key=counts.get)
+    return f"{selected.numerator}/{selected.denominator}"
 
 
 def build_prefetched_aniskip_results(episode_infos, mal_id, skip_types):
@@ -1436,7 +1456,7 @@ def process_job(job, runtime_status_path=None):
     output_root = Path(job["output_dir"])
     watermark_path = Path(job["watermark_path"])
     skip_types = job.get("skip_types", ["op", "ed"])
-    encoding = job.get("encoding") or {}
+    encoding = dict(job.get("encoding") or {})
     cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
     processing = normalize_processing_config(job)
     timing_detection = normalize_timing_detection_config(job)
@@ -1591,6 +1611,9 @@ def process_job(job, runtime_status_path=None):
             return result
 
         episode_infos = build_episode_infos(episode_files)
+        frame_rate = select_compilation_frame_rate(episode_infos)
+        encoding["frame_rate"] = frame_rate
+        print(f"[EPISODE FPS] target={frame_rate}")
         fingerprint = build_episode_fingerprint(
             job,
             episode_infos,
