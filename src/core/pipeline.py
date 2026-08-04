@@ -276,6 +276,8 @@ def build_episode_fingerprint(
                 "episode": item["episode"],
                 "duration": round(float(item["duration"]), 3),
                 "frame_rate": item.get("frame_rate"),
+                "width": item.get("width"),
+                "height": item.get("height"),
                 "file": _file_identity(item["path"]),
             }
             for item in episode_infos
@@ -395,11 +397,14 @@ def build_episode_infos(episode_files):
     episode_infos = []
     for episode_number, path in episode_files:
         signature = ffprobe_media_signature(path)
+        video = (signature or {}).get("video") or {}
         episode_infos.append({
             "episode": episode_number,
             "path": str(path),
             "duration": ffprobe_duration(path),
-            "frame_rate": ((signature or {}).get("video") or {}).get("r_frame_rate"),
+            "frame_rate": video.get("r_frame_rate"),
+            "width": video.get("width"),
+            "height": video.get("height"),
         })
     return episode_infos
 
@@ -418,6 +423,37 @@ def select_compilation_frame_rate(episode_infos):
         raise RuntimeError("Unable to determine compilation frame rate")
     selected = max(counts, key=counts.get)
     return f"{selected.numerator}/{selected.denominator}"
+
+
+def select_compilation_frame_size(episode_infos):
+    sizes = []
+    for episode_info in episode_infos:
+        try:
+            width = int(episode_info.get("width"))
+            height = int(episode_info.get("height"))
+        except (TypeError, ValueError):
+            continue
+        if width > 0 and height > 0:
+            sizes.append((width, height))
+    if not sizes:
+        raise RuntimeError("Unable to determine compilation frame size")
+    return max(sizes, key=lambda size: size[0] * size[1])
+
+
+def describe_media_signature_groups(episode_infos, episode_signatures):
+    groups = {}
+    for episode_info, signature in zip(episode_infos, episode_signatures):
+        encoded = json.dumps(
+            signature,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        groups.setdefault(encoded, []).append(int(episode_info["episode"]))
+    return "; ".join(
+        f"episodes={','.join(f'{episode:03d}' for episode in episodes)} signature={signature}"
+        for signature, episodes in groups.items()
+    )
 
 
 def build_prefetched_aniskip_results(episode_infos, mal_id, skip_types):
@@ -1612,8 +1648,12 @@ def process_job(job, runtime_status_path=None):
 
         episode_infos = build_episode_infos(episode_files)
         frame_rate = select_compilation_frame_rate(episode_infos)
+        frame_width, frame_height = select_compilation_frame_size(episode_infos)
         encoding["frame_rate"] = frame_rate
+        encoding["frame_width"] = frame_width
+        encoding["frame_height"] = frame_height
         print(f"[EPISODE FPS] target={frame_rate}")
+        print(f"[EPISODE FRAME] target={frame_width}x{frame_height}")
         fingerprint = build_episode_fingerprint(
             job,
             episode_infos,
@@ -1767,7 +1807,10 @@ def process_job(job, runtime_status_path=None):
             manifest_episodes.append(manifest_episode)
 
         if any(signature != episode_signatures[0] for signature in episode_signatures[1:]):
-            raise RuntimeError("Rendered episodes have incompatible media signatures")
+            details = describe_media_signature_groups(episode_infos, episode_signatures)
+            raise RuntimeError(
+                f"Rendered episodes have incompatible media signatures: {details}"
+            )
 
         set_runtime_stage(
             runtime_status_path,

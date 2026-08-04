@@ -12,6 +12,7 @@ from lib.pipeline import (
     build_episode_fingerprint,
     build_output_artifacts,
     build_timestamps_from_episodes,
+    describe_media_signature_groups,
     deliver_rendered_output,
     initialize_episode_checkpoints,
     load_episode_checkpoint,
@@ -19,6 +20,7 @@ from lib.pipeline import (
     process_job,
     save_episode_checkpoint,
     select_compilation_frame_rate,
+    select_compilation_frame_size,
 )
 
 
@@ -96,6 +98,8 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             "path": str(source),
             "duration": 10.0,
             "frame_rate": "30/1",
+            "width": 1920,
+            "height": 1080,
         }]
 
         def fingerprint():
@@ -118,17 +122,26 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         episode_infos[0]["frame_rate"] = "24000/1001"
         self.assertNotEqual(original, fingerprint())
 
+        episode_infos[0]["frame_rate"] = "30/1"
+        episode_infos[0]["width"] = 1440
+        self.assertNotEqual(original, fingerprint())
+
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
-    def test_episode_scan_stores_frame_rate(self, mock_signature, mock_duration):
+    def test_episode_scan_stores_video_geometry(self, mock_signature, mock_duration):
         mock_signature.return_value = {
-            "video": {"r_frame_rate": "24000/1001"},
+            "video": {
+                "r_frame_rate": "24000/1001",
+                "width": 1440,
+                "height": 1080,
+            },
             "audio": None,
         }
 
         infos = build_episode_infos([(1, Path("episode.mkv"))])
 
         self.assertEqual(infos[0]["frame_rate"], "24000/1001")
+        self.assertEqual((infos[0]["width"], infos[0]["height"]), (1440, 1080))
 
     def test_compilation_frame_rate_uses_majority_and_first_on_tie(self):
         self.assertEqual(select_compilation_frame_rate([
@@ -148,6 +161,35 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
     def test_compilation_frame_rate_requires_detected_video_rate(self):
         with self.assertRaisesRegex(RuntimeError, "Unable to determine compilation frame rate"):
             select_compilation_frame_rate([{"frame_rate": None}, {"frame_rate": "0/0"}])
+
+    def test_compilation_frame_size_uses_largest_area_and_first_on_tie(self):
+        self.assertEqual(select_compilation_frame_size([
+            {"width": 1440, "height": 1080},
+            {"width": 1920, "height": 1080},
+        ]), (1920, 1080))
+        self.assertEqual(select_compilation_frame_size([
+            {"width": 1920, "height": 1080},
+            {"width": 1080, "height": 1920},
+        ]), (1920, 1080))
+
+    def test_compilation_frame_size_requires_detected_dimensions(self):
+        with self.assertRaisesRegex(RuntimeError, "Unable to determine compilation frame size"):
+            select_compilation_frame_size([{"width": None, "height": None}])
+
+    def test_media_signature_groups_include_affected_episodes(self):
+        details = describe_media_signature_groups(
+            [{"episode": 1}, {"episode": 2}, {"episode": 3}],
+            [
+                {"video": {"width": 1920, "r_frame_rate": "30/1"}},
+                {"video": {"width": 1280, "r_frame_rate": "30/1"}},
+                {"video": {"width": 1920, "r_frame_rate": "30/1"}},
+            ],
+        )
+
+        self.assertIn("episodes=001,003", details)
+        self.assertIn('"width":1920', details)
+        self.assertIn("episodes=002", details)
+        self.assertIn('"width":1280', details)
 
     def test_pipeline_v1_root_and_output_checkpoints_are_invalid(self):
         tmp_dir = self.make_workspace_temp_dir()
@@ -284,8 +326,8 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         temp_dir.mkdir(parents=True)
         job = self.make_job(tmp_dir)
         episode_infos = [
-            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0, "frame_rate": "30/1"},
-            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0, "frame_rate": "24000/1001"},
+            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0, "frame_rate": "30/1", "width": 1440, "height": 1080},
+            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0, "frame_rate": "24000/1001", "width": 1920, "height": 1080},
         ]
         for item in episode_infos:
             Path(item["path"]).write_bytes(b"source")
@@ -324,6 +366,8 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         self.assertEqual(render_mock.call_count, 3)
         self.assertTrue(all(
             call.args[4]["frame_rate"] == "30/1"
+            and call.args[4]["frame_width"] == 1920
+            and call.args[4]["frame_height"] == 1080
             for call in render_mock.call_args_list
         ))
         concat_mock.assert_called_once()
@@ -339,8 +383,8 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         job = self.make_job(tmp_dir)
         job["delivery"] = {"s3_enabled": False, "vk_enabled": True}
         episode_infos = [
-            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0, "frame_rate": "30/1"},
-            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0, "frame_rate": "30/1"},
+            {"episode": 1, "path": str(tmp_dir / "ep1.mkv"), "duration": 10.0, "frame_rate": "30/1", "width": 1920, "height": 1080},
+            {"episode": 2, "path": str(tmp_dir / "ep2.mkv"), "duration": 10.0, "frame_rate": "30/1", "width": 1920, "height": 1080},
         ]
         for item in episode_infos:
             Path(item["path"]).write_bytes(b"source")

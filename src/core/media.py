@@ -667,8 +667,16 @@ def _build_episode_render_cmd(
             filters.append("[a0]anull[acat]")
 
     frame_rate = encoding.get("frame_rate")
+    frame_width = encoding.get("frame_width")
+    frame_height = encoding.get("frame_height")
+    frame_size_filter = (
+        f"scale={frame_width}:{frame_height}:force_original_aspect_ratio=decrease,"
+        f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+        if frame_width and frame_height else ""
+    )
     filters.extend([
-        f"[vcat]{f'fps=fps={frame_rate},' if frame_rate else ''}format=yuv420p[base]",
+        f"[vcat]{f'fps=fps={frame_rate},' if frame_rate else ''}"
+        f"{frame_size_filter}format=yuv420p[base]",
         "[1:v]scale=160:-1,format=rgba[wm]",
         "[base][wm]overlay=W-w-20:20,format=yuv420p[vout]",
     ])

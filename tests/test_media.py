@@ -56,18 +56,28 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertNotIn("-c:a", command)
 
     @patch("lib.media.run")
-    def test_episode_render_normalizes_frame_rate_before_watermark(self, mock_run):
+    def test_episode_render_normalizes_frame_rate_and_canvas_before_watermark(self, mock_run):
         render_episode(
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0)],
             "watermark.png",
-            {"video_codec": "libx264", "frame_rate": "30000/1001"},
+            {
+                "video_codec": "libx264",
+                "frame_rate": "30000/1001",
+                "frame_width": 1920,
+                "frame_height": 1080,
+            },
         )
 
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
-        self.assertIn("[vcat]fps=fps=30000/1001,format=yuv420p[base]", graph)
+        self.assertIn(
+            "[vcat]fps=fps=30000/1001,"
+            "scale=1920:1080:force_original_aspect_ratio=decrease,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[base]",
+            graph,
+        )
 
     @patch("lib.media.run")
     def test_copy_segment_normalizes_audio_without_reencoding_video(self, mock_run):
