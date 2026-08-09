@@ -53,6 +53,17 @@ class TorrentSelectionTests(unittest.TestCase):
 
         self.assertEqual([item["index"] for item in selected], [1, 2, 3])
 
+    def test_selects_episode_from_of_total_filename(self):
+        selected = select_torrent_episode_files([
+            {"index": 7, "path": "Release/Show [02 of 25] [720p].mkv"},
+            {"index": 3, "path": "Release/Show [01 of 25] [720p].mkv"},
+        ], {1, 2})
+
+        self.assertEqual(
+            [(item["episode"], item["index"]) for item in selected],
+            [(1, 3), (2, 7)],
+        )
+
     def test_unique_1080p_candidate_wins_over_720p(self):
         selected = select_torrent_episode_files([
             {"index": 1, "path": "720p/Show [001] [720p].mkv"},

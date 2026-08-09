@@ -7,6 +7,7 @@ from shared.constants import SUPPORTED_VIDEO_EXTENSIONS
 def extract_episode_number(filename: str):
     patterns = [
         r"^(\d{1,3})\.",
+        r"\[(\d{1,3})\s+of\s+\d{1,3}\]",
         r"\[(\d{1,3})\]",
         r"[Ss]\d{1,2}[Ee](\d{1,3})",
         r"[\s._-](\d{1,3})[\s._-]",
