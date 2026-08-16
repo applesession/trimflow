@@ -75,6 +75,19 @@ def ensure_non_empty_slug(title: str) -> str:
     return slug
 
 
+def build_job_workspace_name(job) -> str:
+    title_slug = ensure_non_empty_slug(job["title"])
+    automation = job.get("automation") or {}
+    episodes_range = str(job.get("episodes_range", "")).strip()
+    if automation.get("release_id") is not None or not episodes_range:
+        return title_slug
+
+    season = str(job.get("season", 1)).strip().zfill(2)
+    processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
+    range_slug = slugify(episodes_range.replace(",", "_"))
+    return f"{title_slug}__S{season}__{range_slug}__{processing_mode}"
+
+
 def get_display_title(payload) -> str:
     if not isinstance(payload, dict):
         return "Без названия"

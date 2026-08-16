@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lib.pipeline import cleanup_cancelled_job_artifacts, cleanup_job_artifacts
+from lib.pipeline import build_output_artifacts, cleanup_cancelled_job_artifacts, cleanup_job_artifacts
+from shared.helpers import build_job_workspace_name
 
 
 class PipelineCleanupTests(unittest.TestCase):
@@ -84,6 +85,27 @@ class PipelineCleanupTests(unittest.TestCase):
 
         self.assertFalse(output_dir.exists())
 
+    def test_cleanup_removes_only_current_job_outputs(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        output_dir = tmp_dir / "output" / "title"
+        current = output_dir / "current.mkv"
+        sibling = output_dir / "sibling.mkv"
+        output_dir.mkdir(parents=True)
+        current.touch()
+        sibling.touch()
+
+        cleanup_job_artifacts(
+            {"output": True},
+            job_output_dir=output_dir,
+            output_files=[current],
+            render_completed=True,
+            job_completed=True,
+        )
+
+        self.assertFalse(current.exists())
+        self.assertTrue(sibling.exists())
+        self.assertTrue(output_dir.exists())
+
     def test_cancelled_job_cleanup_removes_all_local_artifacts(self):
         tmp_dir = self.make_workspace_temp_dir()
         download_dir = tmp_dir / "downloads" / "Title"
@@ -103,6 +125,48 @@ class PipelineCleanupTests(unittest.TestCase):
         self.assertFalse(download_dir.exists())
         self.assertFalse((temp_root / "Title").exists())
         self.assertFalse((output_root / "Title").exists())
+
+    def test_cancelled_job_cleanup_preserves_sibling_range_artifacts(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        temp_root = tmp_dir / "temp"
+        output_root = tmp_dir / "output"
+        first = {
+            "title": "Title",
+            "season": 1,
+            "episodes_range": "001-010",
+            "source": {"type": "magnet", "download_dir": str(tmp_dir / "downloads" / "first")},
+            "output_dir": str(output_root),
+        }
+        sibling = {
+            **first,
+            "episodes_range": "011-020",
+            "source": {"type": "magnet", "download_dir": str(tmp_dir / "downloads" / "sibling")},
+        }
+        first_temp = temp_root / build_job_workspace_name(first)
+        sibling_temp = temp_root / build_job_workspace_name(sibling)
+        first_artifacts = build_output_artifacts(first, output_root)
+        sibling_artifacts = build_output_artifacts(sibling, output_root)
+        for path in (
+            Path(first["source"]["download_dir"]),
+            Path(sibling["source"]["download_dir"]),
+            first_temp,
+            sibling_temp,
+            first_artifacts["job_output_dir"],
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+        for artifacts in (first_artifacts, sibling_artifacts):
+            for key in ("output_video", "output_txt", "output_manifest"):
+                artifacts[key].touch()
+
+        with patch("lib.pipeline.TEMP_ROOT", temp_root):
+            cleanup_cancelled_job_artifacts(first)
+
+        self.assertFalse(Path(first["source"]["download_dir"]).exists())
+        self.assertTrue(Path(sibling["source"]["download_dir"]).exists())
+        self.assertFalse(first_temp.exists())
+        self.assertTrue(sibling_temp.exists())
+        self.assertFalse(first_artifacts["output_video"].exists())
+        self.assertTrue(sibling_artifacts["output_video"].exists())
 
 
 if __name__ == "__main__":

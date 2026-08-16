@@ -45,6 +45,7 @@ from lib.telegram_bot import (
     normalize_command_text,
     parse_add_command,
     parse_add4k_command,
+    retry_job_to_queue,
     update_job_navigation_label,
     update_job_audio_recovery,
     save_telegram_state,
@@ -212,6 +213,85 @@ class TelegramBotTests(unittest.TestCase):
         self.assertTrue(first["added"])
         self.assertFalse(second["added"])
         self.assertEqual(second["reason"], "duplicate_job")
+
+    def test_add_job_allows_same_title_with_different_or_overlapping_ranges(self):
+        config = self.make_config(self.make_workspace_temp_dir())
+
+        first = add_job_from_command(
+            config,
+            "/add One Piece ; 001-120 ; magnet:?xt=urn:btih:first ; 1",
+        )
+        overlapping = add_job_from_command(
+            config,
+            "/add One Piece ; 100-170 ; magnet:?xt=urn:btih:second ; 1",
+        )
+
+        self.assertTrue(first["added"])
+        self.assertTrue(overlapping["added"])
+        jobs = load_jobs(config)
+        self.assertEqual([job["episodes_range"] for job in jobs], ["001-120", "100-170"])
+        self.assertNotEqual(jobs[0]["source"]["download_dir"], jobs[1]["source"]["download_dir"])
+
+    def test_add_job_treats_same_range_as_duplicate_regardless_of_source(self):
+        config = self.make_config(self.make_workspace_temp_dir())
+        first = add_job_from_command(
+            config,
+            "/add One Piece ; 1-3 ; magnet:?xt=urn:btih:first ; 1 ; 0 ; AVC",
+        )
+        duplicate = add_job_from_command(
+            config,
+            "/add One Piece ; 001-003 ; magnet:?xt=urn:btih:second ; 1 ; 0 ; HEVC",
+        )
+
+        self.assertTrue(first["added"])
+        self.assertFalse(duplicate["added"])
+        self.assertEqual(duplicate["reason"], "duplicate_job")
+
+    def test_add_job_allows_same_range_for_different_processing_mode(self):
+        config = self.make_config(self.make_workspace_temp_dir())
+
+        regular = add_job_from_command(
+            config,
+            "/add One Piece ; 001-003 ; magnet:?xt=urn:btih:first ; 1",
+        )
+        upscale = add_upscale_job_from_command(
+            config,
+            "/add4k One Piece ; 001-003 ; magnet:?xt=urn:btih:second ; 1",
+        )
+
+        self.assertTrue(regular["added"])
+        self.assertTrue(upscale["added"])
+
+    def test_add_job_allows_same_range_for_different_season(self):
+        config = self.make_config(self.make_workspace_temp_dir())
+
+        first = add_job_from_command(
+            config,
+            "/add One Piece ; 001-003 ; magnet:?xt=urn:btih:first ; 1",
+        )
+        second = add_job_from_command(
+            config,
+            "/add One Piece ; 001-003 ; magnet:?xt=urn:btih:second ; 2",
+        )
+
+        self.assertTrue(first["added"])
+        self.assertTrue(second["added"])
+
+    def test_retry_allows_same_title_when_range_differs(self):
+        config = self.make_config(self.make_workspace_temp_dir())
+        add_job_from_command(
+            config,
+            "/add One Piece ; 001-120 ; magnet:?xt=urn:btih:first ; 1",
+        )
+        archived_job = {
+            "title": "One Piece",
+            "season": 1,
+            "episodes_range": "121-240",
+            "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:second"},
+        }
+
+        self.assertTrue(retry_job_to_queue(config, archived_job))
+        self.assertEqual(len(load_jobs(config)), 2)
 
     def test_formatters_build_readable_messages(self):
         discovery = format_discovery_message(

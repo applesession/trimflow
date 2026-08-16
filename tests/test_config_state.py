@@ -18,6 +18,7 @@ from lib.autojobs import (
     collect_release_episode_numbers,
     discover_jobs,
     extract_release_source_variants,
+    find_matching_job,
     format_episodes_range,
     merge_episode_ranges,
     select_release_source_variant,
@@ -37,6 +38,41 @@ class ConfigStateTests(unittest.TestCase):
         temp_dir = Path(tempfile.mkdtemp(dir=root))
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         return temp_dir
+
+    def test_discovery_matching_ignores_manual_job_with_same_title(self):
+        manual_job = {
+            "title": "One Piece",
+            "season": 1,
+            "episodes_range": "001-120",
+            "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:manual"},
+        }
+        discovered_job = {
+            "title": "One Piece",
+            "season": 1,
+            "episodes_range": "001-170",
+            "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:discovery"},
+            "automation": {"release_id": 42},
+        }
+
+        self.assertIsNone(find_matching_job([manual_job], discovered_job))
+
+    def test_discovery_matching_uses_release_id_across_source_changes(self):
+        existing_job = {
+            "title": "Old title",
+            "season": 1,
+            "episodes_range": "001-120",
+            "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:old"},
+            "automation": {"release_id": 42},
+        }
+        discovered_job = {
+            "title": "New title",
+            "season": 1,
+            "episodes_range": "001-121",
+            "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:new"},
+            "automation": {"release_id": 42},
+        }
+
+        self.assertIs(find_matching_job([existing_job], discovered_job), existing_job)
 
     def test_load_jobs_returns_empty_list_when_file_is_missing(self):
         tmp_dir = self.make_workspace_temp_dir()

@@ -483,6 +483,32 @@ def discover_jobs(config, jobs, state):
 
 
 def find_matching_job(jobs, candidate_job):
+    candidate_release_id = get_job_release_id(candidate_job)
+    if candidate_release_id is not None:
+        candidate_processing_mode = get_job_processing_mode(candidate_job)
+        candidate_variant_identity = build_source_variant_identity(candidate_job.get("source", {}))
+        for job in jobs:
+            job_variant_identity = build_source_variant_identity(job.get("source", {}))
+            if (
+                get_job_release_id(job) == candidate_release_id
+                and get_job_processing_mode(job) == candidate_processing_mode
+                and (
+                    job_variant_identity == candidate_variant_identity
+                    or not job_variant_identity
+                    or not candidate_variant_identity
+                )
+            ):
+                return job
+        candidate_mal_id = candidate_job.get("mal_id")
+        jobs = [
+            job for job in jobs
+            if get_job_release_id(job) is None
+            and candidate_mal_id is not None
+            and job.get("mal_id") == candidate_mal_id
+        ]
+        if not jobs:
+            return None
+
     candidate_key = build_job_key(candidate_job)
     for job in jobs:
         if build_job_key(job) == candidate_key:

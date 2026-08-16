@@ -21,6 +21,7 @@ from core.detector import (
 from core.discovery import filter_episode_files, find_episode_files
 from core.torrent import download_selected_episodes
 from shared.helpers import (
+    build_job_workspace_name,
     build_compilation_display_name,
     build_single_episode_display_name,
     build_timestamps_description,
@@ -1492,6 +1493,7 @@ def cleanup_job_artifacts(
     download_dir=None,
     temp_dir=None,
     job_output_dir=None,
+    output_files=None,
     *,
     render_completed=False,
     job_completed=False,
@@ -1509,17 +1511,34 @@ def cleanup_job_artifacts(
 
     if job_completed and cleanup.get("output", False) and job_output_dir:
         print(f"[CLEANUP] Removing output: {job_output_dir}")
-        shutil.rmtree(job_output_dir, ignore_errors=True)
+        if output_files:
+            for path in output_files:
+                Path(path).unlink(missing_ok=True)
+            try:
+                Path(job_output_dir).rmdir()
+            except OSError:
+                pass
+        else:
+            shutil.rmtree(job_output_dir, ignore_errors=True)
 
 
 def cleanup_cancelled_job_artifacts(job):
-    title_slug = ensure_non_empty_slug(job["title"])
+    workspace_name = build_job_workspace_name(job)
     source = job.get("source") or {}
     if source.get("type") == "magnet":
-        download_dir = Path(source.get("download_dir") or f"./downloads/{title_slug}")
+        download_dir = Path(source.get("download_dir") or f"./downloads/{workspace_name}")
         shutil.rmtree(download_dir, ignore_errors=True)
-    shutil.rmtree(TEMP_ROOT / title_slug, ignore_errors=True)
-    shutil.rmtree(Path(job.get("output_dir") or "./output") / title_slug, ignore_errors=True)
+    shutil.rmtree(TEMP_ROOT / workspace_name, ignore_errors=True)
+    if job.get("episodes_range"):
+        artifacts = build_output_artifacts(job, Path(job.get("output_dir") or "./output"))
+        for key in ("output_video", "output_txt", "output_manifest"):
+            artifacts[key].unlink(missing_ok=True)
+        try:
+            artifacts["job_output_dir"].rmdir()
+        except OSError:
+            pass
+    else:
+        shutil.rmtree(Path(job.get("output_dir") or "./output") / workspace_name, ignore_errors=True)
 
 
 def set_runtime_stage(runtime_status_path, stage, **current_job_updates):
@@ -1557,6 +1576,7 @@ def process_job(job, runtime_status_path=None):
     preferred_language = str(job.get("preferred_audio_language", "rus")).strip().lower() or "rus"
 
     title_slug = ensure_non_empty_slug(title)
+    workspace_name = build_job_workspace_name(job)
     allowed_episodes = parse_episodes_range(episodes_range)
 
     download_cfg = job.get("download") or {}
@@ -1575,9 +1595,9 @@ def process_job(job, runtime_status_path=None):
     job_output_dir.mkdir(parents=True, exist_ok=True)
 
     temp_dir = (
-        reset_temp_dir(title_slug)
+        reset_temp_dir(workspace_name)
         if processing_mode == "single_episode"
-        else prepare_temp_dir(title_slug)
+        else prepare_temp_dir(workspace_name)
     )
     download_dir = None
     render_completed = False
@@ -1996,6 +2016,11 @@ def process_job(job, runtime_status_path=None):
             download_dir=download_dir,
             temp_dir=temp_dir,
             job_output_dir=job_output_dir,
+            output_files=[
+                artifacts["output_video"],
+                artifacts["output_txt"],
+                artifacts["output_manifest"],
+            ],
             render_completed=render_completed,
             job_completed=job_completed,
             preserve_temp_on_failure=processing_mode != "single_episode",

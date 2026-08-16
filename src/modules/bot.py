@@ -33,8 +33,8 @@ from shared.db import (
     update_job_processing,
 )
 from shared.helpers import (
+    build_job_workspace_name,
     clear_navigation_label,
-    ensure_non_empty_slug,
     get_display_title,
     get_navigation_label,
     parse_episodes_range,
@@ -804,6 +804,21 @@ def build_job_identity(job):
         source_type,
         source_signature,
     ])
+
+
+def build_manual_queue_key(job):
+    episodes_range = format_episodes_range(parse_episodes_range(job.get("episodes_range", "")))
+    return "|".join([
+        str(job.get("title", "")).strip().casefold(),
+        str(int(job.get("season", 1))),
+        episodes_range,
+        str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
+    ])
+
+
+def has_manual_queue_duplicate(jobs, candidate_job):
+    candidate_key = build_manual_queue_key(candidate_job)
+    return any(build_manual_queue_key(job) == candidate_key for job in jobs)
 
 
 def get_pending_action(chat_id):
@@ -1770,7 +1785,7 @@ def archive_job_to_completed(config, job, source="telegram_complete"):
 
 def retry_job_to_queue(config, job):
     jobs = load_jobs(config)
-    if find_matching_job(jobs, job) is not None:
+    if has_manual_queue_duplicate(jobs, job):
         return False
     insert_one_job(job)
     state = load_state(config)
@@ -1969,7 +1984,6 @@ def parse_add4k_command(text):
 
 def build_manual_job(command_payload):
     title = command_payload["title"]
-    slug = ensure_non_empty_slug(title)
     job = {
         "title": title,
         "season": command_payload["season"],
@@ -1977,9 +1991,9 @@ def build_manual_job(command_payload):
         "source": {
             "type": "magnet",
             "magnet": command_payload["magnet"],
-            "download_dir": f"downloads/{slug}",
         },
     }
+    job["source"]["download_dir"] = f"downloads/{build_job_workspace_name(job)}"
     privacy_view = command_payload.get("privacy_view", 0)
     if privacy_view != 0:
         job["delivery"] = {"vk_privacy_view": privacy_view}
@@ -1993,7 +2007,7 @@ def add_job_from_command(config, text):
     candidate_job = build_manual_job(command_payload)
     jobs = load_jobs(config)
 
-    if find_matching_job(jobs, candidate_job) is not None:
+    if has_manual_queue_duplicate(jobs, candidate_job):
         return {
             "added": False,
             "job": candidate_job,
@@ -2010,7 +2024,6 @@ def add_job_from_command(config, text):
 
 def build_upscale_job(command_payload):
     title = command_payload["title"]
-    slug = ensure_non_empty_slug(title)
     job = {
         "title": title,
         "season": command_payload["season"],
@@ -2019,7 +2032,6 @@ def build_upscale_job(command_payload):
         "source": {
             "type": "magnet",
             "magnet": command_payload["magnet"],
-            "download_dir": f"upscale_downloads/{slug}",
         },
         "output_dir": "./upscale_output",
         "delivery": {
@@ -2036,6 +2048,7 @@ def build_upscale_job(command_payload):
             "output": True,
         },
     }
+    job["source"]["download_dir"] = f"upscale_downloads/{build_job_workspace_name(job)}"
     if command_payload.get("source_path_contains"):
         job["processing"] = {"source_path_contains": command_payload["source_path_contains"]}
     return job
@@ -2043,7 +2056,7 @@ def build_upscale_job(command_payload):
 
 def add_upscale_job_from_command(config, text):
     candidate_job = build_upscale_job(parse_add4k_command(text))
-    if find_matching_job(load_jobs(config), candidate_job) is not None:
+    if has_manual_queue_duplicate(load_jobs(config), candidate_job):
         return {"added": False, "job": candidate_job, "reason": "duplicate_job"}
     insert_one_job(candidate_job)
     return {"added": True, "job": candidate_job, "reason": None}
