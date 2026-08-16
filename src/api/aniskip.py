@@ -215,6 +215,7 @@ def build_quality_summary(manifest_episodes, skip_types):
     summary = {
         "episodes_count": len(manifest_episodes),
         "episodes_with_warnings": [],
+        "episodes_audio_recovery": [],
         "episodes_anilibria_only": 0,
         "episodes_anilibria_with_detector": 0,
         "episodes_aniskip_only": 0,
@@ -242,6 +243,9 @@ def build_quality_summary(manifest_episodes, skip_types):
 
         if skip_summary.get("warnings"):
             summary["episodes_with_warnings"].append(episode["episode"])
+
+        if (episode.get("audio_recovery") or {}).get("applied"):
+            summary["episodes_audio_recovery"].append(episode["episode"])
 
         strategy = timing_info.get("strategy")
         if strategy == "anilibria_only":

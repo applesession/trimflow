@@ -278,12 +278,13 @@ def discover_jobs(config, jobs, state):
     automation = normalize_automation_config(config)
     updated_jobs = deepcopy(jobs)
     updated_state = deepcopy(state)
-    updated_state.setdefault("schema_version", 3)
+    updated_state.setdefault("schema_version", 4)
     updated_state.setdefault("job_index", {})
     updated_state.setdefault("skipped_items", [])
     updated_state.setdefault("ongoing_progress", {})
     updated_state.setdefault("discovery_blacklist", [])
     updated_state.setdefault("release_naming_overrides", {})
+    updated_state.setdefault("release_audio_recovery_overrides", {})
     _get_episode_tracking_maps(updated_state)
     running_release_ids = {
         get_job_release_id(job)
@@ -451,6 +452,11 @@ def discover_jobs(config, jobs, state):
             naming_override = updated_state["release_naming_overrides"].get(str(release_id))
             if naming_override:
                 set_navigation_label(candidate_job, naming_override, source="manual")
+            if (
+                candidate_job.get("processing_mode") in {"single_episode", "compilation"}
+                and updated_state["release_audio_recovery_overrides"].get(str(release_id))
+            ):
+                candidate_job.setdefault("processing", {})["audio_recovery_enabled"] = True
             queue_result = queue_discovered_job(updated_jobs, candidate_job)
             if queue_result == "created":
                 created_jobs += 1

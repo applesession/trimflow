@@ -38,6 +38,7 @@ from shared.helpers import (
 )
 from shared.constants import TEMP_ROOT
 from core.media import (
+    analyze_audio_recovery,
     detect_audio_streams,
     get_preferred_audio_stream,
     build_keep_segments,
@@ -122,7 +123,7 @@ def compact_manifest_episode(manifest_episode, skip_types):
     original_duration = float(manifest_episode.get("original_duration", 0.0))
     cleaned_duration = float(manifest_episode.get("cleaned_duration", 0.0))
 
-    return {
+    compact = {
         "episode": manifest_episode["episode"],
         "source_file": Path(manifest_episode["source_file"]).name,
         "original_duration": _round_or_none(original_duration),
@@ -136,6 +137,9 @@ def compact_manifest_episode(manifest_episode, skip_types):
         "timing_info": _compact_timing_info(manifest_episode.get("timing_info", {}), skip_types),
         "skip_summary": manifest_episode.get("skip_summary", {}),
     }
+    if manifest_episode.get("audio_recovery"):
+        compact["audio_recovery"] = manifest_episode["audio_recovery"]
+    return compact
 
 
 def build_compact_manifest(
@@ -199,6 +203,22 @@ def build_compact_manifest(
 
 def normalize_processing_config(job):
     return dict(job.get("processing") or {})
+
+
+def build_audio_recovery_info(enabled, path, audio_stream_index):
+    if not enabled:
+        return {"enabled": False, "applied": False, "reasons": []}
+    if audio_stream_index is None:
+        return {"enabled": True, "applied": False, "reasons": []}
+    return analyze_audio_recovery(path, audio_stream_index=audio_stream_index)
+
+
+def validate_expected_episode_duration(validation, expected_duration, path):
+    difference = abs(float(validation["duration"]) - float(expected_duration))
+    if difference > 0.25:
+        raise RuntimeError(
+            f"Episode checkpoint duration mismatch {difference:.3f}s: {path}"
+        )
 
 
 RENDER_PIPELINE_VERSION = 2
@@ -310,7 +330,7 @@ def initialize_episode_checkpoints(temp_dir, fingerprint):
     return checkpoint
 
 
-def load_episode_checkpoint(temp_dir, episode_info):
+def load_episode_checkpoint(temp_dir, episode_info, audio_recovery_enabled=False):
     episode_number = episode_info["episode"]
     episode_dir = temp_dir / f"episode_{episode_number:03d}"
     checkpoint_path = episode_dir / "checkpoint.json"
@@ -338,6 +358,17 @@ def load_episode_checkpoint(temp_dir, episode_info):
     manifest_episode = checkpoint.get("manifest_episode")
     if not isinstance(manifest_episode, dict) or manifest_episode.get("episode") != episode_number:
         return None
+    audio_recovery = manifest_episode.get("audio_recovery") or {}
+    if audio_recovery.get("applied") and not audio_recovery_enabled:
+        return None
+    try:
+        validate_expected_episode_duration(
+            validation,
+            manifest_episode.get("expected_cleaned_duration", checkpoint.get("duration", 0.0)),
+            output,
+        )
+    except (TypeError, ValueError, RuntimeError):
+        return None
     return {
         **checkpoint,
         "output": output,
@@ -354,6 +385,11 @@ def save_episode_checkpoint(
     manifest_episode,
 ):
     validation = validate_episode_render(rendered_work)
+    validate_expected_episode_duration(
+        validation,
+        manifest_episode["expected_cleaned_duration"],
+        rendered_work,
+    )
     rendered = episode_dir / "rendered.mkv"
     rendered.unlink(missing_ok=True)
     rendered_work.replace(rendered)
@@ -734,6 +770,7 @@ def build_episode_render_plan(
     anilibria_result,
     aniskip_result,
     preferred_language="rus",
+    audio_recovery_enabled=False,
 ):
     detected_ep = episode_info["episode"]
     ep_file = Path(episode_info["path"])
@@ -782,6 +819,11 @@ def build_episode_render_plan(
         if audio_streams
         else None
     )
+    audio_recovery = build_audio_recovery_info(
+        audio_recovery_enabled,
+        ep_file,
+        audio_stream_index,
+    )
     manifest_episode = {
         "episode": detected_ep,
         "source_file": str(ep_file),
@@ -805,11 +847,13 @@ def build_episode_render_plan(
             {"start": start, "end": end, "cut_mode": "normalized_filter"}
             for start, end in keep_segments
         ],
+        "audio_recovery": audio_recovery,
     }
     return {
         "keep_segments": keep_segments,
         "expected_duration": expected_duration,
         "audio_stream_index": audio_stream_index,
+        "audio_recovery": audio_recovery,
         "manifest_episode": manifest_episode,
     }
 
@@ -1427,6 +1471,15 @@ def load_render_checkpoint(job, artifacts):
         return None
     if manifest.get("output_video") != output_video.name or manifest.get("output_timestamps") != output_txt.name:
         return None
+    audio_recovery_enabled = bool(
+        (job.get("processing") or {}).get("audio_recovery_enabled", False)
+    )
+    if not audio_recovery_enabled and any(
+        (episode.get("audio_recovery") or {}).get("applied")
+        for episode in manifest.get("episodes", [])
+        if isinstance(episode, dict)
+    ):
+        return None
 
     return {
         "manifest": manifest,
@@ -1495,6 +1548,7 @@ def process_job(job, runtime_status_path=None):
     encoding = dict(job.get("encoding") or {})
     cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
     processing = normalize_processing_config(job)
+    audio_recovery_enabled = bool(processing.get("audio_recovery_enabled", False))
     timing_detection = normalize_timing_detection_config(job)
     delivery = build_delivery_config(job)
     timing_providers = job.get("timing_providers") or {}
@@ -1614,13 +1668,33 @@ def process_job(job, runtime_status_path=None):
                 current_chunk_episode_range=None,
             )
             episode_audio_index = get_preferred_audio_stream(Path(episode_path), preferred_language)
+            expected_duration = ffprobe_duration(Path(episode_path))
+            audio_recovery = build_audio_recovery_info(
+                audio_recovery_enabled,
+                Path(episode_path),
+                episode_audio_index,
+            )
             render_final(
                 concat_output=Path(episode_path),
                 watermark_path=watermark_path,
                 output_video=output_video,
                 encoding={**encoding, "audio_codec": "aac"},
                 audio_stream_index=episode_audio_index,
+                audio_recovery=audio_recovery["applied"],
             )
+            validation = validate_episode_render(output_video)
+            validate_expected_episode_duration(validation, expected_duration, output_video)
+            manifest_episode = manifest["episodes"][0]
+            manifest_episode["original_duration"] = expected_duration
+            manifest_episode["expected_cleaned_duration"] = expected_duration
+            manifest_episode["cleaned_duration"] = validation["duration"]
+            manifest_episode["audio_recovery"] = audio_recovery
+            manifest["quality_summary"] = {
+                "episodes_count": 1,
+                "episodes_audio_recovery": (
+                    [episode_number] if audio_recovery["applied"] else []
+                ),
+            }
             manifest["render_complete"] = True
             write_outputs(output_txt, output_manifest, timestamps, manifest)
             render_completed = True
@@ -1669,7 +1743,11 @@ def process_job(job, runtime_status_path=None):
             total_chunks=None,
         )
         loaded_episodes = [
-            load_episode_checkpoint(temp_dir, episode_info)
+            load_episode_checkpoint(
+                temp_dir,
+                episode_info,
+                audio_recovery_enabled=audio_recovery_enabled,
+            )
             for episode_info in episode_infos
         ]
         render_context = episode_checkpoint.get("render_context")
@@ -1772,6 +1850,7 @@ def process_job(job, runtime_status_path=None):
                         anilibria_result=prefetched_anilibria_results[episode_number],
                         aniskip_result=prefetched_aniskip_results[episode_number],
                         preferred_language=preferred_language,
+                        audio_recovery_enabled=audio_recovery_enabled,
                     )
                     render_episode(
                         episode_info["path"],
@@ -1780,6 +1859,9 @@ def process_job(job, runtime_status_path=None):
                         watermark_path,
                         {**encoding, "audio_codec": "aac"},
                         audio_stream_index=render_plan["audio_stream_index"],
+                        audio_recovery=bool(
+                            (render_plan.get("audio_recovery") or {}).get("applied")
+                        ),
                     )
                     episode_result = save_episode_checkpoint(
                         episode_dir,

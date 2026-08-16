@@ -135,7 +135,7 @@ def ffprobe_media_signature(path):
     }
 
 
-def ffprobe_episode_timeline(path):
+def ffprobe_episode_timeline(path, audio_stream_index=0):
     result = subprocess.check_output([
         "ffprobe", "-v", "error",
         "-show_entries",
@@ -160,9 +160,14 @@ def ffprobe_episode_timeline(path):
 
     timeline = {}
     for stream_type in ("video", "audio"):
-        stream_index = next(
-            (index for index, kind in stream_types.items() if kind == stream_type),
-            None,
+        matching_streams = [
+            index for index, kind in stream_types.items() if kind == stream_type
+        ]
+        selected_position = audio_stream_index if stream_type == "audio" else 0
+        stream_index = (
+            matching_streams[selected_position]
+            if 0 <= selected_position < len(matching_streams)
+            else None
         )
         if stream_index is None:
             timeline[stream_type] = None
@@ -170,16 +175,75 @@ def ffprobe_episode_timeline(path):
         packets = sorted(packet_times[stream_index])
         if not packets:
             raise RuntimeError(f"Episode checkpoint has no {stream_type} packets: {path}")
-        max_gap = max(
-            (current[0] - previous[1] for previous, current in zip(packets, packets[1:])),
-            default=0.0,
-        )
+        positive_gaps = [
+            max(0.0, current[0] - previous[1])
+            for previous, current in zip(packets, packets[1:])
+        ]
+        max_gap = max(positive_gaps, default=0.0)
         timeline[stream_type] = {
             "start": packets[0][0],
             "duration": max(end for _, end in packets) - packets[0][0],
-            "max_packet_gap": max(0.0, max_gap),
+            "max_packet_gap": max_gap,
+            "total_packet_gap": sum(gap for gap in positive_gaps if gap > 0.1),
         }
     return timeline
+
+
+def analyze_audio_recovery(path, audio_stream_index=0):
+    timeline = ffprobe_episode_timeline(path, audio_stream_index=audio_stream_index)
+    video = timeline.get("video")
+    audio = timeline.get("audio")
+    if video is None or audio is None:
+        return {
+            "enabled": True,
+            "applied": False,
+            "reasons": [],
+            "source_audio_max_packet_gap": 0.0,
+            "source_audio_total_packet_gap": 0.0,
+            "source_audio_start_delay": 0.0,
+            "source_audio_end_shortfall": 0.0,
+            "inserted_silence_seconds": 0.0,
+        }
+
+    video_end = video["start"] + video["duration"]
+    audio_end = audio["start"] + audio["duration"]
+    max_gap = max(0.0, float(audio.get("max_packet_gap", 0.0)))
+    total_gap = max(0.0, float(audio.get("total_packet_gap", max_gap)))
+    start_delay = max(0.0, float(audio["start"]) - float(video["start"]))
+    end_shortfall = max(0.0, video_end - audio_end)
+
+    reasons = []
+    if max_gap > 0.5:
+        reasons.append("packet_gap")
+    if start_delay > 0.1:
+        reasons.append("late_start")
+    if end_shortfall > 0.25:
+        reasons.append("early_end")
+
+    inserted_silence = total_gap + start_delay + end_shortfall
+    if max_gap > 2.0:
+        raise RuntimeError(
+            f"Audio recovery packet gap {max_gap:.3f}s exceeds 2.000s: {path}"
+        )
+    if end_shortfall > 15.0:
+        raise RuntimeError(
+            f"Audio recovery end shortfall {end_shortfall:.3f}s exceeds 15.000s: {path}"
+        )
+    if inserted_silence > 15.0:
+        raise RuntimeError(
+            f"Audio recovery total silence {inserted_silence:.3f}s exceeds 15.000s: {path}"
+        )
+
+    return {
+        "enabled": True,
+        "applied": bool(reasons),
+        "reasons": reasons,
+        "source_audio_max_packet_gap": round(max_gap, 3),
+        "source_audio_total_packet_gap": round(total_gap, 3),
+        "source_audio_start_delay": round(start_delay, 3),
+        "source_audio_end_shortfall": round(end_shortfall, 3),
+        "inserted_silence_seconds": round(inserted_silence, 3),
+    }
 
 
 def validate_episode_render(path):
@@ -615,6 +679,7 @@ def _build_episode_render_cmd(
     watermark_path,
     encoding,
     audio_stream_index,
+    audio_recovery=False,
 ):
     if not keep_segments:
         raise RuntimeError(f"Episode has no ranges to render: {ep_file}")
@@ -666,6 +731,11 @@ def _build_episode_render_cmd(
         if audio_stream_index is not None:
             filters.append("[a0]anull[acat]")
 
+    audio_output = "acat"
+    if audio_stream_index is not None and audio_recovery:
+        filters.append("[acat]aresample=async=1:first_pts=0,apad[arecovered]")
+        audio_output = "arecovered"
+
     frame_rate = encoding.get("frame_rate")
     frame_width = encoding.get("frame_width")
     frame_height = encoding.get("frame_height")
@@ -690,7 +760,7 @@ def _build_episode_render_cmd(
         "-map_chapters", "-1",
     ]
     if audio_stream_index is not None:
-        cmd += ["-map", "[acat]"]
+        cmd += ["-map", f"[{audio_output}]"]
     cmd += ["-c:v", video_codec]
     if "nvenc" in video_codec:
         cmd += ["-preset", preset, "-cq", cq]
@@ -718,6 +788,7 @@ def render_episode(
     watermark_path,
     encoding,
     audio_stream_index=None,
+    audio_recovery=False,
 ):
     cmd = _build_episode_render_cmd(
         ep_file,
@@ -726,6 +797,7 @@ def render_episode(
         watermark_path,
         encoding,
         audio_stream_index,
+        audio_recovery,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
     try:
@@ -749,29 +821,41 @@ def render_episode(
         watermark_path,
         fallback_encoding,
         audio_stream_index,
+        audio_recovery,
     ))
 
 
-def _build_final_cmd(concat_output, watermark_path, output_video, encoding, audio_stream_index):
+def _build_final_cmd(
+    concat_output,
+    watermark_path,
+    output_video,
+    encoding,
+    audio_stream_index,
+    audio_recovery=False,
+):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
     cq = str(encoding.get("cq", 23))
     audio_codec = encoding.get("audio_codec", "aac")
 
-    overlay_filter = (
+    filters = [
         "[0:v]format=yuv420p[base];"
         "[1:v]scale=160:-1,format=rgba[wm];"
         "[base][wm]overlay=W-w-20:20,format=yuv420p[v]"
-    )
+    ]
+    if audio_recovery:
+        filters.append(
+            f"[0:a:{audio_stream_index}]aresample=async=1:first_pts=0,apad[arecovered]"
+        )
 
     cmd = [
         "ffmpeg",
         "-y",
         "-i", concat_output,
         "-i", watermark_path,
-        "-filter_complex", overlay_filter,
+        "-filter_complex", ";".join(filters),
         "-map", "[v]",
-        "-map", f"0:a:{audio_stream_index}?",
+        "-map", "[arecovered]" if audio_recovery else f"0:a:{audio_stream_index}?",
         "-map", "0:s?",
         "-c:v", video_codec,
     ]
@@ -784,19 +868,35 @@ def _build_final_cmd(concat_output, watermark_path, output_video, encoding, audi
     cmd += [
         "-c:a", audio_codec,
         "-c:s", "copy",
-        output_video,
     ]
+    if audio_recovery:
+        cmd.append("-shortest")
+    cmd.append(output_video)
 
     return cmd
 
 
-def render_final(concat_output, watermark_path, output_video, encoding, audio_stream_index=0):
+def render_final(
+    concat_output,
+    watermark_path,
+    output_video,
+    encoding,
+    audio_stream_index=0,
+    audio_recovery=False,
+):
     if not _probe_video_streams(concat_output):
         raise RuntimeError(
             f"concat_output has no video stream, file may be corrupt: {concat_output}"
         )
 
-    cmd = _build_final_cmd(concat_output, watermark_path, output_video, encoding, audio_stream_index)
+    cmd = _build_final_cmd(
+        concat_output,
+        watermark_path,
+        output_video,
+        encoding,
+        audio_stream_index,
+        audio_recovery,
+    )
     video_codec = encoding.get("video_codec", "h264_nvenc")
 
     try:
@@ -818,6 +918,6 @@ def render_final(concat_output, watermark_path, output_video, encoding, audio_st
     fallback_encoding["preset"] = "fast"
     fallback_cmd = _build_final_cmd(
         concat_output, watermark_path, output_video,
-        fallback_encoding, audio_stream_index,
+        fallback_encoding, audio_stream_index, audio_recovery,
     )
     run(fallback_cmd)

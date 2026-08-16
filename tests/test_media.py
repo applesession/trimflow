@@ -7,15 +7,78 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lib.media import (
+    analyze_audio_recovery,
+    ffprobe_episode_timeline,
     get_nvenc_fallback_codec,
     get_preferred_audio_stream,
     render_episode,
+    render_final,
     render_segment_copy,
     validate_episode_render,
 )
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    @patch("lib.media.ffprobe_episode_timeline")
+    def test_audio_recovery_detects_supported_gap_and_short_tail(self, mock_timeline):
+        mock_timeline.return_value = {
+            "video": {"start": 0.0, "duration": 1440.0, "max_packet_gap": 0.04},
+            "audio": {
+                "start": 0.0,
+                "duration": 1430.3,
+                "max_packet_gap": 0.662,
+                "total_packet_gap": 0.662,
+            },
+        }
+
+        result = analyze_audio_recovery("episode.mkv", audio_stream_index=1)
+
+        mock_timeline.assert_called_once_with("episode.mkv", audio_stream_index=1)
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["reasons"], ["packet_gap", "early_end"])
+        self.assertEqual(result["source_audio_end_shortfall"], 9.7)
+        self.assertEqual(result["inserted_silence_seconds"], 10.362)
+
+    @patch("lib.media.ffprobe_episode_timeline")
+    def test_audio_recovery_rejects_gap_or_total_silence_over_limit(self, mock_timeline):
+        mock_timeline.return_value = {
+            "video": {"start": 0.0, "duration": 30.0, "max_packet_gap": 0.04},
+            "audio": {
+                "start": 0.0,
+                "duration": 30.0,
+                "max_packet_gap": 2.1,
+                "total_packet_gap": 2.1,
+            },
+        }
+        with self.assertRaisesRegex(RuntimeError, "packet gap 2.100s exceeds"):
+            analyze_audio_recovery("episode.mkv")
+
+        mock_timeline.return_value["audio"].update({
+            "max_packet_gap": 1.0,
+            "total_packet_gap": 15.1,
+        })
+        with self.assertRaisesRegex(RuntimeError, "total silence 15.100s exceeds"):
+            analyze_audio_recovery("episode.mkv")
+
+    @patch("lib.media.subprocess.check_output")
+    def test_episode_timeline_uses_requested_audio_stream_position(self, mock_output):
+        mock_output.return_value = json.dumps({
+            "streams": [
+                {"index": 0, "codec_type": "video"},
+                {"index": 1, "codec_type": "audio"},
+                {"index": 2, "codec_type": "audio"},
+            ],
+            "packets": [
+                {"stream_index": 0, "pts_time": "0", "duration_time": "1"},
+                {"stream_index": 1, "pts_time": "0", "duration_time": "1"},
+                {"stream_index": 2, "pts_time": "5", "duration_time": "1"},
+            ],
+        })
+
+        timeline = ffprobe_episode_timeline("episode.mkv", audio_stream_index=1)
+
+        self.assertEqual(timeline["audio"]["start"], 5.0)
+
     @patch("lib.media.run")
     def test_episode_render_uses_normalized_filter_graph_without_subtitles(self, mock_run):
         render_episode(
@@ -54,6 +117,40 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("setpts=PTS-STARTPTS", graph)
         self.assertNotIn("atrim", graph)
         self.assertNotIn("-c:a", command)
+
+    @patch("lib.media.run")
+    def test_episode_render_applies_audio_recovery_filter_only_when_enabled(self, mock_run):
+        render_episode(
+            "episode.mkv",
+            "rendered.mkv",
+            [(0.0, 10.0)],
+            "watermark.png",
+            {"video_codec": "libx264"},
+            audio_stream_index=0,
+            audio_recovery=True,
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("aresample=async=1:first_pts=0,apad", graph)
+        self.assertIn("[arecovered]", command)
+
+    @patch("lib.media._probe_video_streams", return_value=[{}])
+    @patch("lib.media.run")
+    def test_single_episode_render_supports_audio_recovery(self, mock_run, _mock_probe):
+        render_final(
+            "episode.mkv",
+            "watermark.png",
+            "rendered.mkv",
+            {"video_codec": "libx264", "audio_codec": "aac"},
+            audio_stream_index=1,
+            audio_recovery=True,
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[0:a:1]aresample=async=1:first_pts=0,apad[arecovered]", graph)
+        self.assertIn("-shortest", command)
 
     @patch("lib.media.run")
     def test_episode_render_normalizes_frame_rate_and_canvas_before_watermark(self, mock_run):
@@ -209,6 +306,60 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
 class MediaEpisodeIntegrationTests(unittest.TestCase):
+    def test_audio_recovery_closes_internal_aac_gap(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp_dir = Path(raw_tmp)
+            source = tmp_dir / "source-gap.mkv"
+            watermark = tmp_dir / "watermark.png"
+            output = tmp_dir / "recovered.mkv"
+            try:
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=4",
+                    "-filter:a", "aselect=not(between(t\\,1\\,1.7))",
+                    "-map", "0:v", "-map", "1:a",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", str(source),
+                ], check=True)
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=white:size=32x16",
+                    "-frames:v", "1", str(watermark),
+                ], check=True)
+            except subprocess.CalledProcessError as exc:
+                self.skipTest(f"local ffmpeg cannot build recovery fixture: {exc}")
+
+            recovery = analyze_audio_recovery(source)
+            if not recovery["applied"]:
+                self.skipTest("local ffmpeg normalized the artificial AAC gap")
+
+            render_episode(
+                source,
+                output,
+                [(0.0, 4.0)],
+                watermark,
+                {
+                    "video_codec": "libx264",
+                    "preset": "ultrafast",
+                    "cq": 28,
+                    "audio_codec": "aac",
+                },
+                audio_stream_index=0,
+                audio_recovery=True,
+            )
+            validation = validate_episode_render(output)
+
+            self.assertGreater(recovery["source_audio_max_packet_gap"], 0.5)
+            self.assertLessEqual(validation["timeline"]["audio"]["max_packet_gap"], 0.5)
+            self.assertLessEqual(
+                abs(
+                    validation["timeline"]["video"]["duration"]
+                    - validation["timeline"]["audio"]["duration"]
+                ),
+                0.25,
+            )
+
     def test_cut_episode_has_continuous_pts_and_drops_soft_subtitles(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp_dir = Path(raw_tmp)

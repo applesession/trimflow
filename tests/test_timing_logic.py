@@ -184,6 +184,7 @@ class TimingLogicTests(unittest.TestCase):
             },
             {
                 "episode": 2,
+                "audio_recovery": {"enabled": True, "applied": True},
                 "skip_summary": {"op": True, "ed": False, "warnings": ["ED not found"]},
                 "timing_info": {
                     "strategy": "manual_review",
@@ -200,6 +201,7 @@ class TimingLogicTests(unittest.TestCase):
         self.assertEqual(summary["episodes_anilibria_only"], 1)
         self.assertEqual(summary["episodes_manual_review"], 1)
         self.assertEqual(summary["episodes_with_warnings"], [2])
+        self.assertEqual(summary["episodes_audio_recovery"], [2])
         self.assertEqual(summary["episodes_detector_completed_op_only"], 1)
         self.assertEqual(summary["episodes_detector_high"], 1)
 

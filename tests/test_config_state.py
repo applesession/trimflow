@@ -731,6 +731,39 @@ class ConfigStateTests(unittest.TestCase):
 
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
+    def test_discovery_applies_persistent_audio_recovery_override(
+        self,
+        mock_list_recent_releases,
+        mock_get_release_details,
+    ):
+        mock_list_recent_releases.return_value = {
+            "releases": [{"id": 77, "alias": "recover-release", "is_ongoing": True}],
+            "request_urls": [],
+        }
+        mock_get_release_details.return_value = {
+            "release": {
+                "id": 77,
+                "alias": "recover-release",
+                "is_ongoing": True,
+                "name": {"english": "Recover Release"},
+                "episodes": [{"number": 1}],
+                "torrents": [{
+                    "label": "AVC 1080p",
+                    "codec": "x264",
+                    "magnet": "magnet:?xt=urn:btih:recover",
+                }],
+            },
+            "request_url": "https://aniliberty.top/api/v1/anime/releases/recover-release",
+        }
+        state = build_default_state()
+        state["release_audio_recovery_overrides"] = {"77": True}
+
+        result = discover_jobs({"automation": {"download_root": "./downloads"}}, [], state)
+
+        self.assertTrue(result["jobs"][0]["processing"]["audio_recovery_enabled"])
+
+    @patch("lib.autojobs.get_release_details")
+    @patch("lib.autojobs.list_recent_releases")
     def test_discover_jobs_uses_release_level_episodes_for_selected_variant(
         self,
         mock_list_recent_releases,

@@ -46,6 +46,7 @@ from lib.telegram_bot import (
     parse_add_command,
     parse_add4k_command,
     update_job_navigation_label,
+    update_job_audio_recovery,
     save_telegram_state,
     send_message_to_allowed_chats,
     get_telegram_proxy_url,
@@ -367,6 +368,69 @@ class TelegramBotTests(unittest.TestCase):
         self.assertNotIn("naming", load_jobs(config)[0].get("processing", {}))
         state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertNotIn("77", state["release_naming_overrides"])
+
+    def test_audiofix_updates_release_jobs_and_persists_override(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        automation = {"release_id": 77, "is_ongoing": True}
+        save_jobs(config, [
+            {
+                "title": "Ongoing",
+                "season": 1,
+                "episodes_range": "010",
+                "processing_mode": "single_episode",
+                "automation": automation,
+            },
+            {
+                "title": "Ongoing",
+                "season": 1,
+                "episodes_range": "001-010",
+                "processing_mode": "compilation",
+                "processing": {"source_path_contains": "AVC"},
+                "automation": automation,
+            },
+        ])
+
+        result = update_job_audio_recovery(config, "/audiofix-on 1", True)
+
+        self.assertIn("Задач обновлено: 2", result)
+        jobs = load_jobs(config)
+        self.assertTrue(all(job["processing"]["audio_recovery_enabled"] for job in jobs))
+        compilation = next(job for job in jobs if job["processing_mode"] == "compilation")
+        self.assertEqual(compilation["processing"]["source_path_contains"], "AVC")
+        self.assertIn("[audiofix]", format_jobs_message(config))
+        state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["release_audio_recovery_overrides"]["77"])
+
+        update_job_audio_recovery(config, "/audiofix-off 1", False)
+
+        jobs = load_jobs(config)
+        self.assertTrue(all("audio_recovery_enabled" not in job.get("processing", {}) for job in jobs))
+        compilation = next(job for job in jobs if job["processing_mode"] == "compilation")
+        self.assertEqual(compilation["processing"]["source_path_contains"], "AVC")
+        state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertNotIn("77", state["release_audio_recovery_overrides"])
+
+    def test_audiofix_supports_ranges_and_rejects_4k(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [
+            {"title": "A", "season": 1, "episodes_range": "001"},
+            {"title": "B", "season": 1, "episodes_range": "001"},
+        ])
+
+        update_job_audio_recovery(config, "/audiofix-on 1-2", True)
+        self.assertTrue(all(job["processing"]["audio_recovery_enabled"] for job in load_jobs(config)))
+
+        reset_test_db()
+        save_jobs(config, [{
+            "title": "4K",
+            "season": 1,
+            "episodes_range": "001",
+            "processing_mode": "upscale_4k",
+        }])
+        with self.assertRaisesRegex(RuntimeError, "не поддерживается для 4K"):
+            update_job_audio_recovery(config, "/audiofix-on 1", True)
 
     def test_get_display_title_falls_back_to_title(self):
         self.assertEqual(get_display_title({"title_ru": "Русский", "title": "English"}), "Русский")
@@ -1163,6 +1227,7 @@ class TelegramBotTests(unittest.TestCase):
                 "episodes_anilibria_only": 18,
                 "episodes_anilibria_with_detector": 4,
                 "episodes_with_warnings": [{"episode": 8}],
+                "episodes_audio_recovery": [141, 142],
             },
             "delivery_summary": {
                 "vk": {
@@ -1205,6 +1270,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("✂️ OP: `24/24` • ED: `22/24`", message)
         self.assertIn("⚠️ Warnings: `1`", message)
         self.assertIn("🛠 Manual review: `1`", message)
+        self.assertIn("🎧 Audio recovery: `141,142`", message)
         self.assertIn("• anilibria\\_only: `18`", message)
         self.assertIn("• anilibria\\_with\\_detector: `4`", message)
         self.assertIn("• VK video: `ok`", message)

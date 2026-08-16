@@ -269,6 +269,53 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         (episode_dir / "rendered.mkv").write_bytes(b"corrupt")
         self.assertIsNone(load_episode_checkpoint(tmp_dir, episode_info))
 
+    @patch("lib.pipeline.validate_episode_render", return_value=VALIDATION)
+    def test_recovered_checkpoint_requires_enabled_mode(self, _mock_validate):
+        tmp_dir = self.make_workspace_temp_dir()
+        source = tmp_dir / "source.mkv"
+        source.write_bytes(b"source")
+        episode_info = {"episode": 1, "path": str(source), "duration": 10.0}
+        episode_dir = tmp_dir / "episode_001"
+        episode_dir.mkdir()
+        work = episode_dir / "rendered.work.mkv"
+        work.write_bytes(b"video")
+        save_episode_checkpoint(episode_dir, episode_info, work, {
+            "episode": 1,
+            "source_file": str(source),
+            "expected_cleaned_duration": 10.0,
+            "cleaned_duration": 10.0,
+            "audio_recovery": {"enabled": True, "applied": True},
+        })
+
+        self.assertIsNone(load_episode_checkpoint(tmp_dir, episode_info))
+        self.assertIsNotNone(
+            load_episode_checkpoint(tmp_dir, episode_info, audio_recovery_enabled=True)
+        )
+
+    @patch("lib.pipeline.validate_episode_render")
+    def test_episode_checkpoint_rejects_expected_duration_drift(self, mock_validate):
+        validation = dict(VALIDATION)
+        validation["duration"] = 9.6
+        mock_validate.return_value = validation
+        tmp_dir = self.make_workspace_temp_dir()
+        source = tmp_dir / "source.mkv"
+        source.write_bytes(b"source")
+        episode_info = {"episode": 1, "path": str(source), "duration": 10.0}
+        episode_dir = tmp_dir / "episode_001"
+        episode_dir.mkdir()
+        work = episode_dir / "rendered.work.mkv"
+        work.write_bytes(b"video")
+
+        with self.assertRaisesRegex(RuntimeError, "duration mismatch 0.400s"):
+            save_episode_checkpoint(episode_dir, episode_info, work, {
+                "episode": 1,
+                "source_file": str(source),
+                "expected_cleaned_duration": 10.0,
+                "cleaned_duration": 10.0,
+            })
+
+        self.assertTrue(work.exists())
+
     def test_one_hundred_actual_durations_build_exact_cumulative_timeline(self):
         episodes = [
             {"episode": number, "cleaned_duration": 1331.375}

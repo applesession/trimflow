@@ -587,6 +587,11 @@ def format_job_details_message(payload):
         f"⚠️ Warnings: {format_markdown_code(warnings_count)}",
         f"🛠 Manual review: {format_markdown_code(manual_review_count)}",
     ])
+    recovered_episodes = quality_summary.get("episodes_audio_recovery", []) or []
+    if recovered_episodes:
+        lines.append(
+            f"🎧 Audio recovery: {format_markdown_code(','.join(map(str, recovered_episodes)))}"
+        )
 
     strategy_lines = _build_strategy_lines(quality_summary)
     if strategy_lines:
@@ -1084,7 +1089,14 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True, jobs=None):
         prefix = f"{index}. " if numbered else "- "
         ongoing_marker = " [ongoing]" if (job.get("automation") or {}).get("is_ongoing") else ""
         upscale_marker = " [4K]" if job.get("processing_mode") == "upscale_4k" else ""
-        lines.append(f"{prefix}{get_display_title(job)}{ongoing_marker}{upscale_marker}")
+        audiofix_marker = (
+            " [audiofix]"
+            if (job.get("processing") or {}).get("audio_recovery_enabled")
+            else ""
+        )
+        lines.append(
+            f"{prefix}{get_display_title(job)}{ongoing_marker}{upscale_marker}{audiofix_marker}"
+        )
         lines.extend(_navigation_lines(job, "  Метка: "))
         lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
@@ -1124,7 +1136,12 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
         eps = job.get("episodes_range", "?")
         is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
         eps_label = "серия" if is_single else "серии"
-        mode_label = " · `4K`" if job.get("processing_mode") == "upscale_4k" else ""
+        mode_labels = []
+        if job.get("processing_mode") == "upscale_4k":
+            mode_labels.append("`4K`")
+        if (job.get("processing") or {}).get("audio_recovery_enabled"):
+            mode_labels.append("`audiofix`")
+        mode_label = " · " + " · ".join(mode_labels) if mode_labels else ""
         details = [f"{eps_label} `{eps}`"]
         if navigation_label:
             details.insert(0, escape_markdown_v2(navigation_label))
@@ -1300,6 +1317,62 @@ def update_job_navigation_label(config, text):
     lines.extend(_navigation_lines(job))
     if not get_navigation_label(job):
         lines.append("Метка удалена")
+    return "\n".join(lines)
+
+
+def update_job_audio_recovery(config, text, enabled):
+    command_name = "audiofix-on" if enabled else "audiofix-off"
+    indices = parse_index_range(text, command_name)
+    selected_jobs, all_jobs = get_jobs_by_indices(config, indices)
+    if any(job.get("processing_mode") == "upscale_4k" for job in selected_jobs):
+        raise RuntimeError("Audio recovery не поддерживается для 4K job")
+
+    release_ids = {
+        get_job_release_id(job)
+        for job in selected_jobs
+        if get_job_release_id(job) is not None
+    }
+    selected_queue_ids = {
+        job.get("_queue_id") for job in selected_jobs if job.get("_queue_id") is not None
+    }
+    jobs_to_update = [
+        job
+        for job in all_jobs
+        if job.get("processing_mode") != "upscale_4k"
+        and (
+            job.get("_queue_id") in selected_queue_ids
+            or get_job_release_id(job) in release_ids
+        )
+    ]
+
+    for job in jobs_to_update:
+        processing = dict(job.get("processing") or {})
+        if enabled:
+            processing["audio_recovery_enabled"] = True
+        else:
+            processing.pop("audio_recovery_enabled", None)
+        if not update_job_processing(job.get("_queue_id"), processing or None):
+            raise RuntimeError("Задача уже изменилась; обнови /jobs и повтори")
+
+    state = load_state(config)
+    overrides = dict(state.get("release_audio_recovery_overrides", {}))
+    for release_id in release_ids:
+        if enabled:
+            overrides[str(release_id)] = True
+        else:
+            overrides.pop(str(release_id), None)
+    state["release_audio_recovery_overrides"] = overrides
+    save_state(config, state)
+
+    running = any(job.get("_queue_status") == "running" for job in jobs_to_update)
+    lines = [
+        "Audio recovery включён" if enabled else "Audio recovery выключен",
+        "",
+        f"Задач обновлено: {len(jobs_to_update)}",
+        "Режим применяется только к аномальным сериям" if enabled else "Следующий render будет строгим",
+    ]
+    if running:
+        lines.extend(["", "Активный render не изменится; настройка действует со следующего запуска"])
     return "\n".join(lines)
 
 
@@ -2035,6 +2108,8 @@ def build_help_message():
         "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
         "/label <номер> ; <метка|auto> - изменить навигационную метку",
+        "/audiofix-on <номер> - включить восстановление аудио (поддерживает диапазоны)",
+        "/audiofix-off <номер> - выключить восстановление аудио (поддерживает диапазоны)",
         "/blacklist - показать discovery blacklist",
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
         "/unblacklist <номер> - убрать тайтл из discovery blacklist",
@@ -2090,6 +2165,10 @@ def handle_command(config, text):
         }
     if text.startswith("/label"):
         return update_job_navigation_label(config, text)
+    if text.startswith("/audiofix-on"):
+        return update_job_audio_recovery(config, text, True)
+    if text.startswith("/audiofix-off"):
+        return update_job_audio_recovery(config, text, False)
     if text.startswith("/remove"):
         indices = parse_index_range(text, "remove")
         jobs_list, _ = get_jobs_by_indices(config, indices)
