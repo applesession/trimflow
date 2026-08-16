@@ -2,7 +2,9 @@ import re
 import os
 import signal
 import subprocess
+import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -264,7 +266,30 @@ def build_vk_comment_text(template: str) -> str:
 def run(cmd, timeout=None):
     print("\n[RUN]", " ".join(map(str, cmd)))
     str_cmd = [str(arg) for arg in cmd]
-    process = subprocess.Popen(str_cmd, start_new_session=os.name == "posix")
+    output_tail = deque(maxlen=20)
+    process = subprocess.Popen(
+        str_cmd,
+        start_new_session=os.name == "posix",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+
+    def forward_output():
+        try:
+            for line in process.stdout:
+                stripped = line.rstrip("\r\n")
+                if stripped:
+                    output_tail.append(stripped[-1000:])
+                print(line, end="", flush=True)
+        finally:
+            process.stdout.close()
+
+    output_thread = threading.Thread(target=forward_output, daemon=True)
+    output_thread.start()
     deadline = time.monotonic() + timeout if timeout is not None else None
     try:
         while True:
@@ -277,22 +302,29 @@ def run(cmd, timeout=None):
                 break
             except subprocess.TimeoutExpired:
                 continue
+        output_thread.join(timeout=5)
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, str_cmd)
     except JobCancelled:
         _stop_process(process)
+        output_thread.join(timeout=5)
         raise
     except subprocess.CalledProcessError as exc:
+        diagnostic = "\n".join(output_tail)
+        diagnostic_suffix = f"\nffmpeg output tail:\n{diagnostic}" if diagnostic else ""
         raise RuntimeError(
             f"ffmpeg exited with code {exc.returncode}: {' '.join(str_cmd)}"
+            f"{diagnostic_suffix}"
         ) from exc
     except subprocess.TimeoutExpired as exc:
         _stop_process(process)
+        output_thread.join(timeout=5)
         raise RuntimeError(
             f"Command timed out after {timeout}s: {' '.join(str_cmd)}"
         ) from exc
     except BaseException:
         _stop_process(process)
+        output_thread.join(timeout=5)
         raise
 
 

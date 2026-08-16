@@ -501,6 +501,11 @@ def normalize_notification_error_reason(error):
     if ffmpeg_wrap_match:
         exit_code = ffmpeg_wrap_match.group(1)
         cmd_tail = ffmpeg_wrap_match.group(2)
+        output_tail = text.partition("\nffmpeg output tail:\n")[2]
+        diagnostic_lines = [line.strip() for line in output_tail.splitlines() if line.strip()]
+        if diagnostic_lines:
+            detail = " | ".join(diagnostic_lines[-4:])[-500:]
+            return f"ffmpeg code {exit_code} — {detail}"
         file_match = re.search(r"([^\s\\/]+\.m(?:kv|p4|ov))(?:\s|$)", cmd_tail)
         detail = file_match.group(1) if file_match else cmd_tail[-80:]
         return f"ffmpeg code {exit_code} — {detail}"

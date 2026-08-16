@@ -273,6 +273,27 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertEqual(get_nvenc_fallback_codec("h264_nvenc"), "libx264")
         self.assertEqual(get_nvenc_fallback_codec("hevc_nvenc"), "libx265")
 
+    @patch("lib.media.run")
+    def test_episode_render_falls_back_to_cpu_on_code_228(self, mock_run):
+        failure = RuntimeError("ffmpeg exited with code 228")
+        failure.__cause__ = subprocess.CalledProcessError(228, ["ffmpeg"])
+        mock_run.side_effect = [failure, None]
+
+        render_episode(
+            "episode.mkv",
+            "rendered.mkv",
+            [(0.0, 10.0)],
+            "watermark.png",
+            {"video_codec": "h264_nvenc", "preset": "fast", "cq": 23},
+            audio_stream_index=0,
+            audio_recovery=True,
+        )
+
+        self.assertEqual(mock_run.call_count, 2)
+        first_command, fallback_command = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(first_command[first_command.index("-c:v") + 1], "h264_nvenc")
+        self.assertEqual(fallback_command[fallback_command.index("-c:v") + 1], "libx264")
+
     @patch("lib.media.detect_audio_streams")
     def test_prefers_russian_audio_stream_position_not_absolute_stream_index(self, mock_detect_audio_streams):
         mock_detect_audio_streams.return_value = [

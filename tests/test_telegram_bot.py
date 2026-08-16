@@ -332,6 +332,18 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("🔧 Этап: `job_failed`", message)
         self.assertIn("Причина: `ffmpeg exited with code 255`", message)
 
+    def test_error_message_includes_ffmpeg_output_tail(self):
+        message = format_error_message(
+            "job_failed:Ван-Пис",
+            "ffmpeg exited with code 228: ffmpeg -y input.mkv\n"
+            "ffmpeg output tail:\n"
+            "corrupt decoded frame\n"
+            "Too many packets buffered for output stream",
+        )
+
+        self.assertIn("ffmpeg code 228", message)
+        self.assertIn("Too many packets buffered", message)
+
     def test_vk_publish_success_message_formats_markdown_with_partial_warning(self):
         message = format_vk_publish_success_message(
             {

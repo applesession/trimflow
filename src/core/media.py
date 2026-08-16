@@ -769,7 +769,7 @@ def _probe_video_streams(path):
         return False
 
 
-NVENC_FALLBACK_CODES = {1, 7, 220}
+NVENC_FALLBACK_CODES = {1, 7, 220, 228}
 
 
 def get_nvenc_fallback_codec(video_codec):
