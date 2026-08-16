@@ -277,8 +277,11 @@ def ffprobe_episode_timeline(path, audio_stream_index=0):
     return timeline
 
 
-def analyze_audio_recovery(path, audio_stream_index=0):
-    timeline = ffprobe_episode_timeline(path, audio_stream_index=audio_stream_index)
+def analyze_audio_recovery(path, audio_stream_index=0, timeline=None):
+    timeline = timeline or ffprobe_episode_timeline(
+        path,
+        audio_stream_index=audio_stream_index,
+    )
     return _analyze_audio_recovery_timeline(timeline, path)
 
 

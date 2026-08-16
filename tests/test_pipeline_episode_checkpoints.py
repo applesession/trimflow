@@ -139,9 +139,15 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         external_audio.write_bytes(b"changed audio")
         self.assertNotEqual(with_external, fingerprint())
 
+    @patch("lib.pipeline.ffprobe_episode_timeline")
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
-    def test_episode_scan_stores_video_geometry(self, mock_signature, mock_duration):
+    def test_episode_scan_uses_video_timeline_duration(
+        self,
+        mock_signature,
+        mock_duration,
+        mock_timeline,
+    ):
         mock_signature.return_value = {
             "video": {
                 "r_frame_rate": "24000/1001",
@@ -150,9 +156,15 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             },
             "audio": None,
         }
+        mock_timeline.return_value = {
+            "video": {"start": 0.0, "duration": 9.5, "max_packet_gap": 0.0},
+            "audio": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.0},
+        }
 
         infos = build_episode_infos([(1, Path("episode.mkv"))])
 
+        self.assertEqual(infos[0]["duration"], 9.5)
+        self.assertEqual(infos[0]["container_duration"], 10.0)
         self.assertEqual(infos[0]["frame_rate"], "24000/1001")
         self.assertEqual((infos[0]["width"], infos[0]["height"]), (1440, 1080))
 

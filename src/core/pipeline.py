@@ -45,6 +45,7 @@ from core.media import (
     get_preferred_audio_stream,
     build_keep_segments,
     ffprobe_duration,
+    ffprobe_episode_timeline,
     ffprobe_media_signature,
     render_concat,
     render_episode,
@@ -214,7 +215,13 @@ def normalize_processing_config(job):
     return dict(job.get("processing") or {})
 
 
-def build_audio_recovery_info(enabled, path, audio_stream_index, video_path=None):
+def build_audio_recovery_info(
+    enabled,
+    path,
+    audio_stream_index,
+    video_path=None,
+    timeline=None,
+):
     if not enabled:
         return {"enabled": False, "applied": False, "reasons": []}
     if audio_stream_index is None:
@@ -225,7 +232,11 @@ def build_audio_recovery_info(enabled, path, audio_stream_index, video_path=None
             path,
             audio_stream_index=audio_stream_index,
         )
-    return analyze_audio_recovery(path, audio_stream_index=audio_stream_index)
+    return analyze_audio_recovery(
+        path,
+        audio_stream_index=audio_stream_index,
+        timeline=timeline,
+    )
 
 
 def validate_expected_episode_duration(validation, expected_duration, path):
@@ -459,16 +470,23 @@ def build_episode_infos(episode_files, external_audio_files=None, preferred_lang
     for episode_number, path in episode_files:
         signature = ffprobe_media_signature(path)
         video = (signature or {}).get("video") or {}
-        duration = ffprobe_duration(path)
+        container_duration = ffprobe_duration(path)
+        source_timeline = ffprobe_episode_timeline(path)
+        video_timeline = source_timeline.get("video")
+        if video_timeline is None:
+            raise RuntimeError(f"Episode has no video packets: {path}")
+        duration = float(video_timeline["duration"])
         external_audio = select_external_audio(
             external_by_episode.get(episode_number, []),
-            duration,
+            container_duration,
             preferred_language,
         )
         episode_infos.append({
             "episode": episode_number,
             "path": str(path),
             "duration": duration,
+            "container_duration": container_duration,
+            "source_timeline": source_timeline,
             "frame_rate": video.get("r_frame_rate"),
             "width": video.get("width"),
             "height": video.get("height"),
@@ -860,6 +878,10 @@ def build_episode_render_plan(
         audio_path,
         audio_stream_index,
         video_path=ep_file if external_audio else None,
+        timeline=(
+            episode_info.get("source_timeline")
+            if not external_audio and audio_stream_index == 0 else None
+        ),
     )
     audio_manifest = {
         "source": "external" if external_audio else "embedded" if audio_streams else "none",
@@ -1758,6 +1780,10 @@ def process_job(job, runtime_status_path=None):
                 audio_path,
                 episode_audio_index,
                 video_path=Path(episode_path) if external_audio else None,
+                timeline=(
+                    episode_info.get("source_timeline")
+                    if not external_audio and episode_audio_index == 0 else None
+                ),
             )
             render_final(
                 concat_output=Path(episode_path),
