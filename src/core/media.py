@@ -769,7 +769,8 @@ def _probe_video_streams(path):
         return False
 
 
-NVENC_FALLBACK_CODES = {1, 7, 220, 228}
+NVENC_FALLBACK_CODES = {1, 7, 220}
+AUDIO_PAD_DURATION_SECONDS = 15
 
 
 def get_nvenc_fallback_codec(video_codec):
@@ -843,10 +844,15 @@ def _build_episode_render_cmd(
 
     audio_output = "acat"
     if audio_stream_index is not None and audio_recovery:
-        filters.append("[acat]aresample=async=1:first_pts=0,apad[arecovered]")
+        filters.append(
+            f"[acat]aresample=async=1:first_pts=0,"
+            f"apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[arecovered]"
+        )
         audio_output = "arecovered"
     elif audio_stream_index is not None and external_audio_path:
-        filters.append("[acat]apad[aexternal]")
+        filters.append(
+            f"[acat]apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[aexternal]"
+        )
         audio_output = "aexternal"
 
     frame_rate = encoding.get("frame_rate")
@@ -969,11 +975,15 @@ def _build_final_cmd(
     audio_output = audio_selector
     if audio_stream_index is not None and audio_recovery:
         filters.append(
-            f"[{audio_selector}]aresample=async=1:first_pts=0,apad[arecovered]"
+            f"[{audio_selector}]aresample=async=1:first_pts=0,"
+            f"apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[arecovered]"
         )
         audio_output = "[arecovered]"
     elif audio_stream_index is not None and external_audio_path:
-        filters.append(f"[{audio_selector}]asetpts=PTS-STARTPTS,apad[aexternal]")
+        filters.append(
+            f"[{audio_selector}]asetpts=PTS-STARTPTS,"
+            f"apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[aexternal]"
+        )
         audio_output = "[aexternal]"
 
     cmd = [

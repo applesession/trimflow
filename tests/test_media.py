@@ -82,7 +82,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         graph = command[command.index("-filter_complex") + 1]
         self.assertEqual(command[command.index("-filter_complex") - 1], "RUS Sound/episode.mka")
         self.assertIn("[2:a:1]atrim", graph)
-        self.assertIn("[acat]apad[aexternal]", graph)
+        self.assertIn("[acat]apad=pad_dur=15[aexternal]", graph)
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
     @patch("lib.media.run")
@@ -98,7 +98,10 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
-        self.assertIn("[2:a:0]asetpts=PTS-STARTPTS,apad[aexternal]", graph)
+        self.assertIn(
+            "[2:a:0]asetpts=PTS-STARTPTS,apad=pad_dur=15[aexternal]",
+            graph,
+        )
         self.assertIn("[aexternal]", command)
         self.assertIn("-shortest", command)
 
@@ -215,7 +218,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
-        self.assertIn("aresample=async=1:first_pts=0,apad", graph)
+        self.assertIn("aresample=async=1:first_pts=0,apad=pad_dur=15", graph)
         self.assertIn("[arecovered]", command)
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
@@ -232,7 +235,10 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
-        self.assertIn("[0:a:1]aresample=async=1:first_pts=0,apad[arecovered]", graph)
+        self.assertIn(
+            "[0:a:1]aresample=async=1:first_pts=0,apad=pad_dur=15[arecovered]",
+            graph,
+        )
         self.assertIn("-shortest", command)
 
     @patch("lib.media.run")
@@ -274,9 +280,9 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertEqual(get_nvenc_fallback_codec("hevc_nvenc"), "libx265")
 
     @patch("lib.media.run")
-    def test_episode_render_falls_back_to_cpu_on_code_228(self, mock_run):
-        failure = RuntimeError("ffmpeg exited with code 228")
-        failure.__cause__ = subprocess.CalledProcessError(228, ["ffmpeg"])
+    def test_episode_render_falls_back_to_cpu_on_nvenc_code(self, mock_run):
+        failure = RuntimeError("ffmpeg exited with code 220")
+        failure.__cause__ = subprocess.CalledProcessError(220, ["ffmpeg"])
         mock_run.side_effect = [failure, None]
 
         render_episode(
@@ -293,6 +299,25 @@ class MediaAudioSelectionTests(unittest.TestCase):
         first_command, fallback_command = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(first_command[first_command.index("-c:v") + 1], "h264_nvenc")
         self.assertEqual(fallback_command[fallback_command.index("-c:v") + 1], "libx264")
+
+    @patch("lib.media.run")
+    def test_episode_render_does_not_fallback_on_enospc(self, mock_run):
+        failure = RuntimeError("ffmpeg exited with code 228")
+        failure.__cause__ = subprocess.CalledProcessError(228, ["ffmpeg"])
+        mock_run.side_effect = failure
+
+        with self.assertRaisesRegex(RuntimeError, "code 228"):
+            render_episode(
+                "episode.mkv",
+                "rendered.mkv",
+                [(0.0, 10.0)],
+                "watermark.png",
+                {"video_codec": "h264_nvenc", "preset": "fast", "cq": 23},
+                audio_stream_index=0,
+                audio_recovery=True,
+            )
+
+        mock_run.assert_called_once()
 
     @patch("lib.media.detect_audio_streams")
     def test_prefers_russian_audio_stream_position_not_absolute_stream_index(self, mock_detect_audio_streams):
