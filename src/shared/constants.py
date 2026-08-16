@@ -15,7 +15,7 @@ DEFAULT_RUNTIME_STATUS_NAME = "runtime_status.json"
 DEFAULT_RUNTIME_ERRORS_NAME = "runtime_errors.json"
 DEFAULT_RUNTIME_ERRORS_LIMIT = 20
 TEMP_ROOT = Path("./temp")
-SUPPORTED_VIDEO_EXTENSIONS = {".mkv", ".mp4"}
+SUPPORTED_VIDEO_EXTENSIONS = {".avi", ".mkv", ".mp4"}
 SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS = {
     ".mka", ".m4a", ".aac", ".flac", ".ac3", ".eac3", ".wav", ".ogg", ".opus", ".mp3",
 }

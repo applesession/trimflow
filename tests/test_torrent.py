@@ -105,6 +105,14 @@ class TorrentSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected[0]["episode"], 1156)
 
+    def test_selects_legacy_avi_episode(self):
+        selected = select_torrent_episode_files([{
+            "index": 1,
+            "path": "One.Piece.001.IPTVRip.2x2.XviD.640x480.RUS.avi",
+        }], {1})
+
+        self.assertEqual(selected[0]["episode"], 1)
+
     def test_unique_1080p_candidate_wins_over_720p(self):
         selected = select_torrent_episode_files([
             {"index": 1, "path": "720p/Show [001] [720p].mkv"},
@@ -141,7 +149,7 @@ class TorrentSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"episodes: \[2\]"):
             select_torrent_episode_files([
                 {"index": 1, "path": "Show [001].mkv"},
-                {"index": 2, "path": "Show [002].avi"},
+                {"index": 2, "path": "Show [002].wmv"},
             ], {1, 2})
 
     @patch("core.torrent.subprocess.check_output")
