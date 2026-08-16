@@ -11,6 +11,7 @@ from core.torrent import (
     download_selected_episodes,
     download_torrent_episode,
     prepare_torrent_episode_downloads,
+    select_torrent_external_audio_files,
     select_torrent_episode_files,
 )
 
@@ -53,6 +54,39 @@ class TorrentSelectionTests(unittest.TestCase):
 
         self.assertEqual([item["index"] for item in selected], [1, 2, 3])
 
+    def test_external_audio_selection_uses_episode_number_and_supported_extensions(self):
+        selected = select_torrent_external_audio_files([
+            {"index": 10, "path": "RUS Sound/Show - 001.mka"},
+            {"index": 11, "path": "RUS Sound/Show - 002.flac"},
+            {"index": 12, "path": "RUS Subs/Show - 001.ass"},
+            {"index": 13, "path": "RUS Sound/Show - 003.mka"},
+        ], {1, 2})
+
+        self.assertEqual([item["index"] for item in selected], [10, 11])
+
+    @patch("core.torrent.subprocess.check_output")
+    @patch("core.torrent.run")
+    def test_payload_download_includes_external_audio_for_requested_episodes(self, mock_run, mock_show):
+        download_dir = self.make_temp_dir() / "downloads"
+
+        def fake_run(command, timeout=None):
+            if "--bt-metadata-only=true" in command:
+                (download_dir / "release.torrent").write_bytes(b"metadata")
+
+        mock_run.side_effect = fake_run
+        mock_show.return_value = "\n".join([
+            " 1|Show - 001.mkv",
+            " 2|Show - 002.mkv",
+            " 10|RUS Sound/Show - 001.mka",
+            " 11|RUS Sound/Show - 002.mka",
+            " 12|RUS Subs/Show - 001.ass",
+        ])
+
+        download_selected_episodes("magnet:?xt=urn:btih:audio", download_dir, {1})
+
+        payload_command = mock_run.call_args_list[-1].args[0]
+        self.assertIn("--select-file=1,10", payload_command)
+
     def test_selects_episode_from_of_total_filename(self):
         selected = select_torrent_episode_files([
             {"index": 7, "path": "Release/Show [02 of 25] [720p].mkv"},
@@ -63,6 +97,13 @@ class TorrentSelectionTests(unittest.TestCase):
             [(item["episode"], item["index"]) for item in selected],
             [(1, 3), (2, 7)],
         )
+
+    def test_selects_four_digit_episode_number(self):
+        selected = select_torrent_episode_files([
+            {"index": 1, "path": "One Piece - 1156.mkv"},
+        ], {1156})
+
+        self.assertEqual(selected[0]["episode"], 1156)
 
     def test_unique_1080p_candidate_wins_over_720p(self):
         selected = select_torrent_episode_files([

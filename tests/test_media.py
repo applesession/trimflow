@@ -14,11 +14,94 @@ from lib.media import (
     render_episode,
     render_final,
     render_segment_copy,
+    select_external_audio,
     validate_episode_render,
 )
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    @patch("lib.media.ffprobe_audio_timeline", return_value={"start_time": 0.0, "duration": 100.4})
+    @patch("lib.media.detect_audio_streams")
+    def test_external_audio_prefers_unique_language_match(self, mock_streams, _mock_timeline):
+        mock_streams.side_effect = lambda path: [{
+            "audio_index": 0,
+            "stream_index": 0,
+            "language": None,
+            "title": None,
+            "handler_name": None,
+            "is_default": True,
+        }]
+
+        selected = select_external_audio(
+            [Path("JAP Sound/Show - 001.mka"), Path("RUS Sound/Show - 001.mka")],
+            100.0,
+            "rus",
+        )
+
+        self.assertEqual(selected["path"], str(Path("RUS Sound/Show - 001.mka")))
+        self.assertAlmostEqual(selected["duration_delta"], 0.4)
+
+    @patch("lib.media.detect_audio_streams", return_value=[{
+        "audio_index": 0,
+        "stream_index": 0,
+        "language": None,
+        "title": None,
+        "handler_name": None,
+        "is_default": True,
+    }])
+    def test_external_audio_rejects_ambiguous_candidates(self, _mock_streams):
+        with self.assertRaisesRegex(RuntimeError, "Ambiguous external audio"):
+            select_external_audio(["Audio A/Show - 001.mka", "Audio B/Show - 001.mka"], 100.0)
+
+    @patch("lib.media.ffprobe_audio_timeline", return_value={"start_time": 0.2, "duration": 100.0})
+    @patch("lib.media.detect_audio_streams", return_value=[{
+        "audio_index": 0,
+        "stream_index": 0,
+        "language": "rus",
+        "title": None,
+        "handler_name": None,
+        "is_default": True,
+    }])
+    def test_external_audio_rejects_sync_mismatch(self, _mock_streams, _mock_timeline):
+        with self.assertRaisesRegex(RuntimeError, r"start=\+0\.200s"):
+            select_external_audio(["RUS/Show - 001.mka"], 100.0)
+
+    @patch("lib.media.run")
+    def test_episode_render_uses_external_audio_as_separate_input(self, mock_run):
+        render_episode(
+            "episode.mkv",
+            "rendered.mkv",
+            [(0.0, 10.0)],
+            "watermark.png",
+            {"video_codec": "libx264"},
+            audio_stream_index=1,
+            external_audio_path="RUS Sound/episode.mka",
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertEqual(command[command.index("-filter_complex") - 1], "RUS Sound/episode.mka")
+        self.assertIn("[2:a:1]atrim", graph)
+        self.assertIn("[acat]apad[aexternal]", graph)
+
+    @patch("lib.media._probe_video_streams", return_value=[{}])
+    @patch("lib.media.run")
+    def test_single_episode_render_uses_external_audio(self, mock_run, _mock_probe):
+        render_final(
+            "episode.mkv",
+            "watermark.png",
+            "rendered.mkv",
+            {"video_codec": "libx264", "audio_codec": "aac"},
+            audio_stream_index=0,
+            external_audio_path="RUS Sound/episode.mka",
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[2:a:0]asetpts=PTS-STARTPTS,apad[aexternal]", graph)
+        self.assertIn("[aexternal]", command)
+        self.assertIn("-shortest", command)
+
     @patch("lib.media.ffprobe_episode_timeline")
     def test_audio_recovery_detects_supported_gap_and_short_tail(self, mock_timeline):
         mock_timeline.return_value = {

@@ -1,5 +1,7 @@
 import json
+import re
 import subprocess
+from pathlib import Path
 
 from shared.helpers import run
 
@@ -78,6 +80,92 @@ def get_preferred_audio_stream(video_path, preferred_language="rus"):
     if best_match and best_match[0] > 0:
         return best_match[2]
     return streams[0]["audio_index"]
+
+
+def _external_language_score(path, stream, preferred_language):
+    variants = _build_language_variants(preferred_language)
+    language = str(stream.get("language") or "").strip().casefold()
+    if language in variants:
+        return 100
+    searchable = " ".join([
+        str(path),
+        language,
+        str(stream.get("title") or ""),
+        str(stream.get("handler_name") or ""),
+    ]).casefold()
+    tokens = set(re.findall(r"[\w]+", searchable, flags=re.UNICODE))
+    return 60 if variants.intersection(tokens) else 0
+
+
+def ffprobe_audio_timeline(path, audio_stream_index=0):
+    try:
+        result = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-select_streams", f"a:{audio_stream_index}",
+            "-show_entries", "stream=start_time,duration:format=duration",
+            "-of", "json",
+            str(path),
+        ], encoding="utf-8", errors="replace")
+        data = json.loads(result)
+        stream = (data.get("streams") or [{}])[0]
+        duration = stream.get("duration") or (data.get("format") or {}).get("duration")
+        if duration is None:
+            raise RuntimeError("duration is missing")
+        return {
+            "start_time": float(stream.get("start_time") or 0.0),
+            "duration": float(duration),
+        }
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Unable to probe external audio timeline: {path}") from exc
+
+
+def select_external_audio(candidates, video_duration, preferred_language="rus"):
+    streams = []
+    for path in candidates:
+        path = Path(path)
+        detected = detect_audio_streams(path)
+        if not detected:
+            raise RuntimeError(f"External audio file has no audio streams: {path}")
+        for stream in detected:
+            streams.append({
+                **stream,
+                "path": path,
+                "language_score": _external_language_score(path, stream, preferred_language),
+            })
+
+    if not streams:
+        return None
+    if len(streams) == 1:
+        selected = streams[0]
+    else:
+        best_score = max(stream["language_score"] for stream in streams)
+        matches = [stream for stream in streams if stream["language_score"] == best_score]
+        if best_score <= 0 or len(matches) != 1:
+            details = "; ".join(
+                f"{stream['path']}#a:{stream['audio_index']}" for stream in streams
+            )
+            raise RuntimeError(
+                f"Ambiguous external audio for preferred language {preferred_language!r}: {details}"
+            )
+        selected = matches[0]
+
+    timeline = ffprobe_audio_timeline(selected["path"], selected["audio_index"])
+    start_offset = timeline["start_time"]
+    duration_delta = timeline["duration"] - float(video_duration)
+    if abs(start_offset) > 0.1 or abs(duration_delta) > 1.0:
+        raise RuntimeError(
+            f"External audio is not synchronized with video: {selected['path']} "
+            f"(start={start_offset:+.3f}s, duration_delta={duration_delta:+.3f}s)"
+        )
+    return {
+        "path": str(selected["path"]),
+        "audio_index": selected["audio_index"],
+        "stream_index": selected["stream_index"],
+        "language": selected.get("language"),
+        "start_time": start_offset,
+        "duration": timeline["duration"],
+        "duration_delta": duration_delta,
+    }
 
 
 def ffprobe_duration(path):
@@ -191,6 +279,22 @@ def ffprobe_episode_timeline(path, audio_stream_index=0):
 
 def analyze_audio_recovery(path, audio_stream_index=0):
     timeline = ffprobe_episode_timeline(path, audio_stream_index=audio_stream_index)
+    return _analyze_audio_recovery_timeline(timeline, path)
+
+
+def analyze_external_audio_recovery(video_path, audio_path, audio_stream_index=0):
+    video_timeline = ffprobe_episode_timeline(video_path).get("video")
+    audio_timeline = ffprobe_episode_timeline(
+        audio_path,
+        audio_stream_index=audio_stream_index,
+    ).get("audio")
+    return _analyze_audio_recovery_timeline(
+        {"video": video_timeline, "audio": audio_timeline},
+        audio_path,
+    )
+
+
+def _analyze_audio_recovery_timeline(timeline, path):
     video = timeline.get("video")
     audio = timeline.get("audio")
     if video is None or audio is None:
@@ -680,6 +784,7 @@ def _build_episode_render_cmd(
     encoding,
     audio_stream_index,
     audio_recovery=False,
+    external_audio_path=None,
 ):
     if not keep_segments:
         raise RuntimeError(f"Episode has no ranges to render: {ep_file}")
@@ -691,6 +796,8 @@ def _build_episode_render_cmd(
     if audio_codec == "copy":
         audio_codec = "aac"
 
+    audio_input_index = 2 if external_audio_path else 0
+    audio_selector = f"[{audio_input_index}:a:{audio_stream_index}]"
     filters = []
     segment_count = len(keep_segments)
     if segment_count > 1:
@@ -700,7 +807,7 @@ def _build_episode_render_cmd(
         )
         if audio_stream_index is not None:
             filters.append(
-                f"[0:a:{audio_stream_index}]asplit={segment_count}"
+                f"{audio_selector}asplit={segment_count}"
                 + "".join(f"[asrc{index}]" for index in range(segment_count))
             )
 
@@ -711,7 +818,7 @@ def _build_episode_render_cmd(
             f"setpts=PTS-STARTPTS[v{index}]"
         )
         if audio_stream_index is not None:
-            audio_input = f"[asrc{index}]" if segment_count > 1 else f"[0:a:{audio_stream_index}]"
+            audio_input = f"[asrc{index}]" if segment_count > 1 else audio_selector
             filters.append(
                 f"{audio_input}atrim=start={start:.6f}:end={end:.6f},"
                 f"asetpts=PTS-STARTPTS[a{index}]"
@@ -735,6 +842,9 @@ def _build_episode_render_cmd(
     if audio_stream_index is not None and audio_recovery:
         filters.append("[acat]aresample=async=1:first_pts=0,apad[arecovered]")
         audio_output = "arecovered"
+    elif audio_stream_index is not None and external_audio_path:
+        filters.append("[acat]apad[aexternal]")
+        audio_output = "aexternal"
 
     frame_rate = encoding.get("frame_rate")
     frame_width = encoding.get("frame_width")
@@ -754,6 +864,10 @@ def _build_episode_render_cmd(
         "ffmpeg", "-y",
         "-i", str(ep_file),
         "-i", str(watermark_path),
+    ]
+    if external_audio_path:
+        cmd += ["-i", str(external_audio_path)]
+    cmd += [
         "-filter_complex", ";".join(filters),
         "-map", "[vout]",
         "-map_metadata", "-1",
@@ -789,6 +903,7 @@ def render_episode(
     encoding,
     audio_stream_index=None,
     audio_recovery=False,
+    external_audio_path=None,
 ):
     cmd = _build_episode_render_cmd(
         ep_file,
@@ -798,6 +913,7 @@ def render_episode(
         encoding,
         audio_stream_index,
         audio_recovery,
+        external_audio_path,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
     try:
@@ -822,6 +938,7 @@ def render_episode(
         fallback_encoding,
         audio_stream_index,
         audio_recovery,
+        external_audio_path,
     ))
 
 
@@ -832,6 +949,7 @@ def _build_final_cmd(
     encoding,
     audio_stream_index,
     audio_recovery=False,
+    external_audio_path=None,
 ):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
@@ -843,19 +961,33 @@ def _build_final_cmd(
         "[1:v]scale=160:-1,format=rgba[wm];"
         "[base][wm]overlay=W-w-20:20,format=yuv420p[v]"
     ]
-    if audio_recovery:
+    audio_input_index = 2 if external_audio_path else 0
+    audio_selector = f"{audio_input_index}:a:{audio_stream_index}"
+    audio_output = audio_selector
+    if audio_stream_index is not None and audio_recovery:
         filters.append(
-            f"[0:a:{audio_stream_index}]aresample=async=1:first_pts=0,apad[arecovered]"
+            f"[{audio_selector}]aresample=async=1:first_pts=0,apad[arecovered]"
         )
+        audio_output = "[arecovered]"
+    elif audio_stream_index is not None and external_audio_path:
+        filters.append(f"[{audio_selector}]asetpts=PTS-STARTPTS,apad[aexternal]")
+        audio_output = "[aexternal]"
 
     cmd = [
         "ffmpeg",
         "-y",
         "-i", concat_output,
         "-i", watermark_path,
+    ]
+    if external_audio_path:
+        cmd += ["-i", external_audio_path]
+    cmd += [
         "-filter_complex", ";".join(filters),
         "-map", "[v]",
-        "-map", "[arecovered]" if audio_recovery else f"0:a:{audio_stream_index}?",
+    ]
+    if audio_stream_index is not None:
+        cmd += ["-map", audio_output if audio_output.startswith("[") else f"{audio_output}?"]
+    cmd += [
         "-map", "0:s?",
         "-c:v", video_codec,
     ]
@@ -865,11 +997,10 @@ def _build_final_cmd(
     elif video_codec in ["libx264", "libx265"]:
         cmd += ["-preset", preset, "-crf", cq]
 
-    cmd += [
-        "-c:a", audio_codec,
-        "-c:s", "copy",
-    ]
-    if audio_recovery:
+    if audio_stream_index is not None:
+        cmd += ["-c:a", audio_codec]
+    cmd += ["-c:s", "copy"]
+    if audio_recovery or external_audio_path:
         cmd.append("-shortest")
     cmd.append(output_video)
 
@@ -883,6 +1014,7 @@ def render_final(
     encoding,
     audio_stream_index=0,
     audio_recovery=False,
+    external_audio_path=None,
 ):
     if not _probe_video_streams(concat_output):
         raise RuntimeError(
@@ -896,6 +1028,7 @@ def render_final(
         encoding,
         audio_stream_index,
         audio_recovery,
+        external_audio_path,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
 
@@ -918,6 +1051,6 @@ def render_final(
     fallback_encoding["preset"] = "fast"
     fallback_cmd = _build_final_cmd(
         concat_output, watermark_path, output_video,
-        fallback_encoding, audio_stream_index, audio_recovery,
+        fallback_encoding, audio_stream_index, audio_recovery, external_audio_path,
     )
     run(fallback_cmd)

@@ -18,7 +18,7 @@ from core.detector import (
     get_detector_type_result,
     normalize_timing_detection_config,
 )
-from core.discovery import filter_episode_files, find_episode_files
+from core.discovery import filter_episode_files, find_episode_files, find_external_audio_files
 from core.torrent import download_selected_episodes
 from shared.helpers import (
     build_job_workspace_name,
@@ -40,6 +40,7 @@ from shared.helpers import (
 from shared.constants import TEMP_ROOT
 from core.media import (
     analyze_audio_recovery,
+    analyze_external_audio_recovery,
     detect_audio_streams,
     get_preferred_audio_stream,
     build_keep_segments,
@@ -48,6 +49,7 @@ from core.media import (
     render_concat,
     render_episode,
     render_final,
+    select_external_audio,
     validate_episode_render,
 )
 from shared.runtime import update_runtime_status
@@ -140,6 +142,8 @@ def compact_manifest_episode(manifest_episode, skip_types):
     }
     if manifest_episode.get("audio_recovery"):
         compact["audio_recovery"] = manifest_episode["audio_recovery"]
+    if manifest_episode.get("audio"):
+        compact["audio"] = manifest_episode["audio"]
     return compact
 
 
@@ -175,6 +179,10 @@ def build_compact_manifest(
         "source_summary": {
             "selected_episode_count": len(episode_files),
             "excluded_file_count": len(excluded_files),
+            "external_audio_episode_count": sum(
+                1 for episode in manifest_episodes
+                if (episode.get("audio") or {}).get("source") == "external"
+            ),
         },
         "timing_detection": {
             "enabled": timing_detection["enabled"],
@@ -206,11 +214,17 @@ def normalize_processing_config(job):
     return dict(job.get("processing") or {})
 
 
-def build_audio_recovery_info(enabled, path, audio_stream_index):
+def build_audio_recovery_info(enabled, path, audio_stream_index, video_path=None):
     if not enabled:
         return {"enabled": False, "applied": False, "reasons": []}
     if audio_stream_index is None:
         return {"enabled": True, "applied": False, "reasons": []}
+    if video_path is not None:
+        return analyze_external_audio_recovery(
+            video_path,
+            path,
+            audio_stream_index=audio_stream_index,
+        )
     return analyze_audio_recovery(path, audio_stream_index=audio_stream_index)
 
 
@@ -300,6 +314,13 @@ def build_episode_fingerprint(
                 "width": item.get("width"),
                 "height": item.get("height"),
                 "file": _file_identity(item["path"]),
+                **({
+                    "external_audio": {
+                        "file": _file_identity(item["external_audio"]["path"]),
+                        "audio_index": item["external_audio"]["audio_index"],
+                        "stream_index": item["external_audio"]["stream_index"],
+                    }
+                } if item.get("external_audio") else {}),
             }
             for item in episode_infos
         ],
@@ -430,18 +451,28 @@ def build_timing_sources_summary(prefetched_anilibria_results, prefetched_aniski
     }
 
 
-def build_episode_infos(episode_files):
+def build_episode_infos(episode_files, external_audio_files=None, preferred_language="rus"):
+    external_by_episode = {}
+    for episode_number, path in external_audio_files or []:
+        external_by_episode.setdefault(episode_number, []).append(path)
     episode_infos = []
     for episode_number, path in episode_files:
         signature = ffprobe_media_signature(path)
         video = (signature or {}).get("video") or {}
+        duration = ffprobe_duration(path)
+        external_audio = select_external_audio(
+            external_by_episode.get(episode_number, []),
+            duration,
+            preferred_language,
+        )
         episode_infos.append({
             "episode": episode_number,
             "path": str(path),
-            "duration": ffprobe_duration(path),
+            "duration": duration,
             "frame_rate": video.get("r_frame_rate"),
             "width": video.get("width"),
             "height": video.get("height"),
+            "external_audio": external_audio,
         })
     return episode_infos
 
@@ -558,12 +589,14 @@ def collect_episode_files(source, title_slug, allowed_episodes, processing=None,
             timeout=download_timeout,
         )
         detected_episode_files, ignored_files = find_episode_files(download_dir)
-        return download_dir, detected_episode_files, ignored_files
+        external_audio_files = find_external_audio_files(download_dir, allowed_episodes)
+        return download_dir, detected_episode_files, ignored_files, external_audio_files
 
     if source["type"] == "local":
         input_dir = Path(source.get("input_dir", "./input"))
         detected_episode_files, ignored_files = find_episode_files(input_dir)
-        return None, detected_episode_files, ignored_files
+        external_audio_files = find_external_audio_files(input_dir, allowed_episodes)
+        return None, detected_episode_files, ignored_files, external_audio_files
 
     raise RuntimeError(f"Unknown source type: {source['type']}")
 
@@ -814,17 +847,34 @@ def build_episode_render_plan(
     expected_duration = sum(end - start for start, end in keep_segments)
     if expected_duration <= 0:
         raise RuntimeError(f"Episode {detected_ep} has no video left after OP/ED cuts")
-    audio_streams = detect_audio_streams(ep_file)
+    external_audio = episode_info.get("external_audio")
+    audio_path = Path(external_audio["path"]) if external_audio else ep_file
+    audio_streams = detect_audio_streams(ep_file) if not external_audio else [external_audio]
     audio_stream_index = (
-        get_preferred_audio_stream(ep_file, preferred_language)
-        if audio_streams
+        external_audio["audio_index"] if external_audio
+        else get_preferred_audio_stream(ep_file, preferred_language) if audio_streams
         else None
     )
     audio_recovery = build_audio_recovery_info(
         audio_recovery_enabled,
-        ep_file,
+        audio_path,
         audio_stream_index,
+        video_path=ep_file if external_audio else None,
     )
+    audio_manifest = {
+        "source": "external" if external_audio else "embedded" if audio_streams else "none",
+        "stream_index": (
+            external_audio["stream_index"] if external_audio
+            else audio_streams[audio_stream_index]["stream_index"] if audio_stream_index is not None
+            else None
+        ),
+    }
+    if external_audio:
+        audio_manifest.update({
+            "external_file": Path(external_audio["path"]).name,
+            "start_time": _round_or_none(external_audio["start_time"]),
+            "duration_delta": _round_or_none(external_audio["duration_delta"]),
+        })
     manifest_episode = {
         "episode": detected_ep,
         "source_file": str(ep_file),
@@ -849,11 +899,13 @@ def build_episode_render_plan(
             for start, end in keep_segments
         ],
         "audio_recovery": audio_recovery,
+        "audio": audio_manifest,
     }
     return {
         "keep_segments": keep_segments,
         "expected_duration": expected_duration,
         "audio_stream_index": audio_stream_index,
+        "external_audio_path": external_audio["path"] if external_audio else None,
         "audio_recovery": audio_recovery,
         "manifest_episode": manifest_episode,
     }
@@ -1627,7 +1679,7 @@ def process_job(job, runtime_status_path=None):
 
         set_runtime_stage(runtime_status_path, "validation")
         set_runtime_stage(runtime_status_path, "download")
-        download_dir, detected_episode_files, ignored_files = collect_episode_files(
+        download_dir, detected_episode_files, ignored_files, external_audio_files = collect_episode_files(
             source,
             title_slug,
             allowed_episodes,
@@ -1648,6 +1700,12 @@ def process_job(job, runtime_status_path=None):
                 raise RuntimeError("single_episode mode requires exactly one selected episode")
 
             episode_number, episode_path = episode_files[0]
+            episode_info = build_episode_infos(
+                episode_files,
+                external_audio_files,
+                preferred_language,
+            )[0]
+            external_audio = episode_info.get("external_audio")
             pretty_base_name = artifacts["pretty_base_name"]
             output_video = artifacts["output_video"]
             output_txt = artifacts["output_txt"]
@@ -1687,12 +1745,19 @@ def process_job(job, runtime_status_path=None):
                 total_chunks=None,
                 current_chunk_episode_range=None,
             )
-            episode_audio_index = get_preferred_audio_stream(Path(episode_path), preferred_language)
-            expected_duration = ffprobe_duration(Path(episode_path))
+            embedded_audio_streams = detect_audio_streams(episode_path) if not external_audio else []
+            episode_audio_index = (
+                external_audio["audio_index"] if external_audio
+                else get_preferred_audio_stream(Path(episode_path), preferred_language)
+                if embedded_audio_streams else None
+            )
+            expected_duration = episode_info["duration"]
+            audio_path = Path(external_audio["path"]) if external_audio else Path(episode_path)
             audio_recovery = build_audio_recovery_info(
                 audio_recovery_enabled,
-                Path(episode_path),
+                audio_path,
                 episode_audio_index,
+                video_path=Path(episode_path) if external_audio else None,
             )
             render_final(
                 concat_output=Path(episode_path),
@@ -1701,6 +1766,7 @@ def process_job(job, runtime_status_path=None):
                 encoding={**encoding, "audio_codec": "aac"},
                 audio_stream_index=episode_audio_index,
                 audio_recovery=audio_recovery["applied"],
+                external_audio_path=external_audio["path"] if external_audio else None,
             )
             validation = validate_episode_render(output_video)
             validate_expected_episode_duration(validation, expected_duration, output_video)
@@ -1709,6 +1775,20 @@ def process_job(job, runtime_status_path=None):
             manifest_episode["expected_cleaned_duration"] = expected_duration
             manifest_episode["cleaned_duration"] = validation["duration"]
             manifest_episode["audio_recovery"] = audio_recovery
+            manifest_episode["audio"] = {
+                "source": "external" if external_audio else "embedded" if embedded_audio_streams else "none",
+                "stream_index": (
+                    external_audio["stream_index"] if external_audio
+                    else embedded_audio_streams[episode_audio_index]["stream_index"]
+                    if episode_audio_index is not None else None
+                ),
+                **({
+                    "external_file": Path(external_audio["path"]).name,
+                    "start_time": _round_or_none(external_audio["start_time"]),
+                    "duration_delta": _round_or_none(external_audio["duration_delta"]),
+                } if external_audio else {}),
+            }
+            manifest["source_summary"]["external_audio_episode_count"] = int(bool(external_audio))
             manifest["quality_summary"] = {
                 "episodes_count": 1,
                 "episodes_audio_recovery": (
@@ -1740,7 +1820,11 @@ def process_job(job, runtime_status_path=None):
             print(output_manifest)
             return result
 
-        episode_infos = build_episode_infos(episode_files)
+        episode_infos = build_episode_infos(
+            episode_files,
+            external_audio_files,
+            preferred_language,
+        )
         frame_rate = select_compilation_frame_rate(episode_infos)
         frame_width, frame_height = select_compilation_frame_size(episode_infos)
         encoding["frame_rate"] = frame_rate
@@ -1882,6 +1966,7 @@ def process_job(job, runtime_status_path=None):
                         audio_recovery=bool(
                             (render_plan.get("audio_recovery") or {}).get("applied")
                         ),
+                        external_audio_path=render_plan.get("external_audio_path"),
                     )
                     episode_result = save_episode_checkpoint(
                         episode_dir,

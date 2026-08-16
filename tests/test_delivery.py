@@ -246,6 +246,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(result["source_summary"], {
             "selected_episode_count": 2,
             "excluded_file_count": 1,
+            "external_audio_episode_count": 0,
         })
         self.assertNotIn("excluded_files", result["source_summary"])
         self.assertEqual(result["episodes"][0]["source_file"], "test_episode_01.mkv")

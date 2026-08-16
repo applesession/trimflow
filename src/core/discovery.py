@@ -1,17 +1,17 @@
 import re
 from pathlib import Path
 
-from shared.constants import SUPPORTED_VIDEO_EXTENSIONS
+from shared.constants import SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 
 
 def extract_episode_number(filename: str):
     patterns = [
-        r"^(\d{1,3})\.",
-        r"\[(\d{1,3})\s+of\s+\d{1,3}\]",
-        r"\[(\d{1,3})\]",
-        r"[Ss]\d{1,2}[Ee](\d{1,3})",
-        r"[\s._-](\d{1,3})[\s._-]",
-        r"[Ee]pisode[\s._-]*(\d{1,3})",
+        r"^(\d{1,4})\.",
+        r"\[(\d{1,4})\s+of\s+\d{1,4}\]",
+        r"\[(\d{1,4})\]",
+        r"[Ss]\d{1,2}[Ee](\d{1,4})",
+        r"[\s._-](\d{1,4})[\s._-]",
+        r"[Ee]pisode[\s._-]*(\d{1,4})",
     ]
 
     for pattern in patterns:
@@ -43,6 +43,18 @@ def find_episode_files(source_dir: Path):
         raise RuntimeError(f"No episode files found in {source_dir}")
 
     return detected_files, ignored_files
+
+
+def find_external_audio_files(source_dir: Path, allowed_episodes=None):
+    allowed = None if allowed_episodes is None else set(allowed_episodes)
+    detected_files = []
+    for path in source_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS:
+            continue
+        episode_number = extract_episode_number(path.name)
+        if episode_number is not None and (allowed is None or episode_number in allowed):
+            detected_files.append((episode_number, path))
+    return sorted(detected_files, key=lambda item: (item[0], str(item[1]).casefold()))
 
 
 def filter_episode_files(episode_files, allowed_episodes):

@@ -126,6 +126,19 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         episode_infos[0]["width"] = 1440
         self.assertNotEqual(original, fingerprint())
 
+        episode_infos[0]["width"] = 1920
+        external_audio = tmp_dir / "episode.mka"
+        external_audio.write_bytes(b"audio")
+        episode_infos[0]["external_audio"] = {
+            "path": str(external_audio),
+            "audio_index": 0,
+            "stream_index": 0,
+        }
+        with_external = fingerprint()
+        self.assertNotEqual(original, with_external)
+        external_audio.write_bytes(b"changed audio")
+        self.assertNotEqual(with_external, fingerprint())
+
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
     def test_episode_scan_stores_video_geometry(self, mock_signature, mock_duration):
@@ -353,7 +366,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         ]
         return [
             patch("lib.pipeline.prepare_temp_dir", return_value=temp_dir),
-            patch("lib.pipeline.collect_episode_files", return_value=(None, episode_files, [])),
+            patch("lib.pipeline.collect_episode_files", return_value=(None, episode_files, [], [])),
             patch("lib.pipeline.filter_episode_files", return_value=(episode_files, [])),
             patch("lib.pipeline.build_episode_infos", return_value=episode_infos),
             patch(

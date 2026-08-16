@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from core.discovery import extract_episode_number
-from shared.constants import SUPPORTED_VIDEO_EXTENSIONS
+from shared.constants import SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS
 from shared.helpers import run
 
 
@@ -164,6 +164,23 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
     return selected
 
 
+def select_torrent_external_audio_files(torrent_files, allowed_episodes):
+    requested = set(int(episode) for episode in allowed_episodes)
+    selected = []
+    for item in torrent_files:
+        relative_path = str(item["path"])
+        if Path(relative_path).suffix.lower() not in SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS:
+            continue
+        episode = extract_episode_number(Path(relative_path).name)
+        if episode in requested:
+            selected.append({
+                "episode": episode,
+                "index": int(item["index"]),
+                "path": relative_path,
+            })
+    return sorted(selected, key=lambda item: (item["episode"], item["index"]))
+
+
 def prepare_torrent_episode_downloads(
     magnet,
     download_dir,
@@ -202,8 +219,13 @@ def download_selected_episodes(magnet, download_dir, allowed_episodes, path_filt
         path_filter=path_filter,
         timeout=timeout,
     )
-    indices = ",".join(str(item["index"]) for item in selected)
-    print("[TORRENT SELECT] " + json.dumps(selected, ensure_ascii=False))
+    external_audio = select_torrent_external_audio_files(
+        list_torrent_files(torrent_path),
+        allowed_episodes,
+    )
+    downloads = selected + external_audio
+    indices = ",".join(str(item["index"]) for item in downloads)
+    print("[TORRENT SELECT] " + json.dumps(downloads, ensure_ascii=False))
     run([
         "aria2c",
         *_aria_common_options(download_dir),

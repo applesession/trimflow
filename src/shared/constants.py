@@ -16,6 +16,9 @@ DEFAULT_RUNTIME_ERRORS_NAME = "runtime_errors.json"
 DEFAULT_RUNTIME_ERRORS_LIMIT = 20
 TEMP_ROOT = Path("./temp")
 SUPPORTED_VIDEO_EXTENSIONS = {".mkv", ".mp4"}
+SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS = {
+    ".mka", ".m4a", ".aac", ".flac", ".ac3", ".eac3", ".wav", ".ogg", ".opus", ".mp3",
+}
 REQUIRED_ENV_VARS = [
     "S3_ENDPOINT",
     "S3_ACCESS_KEY_ID",
