@@ -21,6 +21,7 @@ from core.detector import (
 from core.discovery import filter_episode_files, find_episode_files, find_external_audio_files
 from core.torrent import download_selected_episodes
 from shared.helpers import (
+    JobCancelled,
     build_job_workspace_name,
     build_compilation_display_name,
     build_single_episode_display_name,
@@ -1572,7 +1573,10 @@ def cleanup_job_artifacts(
     render_completed=False,
     job_completed=False,
     preserve_temp_on_failure=False,
+    cancellation_requested=False,
 ):
+    if cancellation_requested:
+        return
     cleanup = cleanup or {}
 
     if render_completed and cleanup.get("downloads", True) and download_dir:
@@ -1676,6 +1680,7 @@ def process_job(job, runtime_status_path=None):
     download_dir = None
     render_completed = False
     job_completed = False
+    cancellation_requested = False
 
     try:
         checkpoint = load_render_checkpoint(job, artifacts)
@@ -2121,6 +2126,9 @@ def process_job(job, runtime_status_path=None):
         print(output_txt)
         print(output_manifest)
         return result
+    except JobCancelled:
+        cancellation_requested = True
+        raise
     finally:
         cleanup_job_artifacts(
             cleanup,
@@ -2135,4 +2143,5 @@ def process_job(job, runtime_status_path=None):
             render_completed=render_completed,
             job_completed=job_completed,
             preserve_temp_on_failure=processing_mode != "single_episode",
+            cancellation_requested=cancellation_requested,
         )

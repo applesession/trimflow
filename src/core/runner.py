@@ -10,7 +10,7 @@ from shared.config import (
     save_state,
 )
 from modules.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
-from shared.db import claim_job, job_exists, remove_completed_job as _db_remove_completed_job, return_job_to_pending
+from shared.db import claim_job, job_exists, job_is_running, remove_completed_job as _db_remove_completed_job, return_job_to_pending
 from shared.helpers import JobCancelled, cancellation_scope, raise_if_cancelled
 from core.pipeline import cleanup_cancelled_job_artifacts, is_job_completed, process_job
 from shared.runtime import (
@@ -158,6 +158,7 @@ def run_jobs(
             "jobs_processed": 0,
             "jobs_failed": 0,
             "jobs_skipped": 0,
+            "jobs_stopped": 0,
             "failed_titles": [],
         }
 
@@ -178,6 +179,7 @@ def run_jobs(
         "jobs_failed": 0,
         "jobs_skipped": 0,
         "jobs_cancelled": 0,
+        "jobs_stopped": 0,
         "failed_titles": [],
     }
     attempted_queue_ids = set()
@@ -240,7 +242,7 @@ def run_jobs(
                 validate_required_env(config, [merged_job])
                 validate_required_tools(config, [merged_job])
                 validate_required_files(config)
-            cancel_check = (lambda: not job_exists(queue_id)) if queue_id is not None else None
+            cancel_check = (lambda: not job_is_running(queue_id)) if queue_id is not None else None
             with cancellation_scope(cancel_check):
                 job_result = process_job(merged_job, runtime_status_path=runtime_status_path)
                 raise_if_cancelled()
@@ -271,6 +273,24 @@ def run_jobs(
             if on_job_success:
                 on_job_success(merged_job, job_result)
         except JobCancelled:
+            if queue_id is not None and job_exists(queue_id):
+                return_job_to_pending(queue_id)
+                attempted_queue_ids.add(queue_id)
+                summary["jobs_stopped"] += 1
+                log(f"\n[JOB STOPPED] {merged_job.get('title')} — local data preserved")
+                if runtime_status_path:
+                    current_job = load_runtime_status(runtime_status_path).get("current_job") or {}
+                    mark_runtime_job_finish(
+                        runtime_status_path,
+                        merged_job,
+                        status="stopped",
+                        stage="job_stopped",
+                        current_episode=current_job.get("current_episode"),
+                        total_episodes=current_job.get("total_episodes"),
+                        jobs_processed=summary["jobs_processed"],
+                        jobs_failed=summary["jobs_failed"],
+                    )
+                continue
             cleanup_cancelled_job_artifacts(merged_job)
             summary["jobs_cancelled"] += 1
             log(f"\n[JOB CANCELLED] {merged_job.get('title')}")
@@ -296,6 +316,12 @@ def run_jobs(
                 log(f"\n[JOB CANCELLED] {merged_job.get('title')}")
                 if on_job_cancelled:
                     on_job_cancelled(merged_job)
+                continue
+            if queue_id is not None and not job_is_running(queue_id):
+                return_job_to_pending(queue_id)
+                attempted_queue_ids.add(queue_id)
+                summary["jobs_stopped"] += 1
+                log(f"\n[JOB STOPPED] {merged_job.get('title')} — local data preserved")
                 continue
             if queue_id is not None:
                 return_job_to_pending(queue_id)

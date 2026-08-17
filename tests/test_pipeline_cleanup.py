@@ -53,6 +53,28 @@ class PipelineCleanupTests(unittest.TestCase):
 
         self.assertTrue(temp_dir.exists())
 
+    def test_stop_preserves_all_local_artifacts(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        download_dir = tmp_dir / "downloads" / "title"
+        temp_dir = tmp_dir / "temp" / "title"
+        output_dir = tmp_dir / "output" / "title"
+        for path in (download_dir, temp_dir, output_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+        cleanup_job_artifacts(
+            {"downloads": True, "temp": True, "output": True},
+            download_dir=download_dir,
+            temp_dir=temp_dir,
+            job_output_dir=output_dir,
+            render_completed=True,
+            job_completed=True,
+            cancellation_requested=True,
+        )
+
+        self.assertTrue(download_dir.exists())
+        self.assertTrue(temp_dir.exists())
+        self.assertTrue(output_dir.exists())
+
     def test_cleanup_removes_downloads_but_keeps_output_after_delivery_failure(self):
         tmp_dir = self.make_workspace_temp_dir()
         download_dir = tmp_dir / "downloads" / "title"

@@ -30,6 +30,7 @@ from shared.db import (
     insert_one_job,
     remove_job as _db_cancel_job,
     remove_pending_job as _db_remove_job,
+    request_job_stop as _db_request_job_stop,
     update_job_processing,
 )
 from shared.helpers import (
@@ -1396,6 +1397,22 @@ def update_job_audio_recovery(config, text, enabled):
     return "\n".join(lines)
 
 
+def stop_job(config, text):
+    index = parse_index_command(text, "stop")
+    job, _ = get_job_by_index(config, index)
+    if job.get("_queue_status") != "running":
+        raise RuntimeError("Задача сейчас не выполняется")
+    if not _db_request_job_stop(job.get("_queue_id")):
+        raise RuntimeError("Задача уже изменилась; обнови /jobs и повтори")
+    return "\n".join([
+        "Остановка запрошена",
+        "",
+        f"Тайтл: {get_display_title(job)}",
+        "Downloads, temp, checkpoints и output будут сохранены",
+        "Задача продолжится при следующем запуске",
+    ])
+
+
 def _get_execution_order(config):
     jobs = load_jobs(config)
     return build_execution_order(jobs, defaults=config.get("defaults", {}))
@@ -2123,6 +2140,7 @@ def build_help_message():
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
         "/remove <номер> - удалить из очереди и остановить активную обработку (можно диапазон: 1-10, 1,5,8-10)",
+        "/stop <номер> - остановить активную обработку без удаления данных",
         "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
         "/label <номер> ; <метка|auto> - изменить навигационную метку",
@@ -2187,6 +2205,8 @@ def handle_command(config, text):
         return update_job_audio_recovery(config, text, True)
     if text.startswith("/audiofix-off"):
         return update_job_audio_recovery(config, text, False)
+    if text.startswith("/stop"):
+        return stop_job(config, text)
     if text.startswith("/remove"):
         indices = parse_index_range(text, "remove")
         jobs_list, _ = get_jobs_by_indices(config, indices)

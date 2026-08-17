@@ -34,6 +34,7 @@ from shared.db import (
     load_ongoing_progress,
     remove_job,
     recover_running_jobs,
+    request_job_stop,
     reset_running_jobs,
     save_jobs as save_db_jobs,
     sync_discovered_jobs,
@@ -135,6 +136,31 @@ class CronRuntimeTests(unittest.TestCase):
         self.assertEqual(summary["jobs_failed"], 0)
         self.assertEqual(load_db_jobs(), [])
         mock_cleanup.assert_called_once()
+
+    @patch("lib.runner.cleanup_cancelled_job_artifacts")
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    @patch("lib.runner.process_job")
+    def test_stop_returns_running_job_to_pending_without_cleanup(
+        self, mock_process_job, _env, _tools, _files, mock_cleanup,
+    ):
+        save_db_jobs([{
+            "title": "Stop me", "season": 1, "episodes_range": "001",
+            "source": {"type": "magnet", "magnet": "stop"},
+        }])
+
+        def stop(job, runtime_status_path=None):
+            self.assertTrue(request_job_stop(job["_queue_id"]))
+            raise_if_cancelled()
+
+        mock_process_job.side_effect = stop
+        summary = run_jobs({"defaults": {}}, load_db_jobs(status="pending"))
+
+        self.assertEqual(summary["jobs_stopped"], 1)
+        self.assertEqual(summary["jobs_failed"], 0)
+        self.assertEqual(load_db_jobs()[0]["_queue_status"], "pending")
+        mock_cleanup.assert_not_called()
 
     def test_cancellation_stops_active_subprocess(self):
         with cancellation_scope(lambda: True):

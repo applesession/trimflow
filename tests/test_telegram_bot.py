@@ -46,6 +46,7 @@ from lib.telegram_bot import (
     parse_add_command,
     parse_add4k_command,
     retry_job_to_queue,
+    stop_job,
     update_job_navigation_label,
     update_job_audio_recovery,
     save_telegram_state,
@@ -523,6 +524,36 @@ class TelegramBotTests(unittest.TestCase):
         }])
         with self.assertRaisesRegex(RuntimeError, "не поддерживается для 4K"):
             update_job_audio_recovery(config, "/audiofix-on 1", True)
+
+    def test_stop_marks_running_job_without_deleting_it(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [{
+            "title": "Active",
+            "season": 1,
+            "episodes_range": "001",
+        }])
+        job = load_jobs(config)[0]
+        self.assertTrue(claim_job(job["_queue_id"]))
+
+        result = stop_job(config, "/stop 1")
+
+        self.assertIn("Остановка запрошена", result)
+        jobs = load_jobs(config)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["_queue_status"], "stopping")
+
+    def test_stop_rejects_pending_job(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        config = self.make_config(tmp_dir)
+        save_jobs(config, [{
+            "title": "Pending",
+            "season": 1,
+            "episodes_range": "001",
+        }])
+
+        with self.assertRaisesRegex(RuntimeError, "сейчас не выполняется"):
+            stop_job(config, "/stop 1")
 
     def test_get_display_title_falls_back_to_title(self):
         self.assertEqual(get_display_title({"title_ru": "Русский", "title": "English"}), "Русский")

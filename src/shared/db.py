@@ -371,7 +371,7 @@ def save_jobs(jobs):
         conn.execute("DELETE FROM jobs WHERE status = 'pending'")
         now = _utc_now_iso()
         for job in jobs:
-            if job.get("_queue_status") == "running":
+            if job.get("_queue_status") in {"running", "stopping"}:
                 continue
             row = _job_to_row(job)
             conn.execute(
@@ -434,7 +434,7 @@ def sync_discovered_jobs(jobs):
     with _write_lock:
         conn.execute("BEGIN IMMEDIATE")
         for job in jobs:
-            if job.get("_queue_status") == "running":
+            if job.get("_queue_status") in {"running", "stopping"}:
                 continue
 
             queue_id = job.get("_queue_id")
@@ -518,10 +518,34 @@ def job_exists(queue_id):
     return row is not None
 
 
+def job_is_running(queue_id):
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM jobs WHERE id = ? AND status = 'running'",
+        (int(queue_id),),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def request_job_stop(queue_id):
+    conn = _get_conn()
+    cursor = conn.execute(
+        "UPDATE jobs SET status = 'stopping', updated_at = ? "
+        "WHERE id = ? AND status = 'running'",
+        (_utc_now_iso(), int(queue_id)),
+    )
+    conn.commit()
+    requested = cursor.rowcount == 1
+    conn.close()
+    return requested
+
+
 def return_job_to_pending(queue_id):
     conn = _get_conn()
     conn.execute(
-        "UPDATE jobs SET status = 'pending', updated_at = ? WHERE id = ? AND status = 'running'",
+        "UPDATE jobs SET status = 'pending', updated_at = ? "
+        "WHERE id = ? AND status IN ('running', 'stopping')",
         (_utc_now_iso(), int(queue_id)),
     )
     conn.commit()
@@ -530,7 +554,7 @@ def return_job_to_pending(queue_id):
 
 def recover_running_jobs(processing_mode=None, exclude_processing_modes=None):
     conn = _get_conn()
-    clauses = ["status = 'running'"]
+    clauses = ["status IN ('running', 'stopping')"]
     params = []
     if processing_mode is not None:
         clauses.append("processing_mode = ?")

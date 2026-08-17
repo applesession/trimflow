@@ -17,6 +17,7 @@ from shared.db import (  # noqa: E402
     claim_job,
     init_db,
     job_exists,
+    job_is_running,
     recover_running_jobs,
     remove_completed_job,
     return_job_to_pending,
@@ -124,7 +125,7 @@ def main():
             )
             log_line(log_path, f"START 4K JOB: {get_display_title(job)}")
             try:
-                with cancellation_scope(lambda: not job_exists(queue_id)):
+                with cancellation_scope(lambda: not job_is_running(queue_id)):
                     result = process_upscale_job(
                         config,
                         job,
@@ -159,6 +160,22 @@ def main():
                 )
                 log_line(log_path, f"FINISH 4K JOB: {get_display_title(job)}")
             except JobCancelled:
+                if job_exists(queue_id):
+                    return_job_to_pending(queue_id)
+                    attempted.add(queue_id)
+                    current_job = load_runtime_status(status_path).get("current_job") or {}
+                    mark_runtime_job_finish(
+                        status_path,
+                        job,
+                        status="stopped",
+                        stage="job_stopped",
+                        current_episode=current_job.get("current_episode"),
+                        total_episodes=current_job.get("total_episodes"),
+                        jobs_processed=processed,
+                        jobs_failed=failed,
+                    )
+                    log_line(log_path, f"STOP 4K JOB: {get_display_title(job)} — local data preserved")
+                    continue
                 cleanup_cancelled_upscale_job(job)
                 current_job = load_runtime_status(status_path).get("current_job") or {}
                 mark_runtime_job_finish(
@@ -177,6 +194,11 @@ def main():
                 if not job_exists(queue_id):
                     cleanup_cancelled_upscale_job(job)
                     log_line(log_path, f"CANCEL 4K JOB: {get_display_title(job)}")
+                    continue
+                if not job_is_running(queue_id):
+                    return_job_to_pending(queue_id)
+                    attempted.add(queue_id)
+                    log_line(log_path, f"STOP 4K JOB: {get_display_title(job)} — local data preserved")
                     continue
                 return_job_to_pending(queue_id)
                 attempted.add(queue_id)
