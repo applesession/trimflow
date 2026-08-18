@@ -2047,21 +2047,42 @@ def parse_addseasons_command(text):
         raise RuntimeError("privacy_view должен быть целым числом") from exc
     if privacy_value not in VALID_PRIVACY_VALUES:
         raise RuntimeError(f"privacy_view должен быть одним из: {', '.join(map(str, sorted(VALID_PRIVACY_VALUES)))}")
-    if len(lines) - 1 != len(seasons):
-        raise RuntimeError(f"Для сезонов {first_season}-{last_season} нужно указать {len(seasons)} magnet-ссылок")
-
+    source_lines = lines[1:]
+    explicit_seasons = all(
+        re.fullmatch(r"\d+", re.split(r"\s*;\s*", line, maxsplit=1)[0])
+        for line in source_lines
+    )
     sources = []
-    for season, line in zip(seasons, lines[1:]):
+    if not explicit_seasons and len(source_lines) < len(seasons):
+        raise RuntimeError(
+            f"Для сезонов {first_season}-{last_season} нужно указать минимум {len(seasons)} magnet-ссылок"
+        )
+
+    for index, line in enumerate(source_lines):
         parts = [part.strip() for part in re.split(r"\s*;\s*", line)]
-        if len(parts) not in {1, 2}:
-            raise RuntimeError("Источник: magnet:?xt=... ; необязательный фильтр пути")
-        magnet = parts[0]
-        path_filter = parts[1] if len(parts) == 2 else None
+        if explicit_seasons:
+            if len(parts) not in {2, 3}:
+                raise RuntimeError("Источник: сезон ; magnet:?xt=... ; необязательный фильтр пути")
+            season = int(parts[0])
+            magnet = parts[1]
+            path_filter = parts[2] if len(parts) == 3 else None
+        else:
+            if len(parts) not in {1, 2}:
+                raise RuntimeError("Источник: magnet:?xt=... ; необязательный фильтр пути")
+            season = seasons[min(index, len(seasons) - 1)]
+            magnet = parts[0]
+            path_filter = parts[1] if len(parts) == 2 else None
+        if season not in seasons:
+            raise RuntimeError(f"Сезон {season} не входит в диапазон {first_season}-{last_season}")
         if not magnet.startswith("magnet:?"):
             raise RuntimeError("Каждый источник должен начинаться с magnet:?")
         if path_filter is not None and not path_filter:
             raise RuntimeError("Фильтр пути не должен быть пустым")
         sources.append({"season": season, "magnet": magnet, "path_filter": path_filter})
+
+    missing_seasons = sorted(set(seasons) - {source["season"] for source in sources})
+    if missing_seasons:
+        raise RuntimeError(f"Не указаны источники для сезонов: {missing_seasons}")
 
     normalized_range = str(first_season) if first_season == last_season else f"{first_season}-{last_season}"
     return {
@@ -2319,7 +2340,7 @@ def build_help_message():
         "magnet первой части ; необязательный фильтр пути",
         "magnet второй части ; необязательный фильтр пути",
         "/addseasons Название ; 1-5 ; privacy",
-        "по одной magnet-ссылке на сезон, сверху вниз",
+        "magnet-ссылки по порядку; лишние части относятся к последнему сезону",
         "/add4k Название ; серии ; magnet ; сезон ; необязательный фильтр пути",
     ])
 

@@ -17,6 +17,7 @@ from lib.pipeline import (
     build_timestamps_from_episodes,
     describe_media_signature_groups,
     deliver_rendered_output,
+    renumber_season_part_episodes,
     initialize_episode_checkpoints,
     load_episode_checkpoint,
     load_render_checkpoint,
@@ -464,6 +465,18 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             "00:00:00 - 1 сезон, 1 серия",
             "00:00:10 - 2 сезон, 1 серия",
         ])
+
+    def test_later_season_part_restarts_source_numbering(self):
+        episodes = renumber_season_part_episodes(
+            [{"episode": 1}, {"episode": 2}],
+            season=5,
+            episode_offset=12,
+        )
+
+        self.assertEqual(
+            [(episode["season"], episode["source_episode"], episode["episode"]) for episode in episodes],
+            [(5, 1, 13), (5, 2, 14)],
+        )
 
     def _mock_render_plan(self, episode_info, **kwargs):
         episode = episode_info["episode"]

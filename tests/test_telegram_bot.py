@@ -179,11 +179,44 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(stored["delivery"]["vk_privacy_view"], 3)
 
     def test_addseasons_command_requires_source_for_every_season(self):
-        with self.assertRaisesRegex(RuntimeError, "нужно указать 3 magnet-ссылок"):
+        with self.assertRaisesRegex(RuntimeError, "минимум 3 magnet-ссылок"):
             parse_addseasons_command("\n".join([
                 "/addseasons Hunter x Hunter ; 1-3 ; 0",
                 "magnet:?xt=urn:btih:first",
                 "magnet:?xt=urn:btih:second",
+            ]))
+
+    def test_addseasons_extra_positional_sources_belong_to_last_season(self):
+        payload = parse_addseasons_command("\n".join([
+            "/addseasons Hunter x Hunter ; 1-3 ; 0",
+            "magnet:?xt=urn:btih:season1",
+            "magnet:?xt=urn:btih:season2",
+            "magnet:?xt=urn:btih:season3part1",
+            "magnet:?xt=urn:btih:season3part2",
+            "magnet:?xt=urn:btih:season3part3",
+        ]))
+
+        self.assertEqual([source["season"] for source in payload["sources"]], [1, 2, 3, 3, 3])
+
+    def test_addseasons_command_allows_multiple_sources_for_one_season(self):
+        payload = parse_addseasons_command("\n".join([
+            "/addseasons Hunter x Hunter ; 1-3 ; 0",
+            "1 ; magnet:?xt=urn:btih:season1",
+            "2 ; magnet:?xt=urn:btih:season2",
+            "3 ; magnet:?xt=urn:btih:season3part1",
+            "3 ; magnet:?xt=urn:btih:season3part2 ; HEVC",
+        ]))
+
+        self.assertEqual([source["season"] for source in payload["sources"]], [1, 2, 3, 3])
+        self.assertEqual(payload["sources"][-1]["path_filter"], "HEVC")
+
+    def test_addseasons_explicit_format_requires_every_season(self):
+        with self.assertRaisesRegex(RuntimeError, r"Не указаны источники для сезонов: \[2\]"):
+            parse_addseasons_command("\n".join([
+                "/addseasons Hunter x Hunter ; 1-3 ; 0",
+                "1 ; magnet:?xt=urn:btih:season1",
+                "3 ; magnet:?xt=urn:btih:season3part1",
+                "3 ; magnet:?xt=urn:btih:season3part2",
             ]))
 
     def test_db_v2_migration_adds_source_parts_column(self):

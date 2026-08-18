@@ -504,6 +504,18 @@ def build_multi_season_timestamps(manifest_episodes):
     return timestamps
 
 
+def renumber_season_part_episodes(manifest_episodes, season, episode_offset):
+    return [
+        {
+            **episode,
+            "season": int(season),
+            "source_episode": int(episode["episode"]),
+            "episode": int(episode_offset) + int(episode["episode"]),
+        }
+        for episode in manifest_episodes
+    ]
+
+
 def build_timing_sources_summary(prefetched_anilibria_results, prefetched_aniskip_results, detector_context):
     return {
         "anilibria_available": any(result["segments"] for result in prefetched_anilibria_results.values()),
@@ -1765,20 +1777,26 @@ def process_multi_season_job(job, runtime_status_path=None):
 
         discovered = []
         set_runtime_stage(runtime_status_path, "torrent_metadata")
+        part_counts = {}
         for part in source_parts:
             season = int(part["season"])
-            part_dir = download_dir / f"season_{season:02d}"
+            part_counts[season] = part_counts.get(season, 0) + 1
+            part_index = part_counts[season]
+            part_dir = download_dir / f"season_{season:02d}" / f"part_{part_index:02d}"
             episodes = discover_torrent_episode_numbers(
                 part["magnet"],
                 part_dir,
                 path_filter=part.get("path_filter"),
                 timeout=download_timeout,
             )
-            print(f"[SEASON] {season}: found {len(episodes)} episodes, range 1-{episodes[-1]}")
-            discovered.append((part, part_dir, episodes))
+            print(
+                f"[SEASON] {season}: found {len(episodes)} episodes, "
+                f"part {part_index}, range 1-{episodes[-1]}"
+            )
+            discovered.append((season, part_index, part, part_dir, episodes))
 
         set_runtime_stage(runtime_status_path, "download")
-        for part, part_dir, episodes in discovered:
+        for _season, _part_index, part, part_dir, episodes in discovered:
             download_selected_episodes(
                 part["magnet"],
                 part_dir,
@@ -1790,14 +1808,14 @@ def process_multi_season_job(job, runtime_status_path=None):
         season_inputs = []
         all_episode_infos = []
         preferred_language = str(job.get("preferred_audio_language", "rus")).strip().lower() or "rus"
-        for part, part_dir, episodes in discovered:
+        for season, part_index, _part, part_dir, episodes in discovered:
             detected, ignored = find_episode_files(part_dir)
             selected, excluded = filter_episode_files(detected, set(episodes))
             external_audio = find_external_audio_files(part_dir, set(episodes))
             log_episode_selection(selected, ignored + excluded)
             infos = build_episode_infos(selected, external_audio, preferred_language)
             all_episode_infos.extend(infos)
-            season_inputs.append((int(part["season"]), part_dir, episodes))
+            season_inputs.append((season, part_index, part_dir, episodes))
 
         target_frame_rate = select_compilation_frame_rate(all_episode_infos)
         target_frame_width, target_frame_height = select_compilation_frame_size(all_episode_infos)
@@ -1805,7 +1823,8 @@ def process_multi_season_job(job, runtime_status_path=None):
         manifest_episodes = []
         timing_summaries = []
         set_runtime_stage(runtime_status_path, "season_render", total_episodes=len(all_episode_infos))
-        for season, part_dir, episodes in season_inputs:
+        episode_offsets = {}
+        for season, part_index, part_dir, episodes in season_inputs:
             subjob = deepcopy(job)
             subjob["season"] = season
             subjob["episodes_range"] = (
@@ -1813,7 +1832,9 @@ def process_multi_season_job(job, runtime_status_path=None):
             )
             subjob["processing_mode"] = "compilation"
             subjob["source"] = {"type": "local", "input_dir": str(part_dir)}
-            subjob["output_dir"] = str(staging_output)
+            subjob["output_dir"] = str(
+                staging_output / f"season_{season:02d}_part_{part_index:02d}"
+            )
             subjob["processing"] = {
                 key: value
                 for key, value in processing.items()
@@ -1831,8 +1852,13 @@ def process_multi_season_job(job, runtime_status_path=None):
             season_manifest = json.loads(Path(result["output_manifest"]).read_text(encoding="utf-8"))
             season_outputs.append(season_output)
             timing_summaries.append(season_manifest.get("timing_sources_summary") or {})
-            for episode in season_manifest.get("episodes", []):
-                manifest_episodes.append({**episode, "season": season})
+            episode_offset = episode_offsets.get(season, 0)
+            manifest_episodes.extend(renumber_season_part_episodes(
+                season_manifest.get("episodes", []),
+                season,
+                episode_offset,
+            ))
+            episode_offsets[season] = episode_offset + len(episodes)
 
         signatures = [ffprobe_media_signature(path) for path in season_outputs]
         if any(signature != signatures[0] for signature in signatures[1:]):
