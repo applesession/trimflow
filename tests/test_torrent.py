@@ -98,6 +98,13 @@ class TorrentSelectionTests(unittest.TestCase):
             [(1, 3), (2, 7)],
         )
 
+    def test_selects_episode_from_underscore_of_unknown_total_filename(self):
+        selected = select_torrent_episode_files([
+            {"index": 7, "path": "Release/Hunter_X_Hunter_[34_of_XX]_[ru_jp].mkv"},
+        ], {34})
+
+        self.assertEqual(selected[0]["episode"], 34)
+
     def test_selects_four_digit_episode_number(self):
         selected = select_torrent_episode_files([
             {"index": 1, "path": "One Piece - 1156.mkv"},
