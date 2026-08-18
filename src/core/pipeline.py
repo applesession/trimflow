@@ -19,7 +19,7 @@ from core.detector import (
     normalize_timing_detection_config,
 )
 from core.discovery import filter_episode_files, find_episode_files, find_external_audio_files
-from core.torrent import download_selected_episodes
+from core.torrent import download_selected_episodes, download_selected_episodes_from_sources
 from shared.helpers import (
     JobCancelled,
     build_job_workspace_name,
@@ -631,13 +631,22 @@ def build_prefetched_empty_aniskip_results(episode_infos, reason):
 def collect_episode_files(source, title_slug, allowed_episodes, processing=None, download_timeout=None):
     if source["type"] == "magnet":
         download_dir = Path(source.get("download_dir", f"./downloads/{title_slug}"))
-        download_selected_episodes(
-            source["magnet"],
-            download_dir,
-            allowed_episodes,
-            path_filter=(processing or {}).get("source_path_contains"),
-            timeout=download_timeout,
-        )
+        source_parts = source.get("parts") or []
+        if source_parts:
+            download_selected_episodes_from_sources(
+                source_parts,
+                download_dir,
+                allowed_episodes,
+                timeout=download_timeout,
+            )
+        else:
+            download_selected_episodes(
+                source["magnet"],
+                download_dir,
+                allowed_episodes,
+                path_filter=(processing or {}).get("source_path_contains"),
+                timeout=download_timeout,
+            )
         detected_episode_files, ignored_files = find_episode_files(download_dir)
         external_audio_files = find_external_audio_files(download_dir, allowed_episodes)
         return download_dir, detected_episode_files, ignored_files, external_audio_files

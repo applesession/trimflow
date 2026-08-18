@@ -11,7 +11,7 @@ from shared.config import (
 )
 from modules.autojobs import get_job_processing_mode, get_job_release_id, mark_job_episodes_completed, mark_ongoing_full_publish
 from shared.db import claim_job, job_exists, job_is_running, remove_completed_job as _db_remove_completed_job, return_job_to_pending
-from shared.helpers import JobCancelled, cancellation_scope, raise_if_cancelled
+from shared.helpers import JobCancelled, cancellation_scope, get_source_signature, raise_if_cancelled
 from core.pipeline import cleanup_cancelled_job_artifacts, is_job_completed, process_job
 from shared.runtime import (
     append_runtime_error,
@@ -29,12 +29,7 @@ from shared.validation import (
 def build_job_identity(job):
     source = job.get("source", {})
     source_type = str(source.get("type", "")).strip().lower()
-    if source_type == "magnet":
-        source_signature = str(source.get("magnet", "")).strip()
-    elif source_type == "local":
-        source_signature = str(source.get("input_dir", "")).strip()
-    else:
-        source_signature = ""
+    source_signature = get_source_signature(source)
 
     return "|".join([
         str(job.get("title", "")).strip().lower(),

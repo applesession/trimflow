@@ -90,6 +90,22 @@ def build_job_workspace_name(job) -> str:
     return f"{title_slug}__S{season}__{range_slug}__{processing_mode}"
 
 
+def get_source_signature(source) -> str:
+    source = source or {}
+    source_type = str(source.get("type", "")).strip().lower()
+    if source_type == "magnet":
+        parts = source.get("parts") or []
+        if parts:
+            return "||".join(
+                f"{str(part.get('magnet', '')).strip()}|{str(part.get('path_filter') or '').strip().casefold()}"
+                for part in parts
+            )
+        return str(source.get("magnet", "")).strip()
+    if source_type == "local":
+        return str(source.get("input_dir", "")).strip()
+    return ""
+
+
 def get_display_title(payload) -> str:
     if not isinstance(payload, dict):
         return "Без названия"

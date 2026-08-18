@@ -38,6 +38,7 @@ from shared.helpers import (
     clear_navigation_label,
     get_display_title,
     get_navigation_label,
+    get_source_signature,
     parse_episodes_range,
     set_navigation_label,
 )
@@ -795,12 +796,7 @@ def build_job_identity(job):
     source = job.get("source", {}) if isinstance(job, dict) else {}
     source_type = str(source.get("type", "")).strip().lower()
     processing_mode = str(job.get("processing_mode", "compilation") if isinstance(job, dict) else "compilation").strip().lower()
-    if source_type == "magnet":
-        source_signature = str(source.get("magnet", "")).strip()
-    elif source_type == "local":
-        source_signature = str(source.get("input_dir", "")).strip()
-    else:
-        source_signature = ""
+    source_signature = get_source_signature(source)
 
     return "|".join([
         str(job.get("title", "")).strip().lower(),
@@ -1966,6 +1962,58 @@ def parse_add_command(text):
     }
 
 
+def parse_addmulti_command(text):
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines or not lines[0].startswith("/addmulti "):
+        raise RuntimeError("Команда должна начинаться с /addmulti")
+    if len(lines) < 3:
+        raise RuntimeError("Нужно указать минимум две magnet-ссылки, каждую с новой строки")
+
+    header = [part.strip() for part in re.split(r"\s*;\s*", lines[0][len("/addmulti "):])]
+    if len(header) not in {2, 3, 4}:
+        raise RuntimeError("Формат: /addmulti Название ; 001-148 ; сезон ; privacy")
+
+    title, episodes_range = header[:2]
+    season = header[2] if len(header) >= 3 else "1"
+    privacy_view = header[3] if len(header) >= 4 else "0"
+    if not title:
+        raise RuntimeError("Нужно указать название тайтла")
+    validated_episodes = parse_episodes_range(episodes_range)
+    try:
+        season_value = int(season)
+    except ValueError as exc:
+        raise RuntimeError("Сезон должен быть целым числом") from exc
+    if season_value < 1:
+        raise RuntimeError("Сезон должен быть не меньше 1")
+    try:
+        privacy_value = int(privacy_view)
+    except ValueError as exc:
+        raise RuntimeError("privacy_view должен быть целым числом") from exc
+    if privacy_value not in VALID_PRIVACY_VALUES:
+        raise RuntimeError(f"privacy_view должен быть одним из: {', '.join(map(str, sorted(VALID_PRIVACY_VALUES)))}")
+
+    sources = []
+    for line in lines[1:]:
+        parts = [part.strip() for part in re.split(r"\s*;\s*", line)]
+        if len(parts) not in {1, 2}:
+            raise RuntimeError("Источник: magnet:?xt=... ; необязательный фильтр пути")
+        magnet = parts[0]
+        path_filter = parts[1] if len(parts) == 2 else None
+        if not magnet.startswith("magnet:?"):
+            raise RuntimeError("Каждый источник должен начинаться с magnet:?")
+        if path_filter is not None and not path_filter:
+            raise RuntimeError("Фильтр пути не должен быть пустым")
+        sources.append({"magnet": magnet, "path_filter": path_filter})
+
+    return {
+        "title": title,
+        "season": season_value,
+        "episodes_range": format_episodes_range(validated_episodes),
+        "privacy_view": privacy_value,
+        "sources": sources,
+    }
+
+
 def parse_add4k_command(text):
     if not text.startswith("/add4k "):
         raise RuntimeError("Команда должна начинаться с /add4k")
@@ -2046,6 +2094,26 @@ def add_job_from_command(config, text):
         "job": candidate_job,
         "reason": None,
     }
+
+
+def add_multi_job_from_command(config, text):
+    payload = parse_addmulti_command(text)
+    job = {
+        "title": payload["title"],
+        "season": payload["season"],
+        "episodes_range": payload["episodes_range"],
+        "source": {
+            "type": "magnet",
+            "parts": payload["sources"],
+        },
+    }
+    job["source"]["download_dir"] = f"downloads/{build_job_workspace_name(job)}"
+    if payload["privacy_view"] != 0:
+        job["delivery"] = {"vk_privacy_view": payload["privacy_view"]}
+    if has_manual_queue_duplicate(load_jobs(config), job):
+        return {"added": False, "job": job, "reason": "duplicate_job"}
+    insert_one_job(job)
+    return {"added": True, "job": job, "reason": None}
 
 
 def build_upscale_job(command_payload):
@@ -2129,6 +2197,9 @@ def format_add_result(result):
         f"Эпизоды: {job['episodes_range']}",
         f"VK доступ: {privacy_labels.get(privacy_view, privacy_view)}",
     ]
+    source_parts = (job.get("source") or {}).get("parts") or []
+    if source_parts:
+        lines.insert(-1, f"Источников: {len(source_parts)}")
     return "\n".join(lines)
 
 
@@ -2158,6 +2229,9 @@ def build_help_message():
         "",
         "Пример:",
         "/add Название ; серии ; magnet ; сезон ; privacy ; необязательный фильтр пути",
+        "/addmulti Название ; серии ; сезон ; privacy",
+        "magnet первой части ; необязательный фильтр пути",
+        "magnet второй части ; необязательный фильтр пути",
         "/add4k Название ; серии ; magnet ; сезон ; необязательный фильтр пути",
     ])
 
@@ -2266,6 +2340,8 @@ def handle_command(config, text):
         }
     if text.startswith("/add4k "):
         return format_add4k_result(add_upscale_job_from_command(config, text))
+    if text.startswith("/addmulti "):
+        return format_add_result(add_multi_job_from_command(config, text))
     if text.startswith("/add "):
         return format_add_result(add_job_from_command(config, text))
     return "Неизвестная команда. Напиши /help"

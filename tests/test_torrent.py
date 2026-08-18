@@ -9,6 +9,7 @@ from lib import reset_test_db  # noqa: F401 - initializes src on sys.path
 from core.torrent import (
     SOURCE_MARKER_NAME,
     download_selected_episodes,
+    download_selected_episodes_from_sources,
     download_torrent_episode,
     prepare_torrent_episode_downloads,
     select_torrent_external_audio_files,
@@ -44,6 +45,29 @@ class TorrentSelectionTests(unittest.TestCase):
             timeout=60,
         )
 
+    @patch("core.pipeline.find_episode_files", return_value=([(1, Path("episode-001.mkv"))], []))
+    @patch("core.pipeline.download_selected_episodes_from_sources")
+    def test_multi_source_pipeline_uses_shared_download_root(self, mock_download, _mock_find):
+        from core.pipeline import collect_episode_files
+
+        sources = [
+            {"magnet": "magnet:?xt=urn:btih:first", "path_filter": None},
+            {"magnet": "magnet:?xt=urn:btih:second", "path_filter": "HEVC"},
+        ]
+        collect_episode_files(
+            {"type": "magnet", "parts": sources, "download_dir": "downloads/test"},
+            "test",
+            {1, 2, 3},
+            download_timeout=60,
+        )
+
+        mock_download.assert_called_once_with(
+            sources,
+            Path("downloads/test"),
+            {1, 2, 3},
+            timeout=60,
+        )
+
     def test_selects_only_requested_indices(self):
         files = [
             {"index": episode, "path": f"Release/Show [{episode:03d}] [1080p].mkv"}
@@ -53,6 +77,61 @@ class TorrentSelectionTests(unittest.TestCase):
         selected = select_torrent_episode_files(files, {1, 2, 3})
 
         self.assertEqual([item["index"] for item in selected], [1, 2, 3])
+
+    @patch("core.torrent.download_selected_episodes")
+    @patch("core.torrent.prepare_torrent_metadata")
+    def test_multi_source_assigns_overlap_to_first_source(self, mock_prepare, mock_download):
+        events = []
+
+        def prepare(magnet, download_dir, path_filter=None, timeout=None):
+            events.append(f"prepare:{magnet}")
+            if magnet.endswith("first"):
+                files = [
+                    {"index": 1, "path": "Part 1/Show [001].mkv"},
+                    {"index": 2, "path": "Part 1/Show [002].mkv"},
+                ]
+            else:
+                files = [
+                    {"index": 1, "path": "Part 2/Show [002].mkv"},
+                    {"index": 2, "path": "Part 2/Show [003].mkv"},
+                ]
+            return Path(download_dir) / "release.torrent", files
+
+        def download(magnet, download_dir, episodes, path_filter=None, timeout=None):
+            events.append(f"download:{magnet}")
+            return [{"episode": episode, "index": episode, "path": f"Show [{episode:03d}].mkv"} for episode in episodes]
+
+        mock_prepare.side_effect = prepare
+        mock_download.side_effect = download
+
+        selected = download_selected_episodes_from_sources([
+            {"magnet": "magnet:?xt=urn:btih:first"},
+            {"magnet": "magnet:?xt=urn:btih:second", "path_filter": "Part 2"},
+        ], self.make_temp_dir() / "downloads", {1, 2, 3}, timeout=60)
+
+        self.assertEqual([item["episode"] for item in selected], [1, 2, 3])
+        self.assertEqual(mock_download.call_args_list[0].args[2], {1, 2})
+        self.assertEqual(mock_download.call_args_list[1].args[2], {3})
+        self.assertEqual(events[:2], [
+            "prepare:magnet:?xt=urn:btih:first",
+            "prepare:magnet:?xt=urn:btih:second",
+        ])
+
+    @patch("core.torrent.download_selected_episodes")
+    @patch("core.torrent.prepare_torrent_metadata")
+    def test_multi_source_missing_episode_fails_before_payload(self, mock_prepare, mock_download):
+        mock_prepare.side_effect = [
+            (Path("first.torrent"), [{"index": 1, "path": "Show [001].mkv"}]),
+            (Path("second.torrent"), [{"index": 3, "path": "Show [003].mkv"}]),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, r"across sources: \[2\]"):
+            download_selected_episodes_from_sources([
+                {"magnet": "magnet:?xt=urn:btih:first"},
+                {"magnet": "magnet:?xt=urn:btih:second"},
+            ], self.make_temp_dir() / "downloads", {1, 2, 3})
+
+        mock_download.assert_not_called()
 
     def test_external_audio_selection_uses_episode_number_and_supported_extensions(self):
         selected = select_torrent_external_audio_files([

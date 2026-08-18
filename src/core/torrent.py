@@ -112,6 +112,18 @@ def list_torrent_files(torrent_path):
     return files
 
 
+def prepare_torrent_metadata(magnet, download_dir, path_filter=None, timeout=None):
+    download_dir, marker_path, marker = _prepare_download_dir(download_dir, magnet, path_filter)
+    torrent_path = _ensure_torrent_metadata(
+        magnet,
+        download_dir,
+        marker_path,
+        marker,
+        timeout=timeout,
+    )
+    return torrent_path, list_torrent_files(torrent_path)
+
+
 def _looks_1080p(path):
     return re.search(r"(?<!\d)(?:1080p?|1920[x×]1080)(?!\d)", str(path), flags=re.IGNORECASE) is not None
 
@@ -188,10 +200,14 @@ def prepare_torrent_episode_downloads(
     path_filter=None,
     timeout=None,
 ):
-    download_dir, marker_path, marker = _prepare_download_dir(download_dir, magnet, path_filter)
-    torrent_path = _ensure_torrent_metadata(magnet, download_dir, marker_path, marker, timeout=timeout)
+    torrent_path, torrent_files = prepare_torrent_metadata(
+        magnet,
+        download_dir,
+        path_filter=path_filter,
+        timeout=timeout,
+    )
     selected = select_torrent_episode_files(
-        list_torrent_files(torrent_path),
+        torrent_files,
         allowed_episodes,
         path_filter=path_filter,
     )
@@ -234,3 +250,76 @@ def download_selected_episodes(magnet, download_dir, allowed_episodes, path_filt
         str(torrent_path),
     ], timeout=timeout)
     return selected
+
+
+def download_selected_episodes_from_sources(sources, download_dir, allowed_episodes, timeout=None):
+    sources = list(sources or [])
+    if len(sources) < 2:
+        raise RuntimeError("Multi-source download requires at least two magnet sources")
+
+    requested = sorted(int(episode) for episode in allowed_episodes)
+    prepared = []
+    for index, source in enumerate(sources, start=1):
+        magnet = str((source or {}).get("magnet") or "").strip()
+        if not magnet.startswith("magnet:?"):
+            raise RuntimeError(f"Invalid magnet source #{index}")
+        path_filter = str((source or {}).get("path_filter") or "").strip() or None
+        part_dir = Path(download_dir) / f"part_{index:02d}"
+        _, torrent_files = prepare_torrent_metadata(
+            magnet,
+            part_dir,
+            path_filter=path_filter,
+            timeout=timeout,
+        )
+        available = set()
+        filter_text = str(path_filter or "").casefold()
+        for item in torrent_files:
+            relative_path = str(item["path"])
+            if Path(relative_path).suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+                continue
+            if filter_text and filter_text not in relative_path.casefold():
+                continue
+            episode = extract_episode_number(Path(relative_path).name)
+            if episode in allowed_episodes:
+                available.add(episode)
+        prepared.append({
+            "magnet": magnet,
+            "path_filter": path_filter,
+            "download_dir": part_dir,
+            "available": available,
+        })
+
+    assignments = {index: set() for index in range(len(prepared))}
+    missing = []
+    overlaps = []
+    for episode in requested:
+        candidates = [index for index, item in enumerate(prepared) if episode in item["available"]]
+        if not candidates:
+            missing.append(episode)
+            continue
+        assignments[candidates[0]].add(episode)
+        if len(candidates) > 1:
+            overlaps.append({
+                "episode": episode,
+                "selected_source": candidates[0] + 1,
+                "candidate_sources": [index + 1 for index in candidates],
+            })
+
+    if missing:
+        raise RuntimeError(f"Torrent files not found for episodes across sources: {missing}")
+    if overlaps:
+        print("[TORRENT SOURCE OVERLAP] " + json.dumps(overlaps, ensure_ascii=False))
+
+    selected = []
+    for index, episodes in assignments.items():
+        if not episodes:
+            continue
+        item = prepared[index]
+        selected.extend(download_selected_episodes(
+            item["magnet"],
+            item["download_dir"],
+            episodes,
+            path_filter=item["path_filter"],
+            timeout=timeout,
+        ))
+    return sorted(selected, key=lambda item: item["episode"])

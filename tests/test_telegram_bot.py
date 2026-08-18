@@ -1,12 +1,14 @@
 import json
 import os
 import shutil
+import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
 from lib import reset_test_db
+import shared.db as db
 from lib.config import load_completed_jobs, load_jobs, save_completed_jobs, save_jobs, save_state
 from shared.db import (
     add_to_blacklist,
@@ -18,6 +20,7 @@ from shared.db import (
 )
 from lib.telegram_bot import (
     add_job_from_command,
+    add_multi_job_from_command,
     add_upscale_job_from_command,
     build_main_keyboard,
     build_notification_details_payload,
@@ -44,6 +47,7 @@ from lib.telegram_bot import (
     load_telegram_state,
     normalize_command_text,
     parse_add_command,
+    parse_addmulti_command,
     parse_add4k_command,
     retry_job_to_queue,
     stop_job,
@@ -119,6 +123,55 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(payload["source_path_contains"], "HEVC/TV")
         self.assertEqual(result["job"]["processing"]["source_path_contains"], "HEVC/TV")
+
+    def test_addmulti_command_stores_ordered_sources(self):
+        command = "\n".join([
+            "/addmulti Hunter x Hunter ; 001-148 ; 2 ; 3",
+            "magnet:?xt=urn:btih:first",
+            "magnet:?xt=urn:btih:second ; HEVC/TV",
+        ])
+
+        payload = parse_addmulti_command(command)
+        result = add_multi_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            command,
+        )
+        stored = load_jobs({})[0]
+
+        self.assertEqual(payload["episodes_range"], "001-148")
+        self.assertEqual(payload["season"], 2)
+        self.assertEqual(payload["privacy_view"], 3)
+        self.assertEqual(payload["sources"][1]["path_filter"], "HEVC/TV")
+        self.assertTrue(result["added"])
+        self.assertEqual(stored["source"]["parts"], payload["sources"])
+        self.assertEqual(stored["delivery"]["vk_privacy_view"], 3)
+
+    def test_addmulti_command_requires_two_sources(self):
+        with self.assertRaisesRegex(RuntimeError, "минимум две"):
+            parse_addmulti_command("\n".join([
+                "/addmulti Hunter x Hunter ; 001-148 ; 1 ; 0",
+                "magnet:?xt=urn:btih:first",
+            ]))
+
+    def test_db_v2_migration_adds_source_parts_column(self):
+        db_path = self.make_workspace_temp_dir() / "data.db"
+        connection = sqlite3.connect(db_path)
+        connection.executescript("""
+            CREATE TABLE jobs (id INTEGER PRIMARY KEY);
+            CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version (version) VALUES (1);
+        """)
+        connection.close()
+
+        with patch.object(db, "DB_PATH", db_path):
+            db.init_db()
+            connection = sqlite3.connect(db_path)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+            version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
+            connection.close()
+
+        self.assertIn("source_parts", columns)
+        self.assertEqual(version, 2)
 
     def test_add4k_command_builds_direct_donut_job(self):
         payload = parse_add4k_command(

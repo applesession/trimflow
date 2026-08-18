@@ -39,6 +39,7 @@ def init_db():
             source_download_dir TEXT,
             source_variant_codec TEXT,
             source_variant_label TEXT,
+            source_parts TEXT,
             skip_types TEXT,
             encoding TEXT,
             delivery TEXT,
@@ -146,12 +147,21 @@ def init_db():
     conn.commit()
 
     # Check if migration from JSON is needed
-    row = conn.execute("SELECT version FROM schema_version").fetchone()
-    current_version = row["version"] if row else 0
+    row = conn.execute("SELECT MAX(version) AS version FROM schema_version").fetchone()
+    current_version = int(row["version"] or 0) if row else 0
 
     if current_version < 1:
         _migrate_from_json(conn)
         conn.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (1)")
+        conn.commit()
+        current_version = 1
+
+    if current_version < 2:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "source_parts" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN source_parts TEXT")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version (version) VALUES (2)")
         conn.commit()
 
     conn.close()
@@ -176,10 +186,10 @@ def _migrate_from_json(conn):
                         created_at, updated_at, title, title_ru, mal_id, season,
                         episodes_range, processing_mode, source_type, source_magnet,
                         source_input_dir, source_download_dir, source_variant_codec,
-                        source_variant_label, skip_types, encoding, delivery, cleanup,
+                        source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                         processing, timing_detection, timing_providers,
                         preferred_audio_language, watermark_path, output_dir, automation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (now, now) + row,
                 )
             print(f"[DB] Migrated {len(jobs)} jobs from jobs.json")
@@ -284,6 +294,7 @@ def _job_from_row(row):
             "download_dir": row["source_download_dir"],
             "variant_codec": row["source_variant_codec"],
             "variant_label": row["source_variant_label"],
+            "parts": json.loads(row["source_parts"]) if row["source_parts"] else None,
         },
     }
     if row["skip_types"] is not None:
@@ -328,6 +339,7 @@ def _job_to_row(job):
         source.get("download_dir"),
         source.get("variant_codec"),
         source.get("variant_label"),
+        json.dumps(source.get("parts")) if source.get("parts") else None,
         json.dumps(job.get("skip_types")) if job.get("skip_types") else None,
         json.dumps(job.get("encoding")) if job.get("encoding") else None,
         json.dumps(job.get("delivery")) if job.get("delivery") else None,
@@ -379,10 +391,10 @@ def save_jobs(jobs):
                     created_at, updated_at, title, title_ru, mal_id, season,
                     episodes_range, processing_mode, source_type, source_magnet,
                     source_input_dir, source_download_dir, source_variant_codec,
-                    source_variant_label, skip_types, encoding, delivery, cleanup,
+                    source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                     processing, timing_detection, timing_providers,
                     preferred_audio_language, watermark_path, output_dir, automation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (now, now) + row,
             )
         conn.commit()
@@ -400,10 +412,10 @@ def insert_one_job(job):
                 created_at, updated_at, title, title_ru, mal_id, season,
                 episodes_range, processing_mode, source_type, source_magnet,
                 source_input_dir, source_download_dir, source_variant_codec,
-                source_variant_label, skip_types, encoding, delivery, cleanup,
+                source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                 processing, timing_detection, timing_providers,
                 preferred_audio_language, watermark_path, output_dir, automation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, now) + row,
         )
         conn.commit()
@@ -444,7 +456,7 @@ def sync_discovered_jobs(jobs):
                         updated_at = ?, title = ?, title_ru = ?, mal_id = ?, season = ?,
                         episodes_range = ?, processing_mode = ?, source_type = ?, source_magnet = ?,
                         source_input_dir = ?, source_download_dir = ?, source_variant_codec = ?,
-                        source_variant_label = ?, skip_types = ?, encoding = ?, delivery = ?, cleanup = ?,
+                        source_variant_label = ?, source_parts = ?, skip_types = ?, encoding = ?, delivery = ?, cleanup = ?,
                         processing = ?, timing_detection = ?, timing_providers = ?,
                         preferred_audio_language = ?, watermark_path = ?, output_dir = ?, automation = ?
                        WHERE id = ? AND status = 'pending'""",
@@ -487,10 +499,10 @@ def sync_discovered_jobs(jobs):
                     created_at, updated_at, title, title_ru, mal_id, season,
                     episodes_range, processing_mode, source_type, source_magnet,
                     source_input_dir, source_download_dir, source_variant_codec,
-                    source_variant_label, skip_types, encoding, delivery, cleanup,
+                    source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                     processing, timing_detection, timing_providers,
                     preferred_audio_language, watermark_path, output_dir, automation, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
                 (now, now) + _job_to_row(job),
             )
             inserted += 1
