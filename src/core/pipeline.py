@@ -31,6 +31,7 @@ from shared.helpers import (
     create_concat_file,
     ensure_non_empty_slug,
     format_episodes_label,
+    format_navigation_label,
     get_automatic_navigation_label,
     get_display_title,
     parse_episodes_range,
@@ -1498,11 +1499,16 @@ def build_output_artifacts(job, output_root):
     job_output_dir = Path(output_root) / ensure_non_empty_slug(job["title"])
     file_base_name = sanitize_filename(pretty_base_name)
     automatic_label = get_automatic_navigation_label(job)
+    display_automatic_label = format_navigation_label(automatic_label)
     if processing_mode == "single_episode":
         automatic_details = " ".join(
-            part for part in [automatic_label, f"{int(episodes[0])} Серия"] if part
+            part for part in [f"{int(episodes[0])} Серия", display_automatic_label] if part
         )
         automatic_name = f"{get_display_title(job)} - {automatic_details}"
+        previous_automatic_details = " ".join(
+            part for part in [automatic_label, f"{int(episodes[0])} Серия"] if part
+        )
+        previous_automatic_name = f"{get_display_title(job)} - {previous_automatic_details}"
         legacy_name = (
             f"{get_display_title(job)} - {int(job['season'])} Сезон "
             f"{int(episodes[0])} Серия"
@@ -1511,19 +1517,29 @@ def build_output_artifacts(job, output_root):
         automatic_details = " ".join(
             part
             for part in [
+                format_episodes_label(episodes_range),
+                display_automatic_label,
+                "[Без OP/ED]",
+            ]
+            if part
+        )
+        automatic_name = f"{get_display_title(job)} - {automatic_details}"
+        previous_automatic_details = " ".join(
+            part for part in [
                 automatic_label,
                 format_episodes_label(episodes_range),
                 "[Без OP/ED]",
             ]
             if part
         )
-        automatic_name = f"{get_display_title(job)} - {automatic_details}"
+        previous_automatic_name = f"{get_display_title(job)} - {previous_automatic_details}"
         legacy_name = (
             f"{get_display_title(job)} - {int(job['season'])} Сезон "
             f"{format_episodes_label(episodes_range)} [Без OP/ED]"
         )
     for existing_base_name in dict.fromkeys([
         sanitize_filename(automatic_name),
+        sanitize_filename(previous_automatic_name),
         sanitize_filename(legacy_name),
     ]):
         if existing_base_name == file_base_name:

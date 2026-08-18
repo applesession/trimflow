@@ -69,7 +69,7 @@ class DeliveryTests(unittest.TestCase):
             "001-011",
         )
 
-        self.assertEqual(result, "Звёздное дитя - Сезон 1 1-11 Серия [Без OP/ED]")
+        self.assertEqual(result, "Звёздное дитя - 1-11 Серия 1 Сезон [Без OP/ED]")
 
     def test_build_compilation_display_name_falls_back_to_title(self):
         result = build_compilation_display_name(
@@ -78,7 +78,7 @@ class DeliveryTests(unittest.TestCase):
             "001,003,005-007",
         )
 
-        self.assertEqual(result, "Yomi no Tsugai - Сезон 1 1,3,5-7 Серия [Без OP/ED]")
+        self.assertEqual(result, "Yomi no Tsugai - 1,3,5-7 Серия 1 Сезон [Без OP/ED]")
 
     def test_build_single_episode_name_puts_episode_before_season(self):
         result = build_single_episode_display_name(

@@ -210,21 +210,24 @@ def format_episodes_label(episodes_range: str) -> str:
     return f"{joined} Серия"
 
 
+def format_navigation_label(label):
+    season_match = re.fullmatch(r"Сезон\s+(\d+)", label or "", flags=re.IGNORECASE)
+    return f"{season_match.group(1)} Сезон" if season_match else label
+
+
 def build_compilation_display_name(job, season, episodes_range, suffix="[Без OP/ED]") -> str:
     display_title = get_display_title(job)
     episodes_label = format_episodes_label(episodes_range)
+    navigation_label = format_navigation_label(get_navigation_label(job))
     details = " ".join(
-        part for part in [get_navigation_label(job), episodes_label, suffix] if part
+        part for part in [episodes_label, navigation_label, suffix] if part
     )
     return f"{display_title} - {details}"
 
 
 def build_single_episode_display_name(job, season, episode_number) -> str:
     display_title = get_display_title(job)
-    navigation_label = get_navigation_label(job)
-    season_match = re.fullmatch(r"Сезон\s+(\d+)", navigation_label or "", flags=re.IGNORECASE)
-    if season_match:
-        navigation_label = f"{season_match.group(1)} Сезон"
+    navigation_label = format_navigation_label(get_navigation_label(job))
     details = " ".join(
         part for part in [f"{int(episode_number)} Серия", navigation_label] if part
     )
