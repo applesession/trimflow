@@ -13,6 +13,7 @@ from lib.pipeline import (
     build_episode_infos,
     build_episode_fingerprint,
     build_output_artifacts,
+    build_multi_season_timestamps,
     build_timestamps_from_episodes,
     describe_media_signature_groups,
     deliver_rendered_output,
@@ -440,6 +441,29 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
         self.assertEqual(timestamps[0], "00:00:00 - 1 серия")
         self.assertEqual(timestamps[-1], "36:36:46 - 100 серия")
+
+    def test_multi_season_artifacts_and_timestamps_use_season_labels(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir)
+        job.update({
+            "processing_mode": "multi_season",
+            "processing": {"season_range": "1-3"},
+        })
+
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        timestamps = build_multi_season_timestamps([
+            {"season": 1, "episode": 1, "cleaned_duration": 10},
+            {"season": 2, "episode": 1, "cleaned_duration": 10},
+        ])
+
+        self.assertEqual(
+            artifacts["pretty_base_name"],
+            "Тест серий - 1-3 Сезон ВСЕ СЕРИИ [Без OP/ED]",
+        )
+        self.assertEqual(timestamps, [
+            "00:00:00 - 1 сезон, 1 серия",
+            "00:00:10 - 2 сезон, 1 серия",
+        ])
 
     def _mock_render_plan(self, episode_info, **kwargs):
         episode = episode_info["episode"]

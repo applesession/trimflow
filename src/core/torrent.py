@@ -176,6 +176,35 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
     return selected
 
 
+def discover_torrent_episode_numbers(magnet, download_dir, path_filter=None, timeout=None):
+    _, torrent_files = prepare_torrent_metadata(
+        magnet,
+        download_dir,
+        path_filter=path_filter,
+        timeout=timeout,
+    )
+    filter_text = str(path_filter or "").strip().casefold()
+    episodes = set()
+    for item in torrent_files:
+        relative_path = str(item["path"])
+        if Path(relative_path).suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+            continue
+        if filter_text and filter_text not in relative_path.casefold():
+            continue
+        episode = extract_episode_number(Path(relative_path).name)
+        if episode is not None and episode > 0:
+            episodes.add(episode)
+    if not episodes:
+        raise RuntimeError("Torrent contains no detectable episode files")
+
+    expected = set(range(1, max(episodes) + 1))
+    missing = sorted(expected - episodes)
+    if missing:
+        raise RuntimeError(f"Torrent season has missing episodes: {missing}")
+    select_torrent_episode_files(torrent_files, expected, path_filter=path_filter)
+    return sorted(expected)
+
+
 def select_torrent_external_audio_files(torrent_files, allowed_episodes):
     requested = set(int(episode) for episode in allowed_episodes)
     selected = []

@@ -8,6 +8,7 @@ from uuid import uuid4
 from lib import reset_test_db  # noqa: F401 - initializes src on sys.path
 from core.torrent import (
     SOURCE_MARKER_NAME,
+    discover_torrent_episode_numbers,
     download_selected_episodes,
     download_selected_episodes_from_sources,
     download_torrent_episode,
@@ -77,6 +78,34 @@ class TorrentSelectionTests(unittest.TestCase):
         selected = select_torrent_episode_files(files, {1, 2, 3})
 
         self.assertEqual([item["index"] for item in selected], [1, 2, 3])
+
+    @patch("core.torrent.prepare_torrent_metadata")
+    def test_discovers_contiguous_season_from_metadata(self, mock_prepare):
+        mock_prepare.return_value = (Path("release.torrent"), [
+            {"index": 1, "path": "Show [001].mkv"},
+            {"index": 2, "path": "Show [002].mkv"},
+            {"index": 3, "path": "Show [003].mkv"},
+        ])
+
+        episodes = discover_torrent_episode_numbers(
+            "magnet:?xt=urn:btih:test",
+            self.make_temp_dir(),
+        )
+
+        self.assertEqual(episodes, [1, 2, 3])
+
+    @patch("core.torrent.prepare_torrent_metadata")
+    def test_discovery_rejects_internal_gap(self, mock_prepare):
+        mock_prepare.return_value = (Path("release.torrent"), [
+            {"index": 1, "path": "Show [001].mkv"},
+            {"index": 3, "path": "Show [003].mkv"},
+        ])
+
+        with self.assertRaisesRegex(RuntimeError, r"missing episodes: \[2\]"):
+            discover_torrent_episode_numbers(
+                "magnet:?xt=urn:btih:test",
+                self.make_temp_dir(),
+            )
 
     @patch("core.torrent.download_selected_episodes")
     @patch("core.torrent.prepare_torrent_metadata")

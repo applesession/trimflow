@@ -80,12 +80,16 @@ def ensure_non_empty_slug(title: str) -> str:
 def build_job_workspace_name(job) -> str:
     title_slug = ensure_non_empty_slug(job["title"])
     automation = job.get("automation") or {}
-    episodes_range = str(job.get("episodes_range", "")).strip()
+    processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
+    episodes_range = (
+        str((job.get("processing") or {}).get("season_range") or "").strip()
+        if processing_mode == "multi_season"
+        else str(job.get("episodes_range", "")).strip()
+    )
     if automation.get("release_id") is not None or not episodes_range:
         return title_slug
 
     season = str(job.get("season", 1)).strip().zfill(2)
-    processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
     range_slug = slugify(episodes_range.replace(",", "_"))
     return f"{title_slug}__S{season}__{range_slug}__{processing_mode}"
 
@@ -98,6 +102,7 @@ def get_source_signature(source) -> str:
         if parts:
             return "||".join(
                 f"{str(part.get('magnet', '')).strip()}|{str(part.get('path_filter') or '').strip().casefold()}"
+                f"|{str(part.get('season') or '').strip()}"
                 for part in parts
             )
         return str(source.get("magnet", "")).strip()
@@ -239,6 +244,13 @@ def build_compilation_display_name(job, season, episodes_range, suffix="[Без 
         part for part in [episodes_label, navigation_label, suffix] if part
     )
     return f"{display_title} - {details}"
+
+
+def build_multi_season_display_name(job, season_range, suffix="[Без OP/ED]") -> str:
+    details = " ".join(
+        part for part in [f"{season_range} Сезон", "ВСЕ СЕРИИ", suffix] if part
+    )
+    return f"{get_display_title(job)} - {details}"
 
 
 def build_single_episode_display_name(job, season, episode_number) -> str:

@@ -809,12 +809,17 @@ def build_job_identity(job):
 
 
 def build_manual_queue_key(job):
-    episodes_range = format_episodes_range(parse_episodes_range(job.get("episodes_range", "")))
+    processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
+    episodes_range = (
+        str((job.get("processing") or {}).get("season_range") or "")
+        if processing_mode == "multi_season"
+        else format_episodes_range(parse_episodes_range(job.get("episodes_range", "")))
+    )
     return "|".join([
         str(job.get("title", "")).strip().casefold(),
         str(int(job.get("season", 1))),
         episodes_range,
-        str(job.get("processing_mode", "compilation") or "compilation").strip().lower(),
+        processing_mode,
     ])
 
 
@@ -2014,6 +2019,61 @@ def parse_addmulti_command(text):
     }
 
 
+def parse_addseasons_command(text):
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines or not lines[0].startswith("/addseasons "):
+        raise RuntimeError("Команда должна начинаться с /addseasons")
+
+    header = [part.strip() for part in re.split(r"\s*;\s*", lines[0][len("/addseasons "):])]
+    if len(header) not in {2, 3}:
+        raise RuntimeError("Формат: /addseasons Название ; 1-5 ; privacy")
+    title, season_range = header[:2]
+    privacy_view = header[2] if len(header) == 3 else "0"
+    if not title:
+        raise RuntimeError("Нужно указать название тайтла")
+
+    match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", season_range)
+    if not match:
+        raise RuntimeError("Диапазон сезонов должен быть в формате 1-5")
+    first_season = int(match.group(1))
+    last_season = int(match.group(2) or first_season)
+    if first_season < 1 or last_season < first_season:
+        raise RuntimeError("Некорректный диапазон сезонов")
+    seasons = list(range(first_season, last_season + 1))
+
+    try:
+        privacy_value = int(privacy_view)
+    except ValueError as exc:
+        raise RuntimeError("privacy_view должен быть целым числом") from exc
+    if privacy_value not in VALID_PRIVACY_VALUES:
+        raise RuntimeError(f"privacy_view должен быть одним из: {', '.join(map(str, sorted(VALID_PRIVACY_VALUES)))}")
+    if len(lines) - 1 != len(seasons):
+        raise RuntimeError(f"Для сезонов {first_season}-{last_season} нужно указать {len(seasons)} magnet-ссылок")
+
+    sources = []
+    for season, line in zip(seasons, lines[1:]):
+        parts = [part.strip() for part in re.split(r"\s*;\s*", line)]
+        if len(parts) not in {1, 2}:
+            raise RuntimeError("Источник: magnet:?xt=... ; необязательный фильтр пути")
+        magnet = parts[0]
+        path_filter = parts[1] if len(parts) == 2 else None
+        if not magnet.startswith("magnet:?"):
+            raise RuntimeError("Каждый источник должен начинаться с magnet:?")
+        if path_filter is not None and not path_filter:
+            raise RuntimeError("Фильтр пути не должен быть пустым")
+        sources.append({"season": season, "magnet": magnet, "path_filter": path_filter})
+
+    normalized_range = str(first_season) if first_season == last_season else f"{first_season}-{last_season}"
+    return {
+        "title": title,
+        "season_range": normalized_range,
+        "first_season": first_season,
+        "last_season": last_season,
+        "privacy_view": privacy_value,
+        "sources": sources,
+    }
+
+
 def parse_add4k_command(text):
     if not text.startswith("/add4k "):
         raise RuntimeError("Команда должна начинаться с /add4k")
@@ -2116,6 +2176,28 @@ def add_multi_job_from_command(config, text):
     return {"added": True, "job": job, "reason": None}
 
 
+def add_seasons_job_from_command(config, text):
+    payload = parse_addseasons_command(text)
+    job = {
+        "title": payload["title"],
+        "season": payload["first_season"],
+        "episodes_range": "001",
+        "processing_mode": "multi_season",
+        "processing": {"season_range": payload["season_range"]},
+        "source": {
+            "type": "magnet",
+            "parts": payload["sources"],
+        },
+    }
+    job["source"]["download_dir"] = f"downloads/{build_job_workspace_name(job)}"
+    if payload["privacy_view"] != 0:
+        job["delivery"] = {"vk_privacy_view": payload["privacy_view"]}
+    if has_manual_queue_duplicate(load_jobs(config), job):
+        return {"added": False, "job": job, "reason": "duplicate_job"}
+    insert_one_job(job)
+    return {"added": True, "job": job, "reason": None}
+
+
 def build_upscale_job(command_payload):
     title = command_payload["title"]
     job = {
@@ -2189,6 +2271,7 @@ def format_add_result(result):
 
     privacy_view = (job.get("delivery") or {}).get("vk_privacy_view", 0)
     privacy_labels = {0: "всем", 1: "участникам", 2: "редакторам", 3: "по ссылке", 5: "донам"}
+    processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
     lines = [
         "Аниме добавлено",
         "",
@@ -2200,6 +2283,9 @@ def format_add_result(result):
     source_parts = (job.get("source") or {}).get("parts") or []
     if source_parts:
         lines.insert(-1, f"Источников: {len(source_parts)}")
+    if processing_mode == "multi_season":
+        lines = [line for line in lines if not line.startswith(("Метка:", "Эпизоды:"))]
+        lines.insert(3, f"Сезоны: {(job.get('processing') or {}).get('season_range')}")
     return "\n".join(lines)
 
 
@@ -2232,6 +2318,8 @@ def build_help_message():
         "/addmulti Название ; серии ; сезон ; privacy",
         "magnet первой части ; необязательный фильтр пути",
         "magnet второй части ; необязательный фильтр пути",
+        "/addseasons Название ; 1-5 ; privacy",
+        "по одной magnet-ссылке на сезон, сверху вниз",
         "/add4k Название ; серии ; magnet ; сезон ; необязательный фильтр пути",
     ])
 
@@ -2342,6 +2430,8 @@ def handle_command(config, text):
         return format_add4k_result(add_upscale_job_from_command(config, text))
     if text.startswith("/addmulti "):
         return format_add_result(add_multi_job_from_command(config, text))
+    if text.startswith("/addseasons "):
+        return format_add_result(add_seasons_job_from_command(config, text))
     if text.startswith("/add "):
         return format_add_result(add_job_from_command(config, text))
     return "Неизвестная команда. Напиши /help"

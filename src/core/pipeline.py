@@ -1,6 +1,7 @@
 import json
 import hashlib
 import shutil
+from copy import deepcopy
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -19,11 +20,16 @@ from core.detector import (
     normalize_timing_detection_config,
 )
 from core.discovery import filter_episode_files, find_episode_files, find_external_audio_files
-from core.torrent import download_selected_episodes, download_selected_episodes_from_sources
+from core.torrent import (
+    discover_torrent_episode_numbers,
+    download_selected_episodes,
+    download_selected_episodes_from_sources,
+)
 from shared.helpers import (
     JobCancelled,
     build_job_workspace_name,
     build_compilation_display_name,
+    build_multi_season_display_name,
     build_single_episode_display_name,
     build_timestamps_description,
     build_vk_comment_text,
@@ -482,6 +488,18 @@ def build_timestamps_from_episodes(manifest_episodes):
     timestamps = []
     for episode in manifest_episodes:
         timestamps.append(f"{seconds_to_timestamp(cumulative_time)} - {episode['episode']} серия")
+        cumulative_time += float(episode.get("cleaned_duration", 0.0))
+    return timestamps
+
+
+def build_multi_season_timestamps(manifest_episodes):
+    cumulative_time = 0.0
+    timestamps = []
+    for episode in manifest_episodes:
+        timestamps.append(
+            f"{seconds_to_timestamp(cumulative_time)} - "
+            f"{episode['season']} сезон, {episode['episode']} серия"
+        )
         cumulative_time += float(episode.get("cleaned_duration", 0.0))
     return timestamps
 
@@ -1497,6 +1515,20 @@ def build_output_artifacts(job, output_root):
     season = str(job["season"]).zfill(2)
     episodes_range = job["episodes_range"]
     processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
+    if processing_mode == "multi_season":
+        season_range = str((job.get("processing") or {}).get("season_range") or "").strip()
+        if not season_range:
+            raise RuntimeError("multi_season mode requires season_range")
+        pretty_base_name = build_multi_season_display_name(job, season_range)
+        job_output_dir = Path(output_root) / ensure_non_empty_slug(job["title"])
+        file_base_name = sanitize_filename(pretty_base_name)
+        return {
+            "job_output_dir": job_output_dir,
+            "pretty_base_name": pretty_base_name,
+            "output_video": job_output_dir / f"{file_base_name}.mkv",
+            "output_txt": job_output_dir / f"{file_base_name}.txt",
+            "output_manifest": job_output_dir / f"{file_base_name}_manifest.json",
+        }
     if processing_mode == "single_episode":
         episodes = sorted(parse_episodes_range(episodes_range))
         if len(episodes) != 1:
@@ -1590,7 +1622,7 @@ def load_render_checkpoint(job, artifacts):
         job.get("processing_mode", "compilation") or "compilation"
     ).strip().lower()
     if (
-        processing_mode == "compilation"
+        processing_mode in {"compilation", "multi_season"}
         and manifest.get("render_pipeline_version") != RENDER_PIPELINE_VERSION
     ):
         return None
@@ -1687,12 +1719,217 @@ def set_runtime_stage(runtime_status_path, stage, **current_job_updates):
     update_runtime_status(runtime_status_path, **payload)
 
 
+def process_multi_season_job(job, runtime_status_path=None):
+    processing = normalize_processing_config(job)
+    source_parts = (job.get("source") or {}).get("parts") or []
+    season_range = str(processing.get("season_range") or "").strip()
+    if not season_range or not source_parts:
+        raise RuntimeError("multi_season mode requires season_range and season sources")
+
+    artifacts = build_output_artifacts(job, Path(job["output_dir"]))
+    artifacts["job_output_dir"].mkdir(parents=True, exist_ok=True)
+    workspace_name = build_job_workspace_name(job)
+    temp_dir = prepare_temp_dir(workspace_name)
+    staging_output = temp_dir / "seasons"
+    download_dir = Path(
+        (job.get("source") or {}).get("download_dir")
+        or f"./downloads/{workspace_name}"
+    )
+    cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
+    delivery = build_delivery_config(job)
+    download_cfg = job.get("download") or {}
+    download_timeout = int(download_cfg.get("timeout_minutes_maximum", 1440)) * 60
+    render_completed = False
+    job_completed = False
+    cancellation_requested = False
+
+    try:
+        checkpoint = load_render_checkpoint(job, artifacts)
+        if checkpoint:
+            render_completed = True
+            result = deliver_rendered_output(
+                job,
+                delivery,
+                output_video=artifacts["output_video"],
+                output_txt=artifacts["output_txt"],
+                output_manifest=artifacts["output_manifest"],
+                manifest=checkpoint["manifest"],
+                timestamps=checkpoint["timestamps"],
+                pretty_base_name=artifacts["pretty_base_name"],
+                temp_dir=temp_dir,
+                total_episodes=int(checkpoint["manifest"].get("episodes_count", 0)),
+                runtime_status_path=runtime_status_path,
+            )
+            job_completed = is_job_completed(result)
+            return result
+
+        discovered = []
+        set_runtime_stage(runtime_status_path, "torrent_metadata")
+        for part in source_parts:
+            season = int(part["season"])
+            part_dir = download_dir / f"season_{season:02d}"
+            episodes = discover_torrent_episode_numbers(
+                part["magnet"],
+                part_dir,
+                path_filter=part.get("path_filter"),
+                timeout=download_timeout,
+            )
+            print(f"[SEASON] {season}: found {len(episodes)} episodes, range 1-{episodes[-1]}")
+            discovered.append((part, part_dir, episodes))
+
+        set_runtime_stage(runtime_status_path, "download")
+        for part, part_dir, episodes in discovered:
+            download_selected_episodes(
+                part["magnet"],
+                part_dir,
+                set(episodes),
+                path_filter=part.get("path_filter"),
+                timeout=download_timeout,
+            )
+
+        season_inputs = []
+        all_episode_infos = []
+        preferred_language = str(job.get("preferred_audio_language", "rus")).strip().lower() or "rus"
+        for part, part_dir, episodes in discovered:
+            detected, ignored = find_episode_files(part_dir)
+            selected, excluded = filter_episode_files(detected, set(episodes))
+            external_audio = find_external_audio_files(part_dir, set(episodes))
+            log_episode_selection(selected, ignored + excluded)
+            infos = build_episode_infos(selected, external_audio, preferred_language)
+            all_episode_infos.extend(infos)
+            season_inputs.append((int(part["season"]), part_dir, episodes))
+
+        target_frame_rate = select_compilation_frame_rate(all_episode_infos)
+        target_frame_width, target_frame_height = select_compilation_frame_size(all_episode_infos)
+        season_outputs = []
+        manifest_episodes = []
+        timing_summaries = []
+        set_runtime_stage(runtime_status_path, "season_render", total_episodes=len(all_episode_infos))
+        for season, part_dir, episodes in season_inputs:
+            subjob = deepcopy(job)
+            subjob["season"] = season
+            subjob["episodes_range"] = (
+                "001" if len(episodes) == 1 else f"001-{episodes[-1]:03d}"
+            )
+            subjob["processing_mode"] = "compilation"
+            subjob["source"] = {"type": "local", "input_dir": str(part_dir)}
+            subjob["output_dir"] = str(staging_output)
+            subjob["processing"] = {
+                key: value
+                for key, value in processing.items()
+                if key not in {"season_range", "target_frame_rate", "target_frame_width", "target_frame_height"}
+            }
+            subjob["processing"].update({
+                "target_frame_rate": target_frame_rate,
+                "target_frame_width": target_frame_width,
+                "target_frame_height": target_frame_height,
+            })
+            subjob["delivery"] = {"s3_enabled": False, "vk_enabled": False}
+            subjob["cleanup"] = {"downloads": False, "temp": True, "output": False}
+            result = process_job(subjob, runtime_status_path=runtime_status_path)
+            season_output = Path(result["output_video"])
+            season_manifest = json.loads(Path(result["output_manifest"]).read_text(encoding="utf-8"))
+            season_outputs.append(season_output)
+            timing_summaries.append(season_manifest.get("timing_sources_summary") or {})
+            for episode in season_manifest.get("episodes", []):
+                manifest_episodes.append({**episode, "season": season})
+
+        signatures = [ffprobe_media_signature(path) for path in season_outputs]
+        if any(signature != signatures[0] for signature in signatures[1:]):
+            raise RuntimeError("Rendered seasons have incompatible media signatures")
+        concat_file = temp_dir / "seasons.txt"
+        durations = [ffprobe_duration(path) for path in season_outputs]
+        create_concat_file(season_outputs, concat_file, durations=durations)
+        partial_output = artifacts["output_video"].with_name(
+            artifacts["output_video"].stem + ".partial" + artifacts["output_video"].suffix
+        )
+        partial_output.unlink(missing_ok=True)
+        set_runtime_stage(runtime_status_path, "concat", total_episodes=len(manifest_episodes))
+        try:
+            render_concat(concat_file, partial_output, allow_reencode=False)
+            final_duration = ffprobe_duration(partial_output)
+            if final_duration <= 0 or abs(final_duration - sum(durations)) > 1.0:
+                raise RuntimeError("Final multi-season concat duration mismatch")
+            if ffprobe_media_signature(partial_output) != signatures[0]:
+                raise RuntimeError("Final multi-season concat has incompatible media signature")
+            partial_output.replace(artifacts["output_video"])
+        except Exception:
+            partial_output.unlink(missing_ok=True)
+            raise
+
+        timestamps = build_multi_season_timestamps(manifest_episodes)
+        quality_summary = build_quality_summary(manifest_episodes, job.get("skip_types", ["op", "ed"]))
+        delivery_summary = {
+            "s3": build_s3_summary(delivery["s3_enabled"], uploaded=False),
+            "vk": build_vk_summary(delivery["vk_enabled"], uploaded=False),
+        }
+        manifest = {
+            "render_pipeline_version": RENDER_PIPELINE_VERSION,
+            "title": job["title"],
+            "title_ru": job.get("title_ru"),
+            "season": str(job["season"]).zfill(2),
+            "season_range": season_range,
+            "episodes_range": job["episodes_range"],
+            "episodes_count": len(manifest_episodes),
+            "source": "magnet",
+            "display_title": get_display_title(job),
+            "output_display_name": artifacts["pretty_base_name"],
+            "output_video": artifacts["output_video"].name,
+            "output_timestamps": artifacts["output_txt"].name,
+            "delivery_summary": delivery_summary,
+            "quality_summary": quality_summary,
+            "timing_sources_summary": {
+                key: any(summary.get(key) for summary in timing_summaries)
+                for key in ("anilibria_available", "aniskip_available", "detector_available")
+            },
+            "episodes": manifest_episodes,
+            "timestamps": timestamps,
+            "processing": {"mode": "multi_season", "season_range": season_range},
+            "render_complete": True,
+        }
+        write_outputs(artifacts["output_txt"], artifacts["output_manifest"], timestamps, manifest)
+        render_completed = True
+        result = deliver_rendered_output(
+            job,
+            delivery,
+            output_video=artifacts["output_video"],
+            output_txt=artifacts["output_txt"],
+            output_manifest=artifacts["output_manifest"],
+            manifest=manifest,
+            timestamps=timestamps,
+            pretty_base_name=artifacts["pretty_base_name"],
+            temp_dir=temp_dir,
+            total_episodes=len(manifest_episodes),
+            runtime_status_path=runtime_status_path,
+        )
+        job_completed = is_job_completed(result)
+        set_runtime_stage(runtime_status_path, "job_done", total_episodes=len(manifest_episodes))
+        return result
+    except JobCancelled:
+        cancellation_requested = True
+        raise
+    finally:
+        cleanup_job_artifacts(
+            cleanup,
+            download_dir=download_dir,
+            temp_dir=temp_dir,
+            job_output_dir=artifacts["job_output_dir"],
+            output_files=[artifacts["output_video"], artifacts["output_txt"], artifacts["output_manifest"]],
+            render_completed=render_completed,
+            job_completed=job_completed,
+            preserve_temp_on_failure=True,
+            cancellation_requested=cancellation_requested,
+        )
+
+
 def process_job(job, runtime_status_path=None):
     title = job["title"]
     mal_id = job.get("mal_id")
     season = str(job["season"]).zfill(2)
     episodes_range = job["episodes_range"]
     processing_mode = str(job.get("processing_mode", "compilation") or "compilation").strip().lower()
+    if processing_mode == "multi_season":
+        return process_multi_season_job(job, runtime_status_path=runtime_status_path)
     source = job["source"]
     output_root = Path(job["output_dir"])
     watermark_path = Path(job["watermark_path"])
@@ -1912,8 +2149,12 @@ def process_job(job, runtime_status_path=None):
             external_audio_files,
             preferred_language,
         )
-        frame_rate = select_compilation_frame_rate(episode_infos)
-        frame_width, frame_height = select_compilation_frame_size(episode_infos)
+        frame_rate = processing.get("target_frame_rate") or select_compilation_frame_rate(episode_infos)
+        if processing.get("target_frame_width") and processing.get("target_frame_height"):
+            frame_width = int(processing["target_frame_width"])
+            frame_height = int(processing["target_frame_height"])
+        else:
+            frame_width, frame_height = select_compilation_frame_size(episode_infos)
         encoding["frame_rate"] = frame_rate
         encoding["frame_width"] = frame_width
         encoding["frame_height"] = frame_height

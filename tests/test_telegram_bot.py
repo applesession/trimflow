@@ -21,6 +21,7 @@ from shared.db import (
 from lib.telegram_bot import (
     add_job_from_command,
     add_multi_job_from_command,
+    add_seasons_job_from_command,
     add_upscale_job_from_command,
     build_main_keyboard,
     build_notification_details_payload,
@@ -48,6 +49,7 @@ from lib.telegram_bot import (
     normalize_command_text,
     parse_add_command,
     parse_addmulti_command,
+    parse_addseasons_command,
     parse_add4k_command,
     retry_job_to_queue,
     stop_job,
@@ -151,6 +153,37 @@ class TelegramBotTests(unittest.TestCase):
             parse_addmulti_command("\n".join([
                 "/addmulti Hunter x Hunter ; 001-148 ; 1 ; 0",
                 "magnet:?xt=urn:btih:first",
+            ]))
+
+    def test_addseasons_command_maps_one_source_per_season(self):
+        command = "\n".join([
+            "/addseasons Hunter x Hunter ; 1-3 ; 3",
+            "magnet:?xt=urn:btih:first",
+            "magnet:?xt=urn:btih:second ; HEVC/TV",
+            "magnet:?xt=urn:btih:third",
+        ])
+
+        payload = parse_addseasons_command(command)
+        result = add_seasons_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            command,
+        )
+        stored = load_jobs({})[0]
+
+        self.assertEqual(payload["season_range"], "1-3")
+        self.assertEqual([part["season"] for part in payload["sources"]], [1, 2, 3])
+        self.assertEqual(payload["sources"][1]["path_filter"], "HEVC/TV")
+        self.assertTrue(result["added"])
+        self.assertEqual(stored["processing_mode"], "multi_season")
+        self.assertEqual(stored["source"]["parts"], payload["sources"])
+        self.assertEqual(stored["delivery"]["vk_privacy_view"], 3)
+
+    def test_addseasons_command_requires_source_for_every_season(self):
+        with self.assertRaisesRegex(RuntimeError, "нужно указать 3 magnet-ссылок"):
+            parse_addseasons_command("\n".join([
+                "/addseasons Hunter x Hunter ; 1-3 ; 0",
+                "magnet:?xt=urn:btih:first",
+                "magnet:?xt=urn:btih:second",
             ]))
 
     def test_db_v2_migration_adds_source_parts_column(self):
