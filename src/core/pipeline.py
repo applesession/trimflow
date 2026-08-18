@@ -241,10 +241,15 @@ def build_audio_recovery_info(
 
 
 def validate_expected_episode_duration(validation, expected_duration, path):
-    difference = abs(float(validation["duration"]) - float(expected_duration))
+    actual_duration = float(validation["duration"])
+    expected_duration = float(expected_duration)
+    delta = actual_duration - expected_duration
+    difference = abs(delta)
     if difference > 0.25:
         raise RuntimeError(
-            f"Episode checkpoint duration mismatch {difference:.3f}s: {path}"
+            f"Episode checkpoint duration mismatch {difference:.3f}s "
+            f"(expected={expected_duration:.3f}s, actual={actual_duration:.3f}s, "
+            f"delta={delta:+.3f}s): {path}"
         )
 
 
@@ -1798,6 +1803,7 @@ def process_job(job, runtime_status_path=None):
                 audio_stream_index=episode_audio_index,
                 audio_recovery=audio_recovery["applied"],
                 external_audio_path=external_audio["path"] if external_audio else None,
+                target_duration=expected_duration,
             )
             validation = validate_episode_render(output_video)
             validate_expected_episode_duration(validation, expected_duration, output_video)

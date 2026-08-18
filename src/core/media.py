@@ -375,9 +375,16 @@ def validate_episode_render(path):
             )
 
     if timeline["audio"] is not None:
-        difference = abs(timeline["video"]["duration"] - timeline["audio"]["duration"])
+        video_end = timeline["video"]["start"] + timeline["video"]["duration"]
+        audio_end = timeline["audio"]["start"] + timeline["audio"]["duration"]
+        end_delta = audio_end - video_end
+        difference = abs(end_delta)
         if difference > 0.25:
-            raise RuntimeError(f"Episode checkpoint A/V duration mismatch {difference:.3f}s: {path}")
+            raise RuntimeError(
+                f"Episode checkpoint A/V duration mismatch {difference:.3f}s "
+                f"(video_end={video_end:.3f}s, audio_end={audio_end:.3f}s, "
+                f"delta={end_delta:+.3f}s): {path}"
+            )
 
     return {
         "duration": duration,
@@ -792,6 +799,7 @@ def _build_episode_render_cmd(
 ):
     if not keep_segments:
         raise RuntimeError(f"Episode has no ranges to render: {ep_file}")
+    target_duration = sum(float(end) - float(start) for start, end in keep_segments)
 
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
@@ -898,8 +906,8 @@ def _build_episode_render_cmd(
             "-b:a", str(encoding.get("audio_bitrate", "192k")),
             "-ar", str(encoding.get("audio_sample_rate", 48000)),
             "-ac", str(encoding.get("audio_channels", 2)),
-            "-shortest",
         ]
+    cmd += ["-t", f"{target_duration:.6f}"]
     cmd.append(str(output))
     return cmd
 
@@ -959,6 +967,7 @@ def _build_final_cmd(
     audio_stream_index,
     audio_recovery=False,
     external_audio_path=None,
+    target_duration=None,
 ):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
@@ -1015,6 +1024,8 @@ def _build_final_cmd(
     cmd += ["-c:s", "copy"]
     if audio_recovery or external_audio_path:
         cmd.append("-shortest")
+    if target_duration is not None:
+        cmd += ["-t", f"{float(target_duration):.6f}"]
     cmd.append(output_video)
 
     return cmd
@@ -1028,6 +1039,7 @@ def render_final(
     audio_stream_index=0,
     audio_recovery=False,
     external_audio_path=None,
+    target_duration=None,
 ):
     if not _probe_video_streams(concat_output):
         raise RuntimeError(
@@ -1042,6 +1054,7 @@ def render_final(
         audio_stream_index,
         audio_recovery,
         external_audio_path,
+        target_duration,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
 
@@ -1065,5 +1078,6 @@ def render_final(
     fallback_cmd = _build_final_cmd(
         concat_output, watermark_path, output_video,
         fallback_encoding, audio_stream_index, audio_recovery, external_audio_path,
+        target_duration,
     )
     run(fallback_cmd)

@@ -105,6 +105,22 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("[aexternal]", command)
         self.assertIn("-shortest", command)
 
+    @patch("lib.media._probe_video_streams", return_value=[{}])
+    @patch("lib.media.run")
+    def test_single_episode_render_caps_output_at_video_duration(self, mock_run, _mock_probe):
+        render_final(
+            "episode.mkv",
+            "watermark.png",
+            "rendered.mkv",
+            {"video_codec": "libx264", "audio_codec": "aac"},
+            audio_stream_index=0,
+            target_duration=1394.142,
+        )
+
+        command = mock_run.call_args.args[0]
+        self.assertEqual(command[command.index("-t") + 1], "1394.142000")
+        self.assertNotIn("-shortest", command)
+
     @patch("lib.media.ffprobe_episode_timeline")
     def test_audio_recovery_detects_supported_gap_and_short_tail(self, mock_timeline):
         mock_timeline.return_value = {
@@ -183,7 +199,8 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("atrim=start=100.000000:end=200.000000", graph)
         self.assertIn("asetpts=PTS-STARTPTS", graph)
         self.assertIn("concat=n=2:v=1:a=1", graph)
-        self.assertIn("-shortest", command)
+        self.assertNotIn("-shortest", command)
+        self.assertEqual(command[command.index("-t") + 1], "110.000000")
         self.assertIn("overlay=W-w-20:20", graph)
         self.assertNotIn("0:s", command)
 
@@ -432,9 +449,103 @@ class MediaAudioSelectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, error):
                     validate_episode_render("episode.mkv")
 
+    @patch("lib.media.ffprobe_episode_timeline", return_value={
+        "video": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.04},
+        "audio": {"start": -0.021, "duration": 11.078, "max_packet_gap": 0.03},
+    })
+    @patch("lib.media.ffprobe_media_signature", return_value={"video": {}, "audio": {}})
+    @patch("lib.media.ffprobe_duration", return_value=11.057)
+    def test_episode_validation_reports_signed_end_delta(
+        self,
+        _mock_duration,
+        _mock_signature,
+        _mock_timeline,
+    ):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"video_end=10\.000s, audio_end=11\.057s, delta=\+1\.057s",
+        ):
+            validate_episode_render("episode.mkv")
+
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
 class MediaEpisodeIntegrationTests(unittest.TestCase):
+    def test_single_episode_caps_long_audio_without_hiding_short_audio(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp_dir = Path(raw_tmp)
+            watermark = tmp_dir / "watermark.png"
+            long_source = tmp_dir / "long-audio.mkv"
+            short_source = tmp_dir / "short-audio.mkv"
+            long_output = tmp_dir / "long-output.mkv"
+            short_output = tmp_dir / "short-output.mkv"
+            try:
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=white:size=32x16",
+                    "-frames:v", "1", str(watermark),
+                ], check=True)
+                for source, audio_duration in ((long_source, 5.0), (short_source, 2.9)):
+                    subprocess.run([
+                        "ffmpeg", "-v", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
+                        "-f", "lavfi", "-i",
+                        f"sine=frequency=1000:sample_rate=48000:duration={audio_duration}",
+                        "-map", "0:v", "-map", "1:a",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", str(source),
+                    ], check=True)
+            except subprocess.CalledProcessError as exc:
+                self.skipTest(f"local ffmpeg cannot build duration fixture: {exc}")
+
+            encoding = {
+                "video_codec": "libx264",
+                "preset": "ultrafast",
+                "cq": 28,
+                "audio_codec": "aac",
+            }
+            render_final(
+                long_source,
+                watermark,
+                long_output,
+                encoding,
+                target_duration=4.0,
+            )
+            validate_episode_render(long_output)
+
+            render_final(
+                short_source,
+                watermark,
+                short_output,
+                encoding,
+                target_duration=4.0,
+            )
+            with self.assertRaisesRegex(RuntimeError, "A/V duration mismatch"):
+                validate_episode_render(short_output)
+
+            strict_compilation_output = tmp_dir / "short-compilation-output.mkv"
+            recovered_compilation_output = tmp_dir / "recovered-compilation-output.mkv"
+            render_episode(
+                short_source,
+                strict_compilation_output,
+                [(0.0, 4.0)],
+                watermark,
+                encoding,
+                audio_stream_index=0,
+            )
+            with self.assertRaisesRegex(RuntimeError, "A/V duration mismatch"):
+                validate_episode_render(strict_compilation_output)
+
+            render_episode(
+                short_source,
+                recovered_compilation_output,
+                [(0.0, 4.0)],
+                watermark,
+                encoding,
+                audio_stream_index=0,
+                audio_recovery=True,
+            )
+            validate_episode_render(recovered_compilation_output)
+
     def test_audio_recovery_closes_internal_aac_gap(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp_dir = Path(raw_tmp)
@@ -504,7 +615,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 subprocess.run([
                     "ffmpeg", "-v", "error", "-y",
                     "-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=4",
-                    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=2.9",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=4",
                     "-i", str(subtitle),
                     "-map", "0:v", "-map", "1:a", "-map", "2:s",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",
