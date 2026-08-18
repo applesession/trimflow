@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lib.pipeline import (
+    AUTO_AUDIO_TAIL_RECOVERY_SECONDS,
     RENDER_PIPELINE_VERSION,
+    build_audio_recovery_info,
     build_delivery_config,
     build_episode_infos,
     build_episode_fingerprint,
@@ -55,6 +57,68 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         temp_dir = Path(tempfile.mkdtemp(dir=root))
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         return temp_dir
+
+    def test_safe_tail_recovery_is_automatic_but_other_anomalies_are_not(self):
+        safe_tail = build_audio_recovery_info(
+            False,
+            "episode.mkv",
+            0,
+            timeline={
+                "video": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.01},
+                "audio": {"start": 0.0, "duration": 8.0, "max_packet_gap": 0.01},
+            },
+        )
+        self.assertTrue(safe_tail["applied"])
+        self.assertTrue(safe_tail["automatic"])
+        self.assertFalse(safe_tail["enabled"])
+        self.assertEqual(AUTO_AUDIO_TAIL_RECOVERY_SECONDS, 3.0)
+
+        long_tail = build_audio_recovery_info(
+            False,
+            "episode.mkv",
+            0,
+            timeline={
+                "video": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.01},
+                "audio": {"start": 0.0, "duration": 6.9, "max_packet_gap": 0.01},
+            },
+        )
+        self.assertFalse(long_tail["applied"])
+        self.assertFalse(long_tail["automatic"])
+
+        internal_gap = build_audio_recovery_info(
+            False,
+            "episode.mkv",
+            0,
+            timeline={
+                "video": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.01},
+                "audio": {
+                    "start": 0.0,
+                    "duration": 10.0,
+                    "max_packet_gap": 0.6,
+                    "total_packet_gap": 0.6,
+                },
+            },
+        )
+        self.assertFalse(internal_gap["applied"])
+        self.assertFalse(internal_gap["automatic"])
+
+        manual_gap = build_audio_recovery_info(
+            True,
+            "episode.mkv",
+            0,
+            timeline={
+                "video": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.01},
+                "audio": {
+                    "start": 0.0,
+                    "duration": 10.0,
+                    "max_packet_gap": 0.6,
+                    "total_packet_gap": 0.6,
+                },
+            },
+        )
+        self.assertTrue(manual_gap["applied"])
+        self.assertTrue(manual_gap["enabled"])
+        self.assertFalse(manual_gap["automatic"])
 
     def make_job(self, tmp_dir, episodes_range="001-002"):
         watermark_path = tmp_dir / "watermark.png"
@@ -316,6 +380,31 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         self.assertIsNotNone(
             load_episode_checkpoint(tmp_dir, episode_info, audio_recovery_enabled=True)
         )
+
+    @patch("lib.pipeline.validate_episode_render", return_value=VALIDATION)
+    def test_automatic_tail_checkpoint_is_reusable_without_audiofix(self, _mock_validate):
+        tmp_dir = self.make_workspace_temp_dir()
+        source = tmp_dir / "source.mkv"
+        source.write_bytes(b"source")
+        episode_info = {"episode": 1, "path": str(source), "duration": 10.0}
+        episode_dir = tmp_dir / "episode_001"
+        episode_dir.mkdir()
+        work = episode_dir / "rendered.work.mkv"
+        work.write_bytes(b"video")
+        save_episode_checkpoint(episode_dir, episode_info, work, {
+            "episode": 1,
+            "source_file": str(source),
+            "expected_cleaned_duration": 10.0,
+            "cleaned_duration": 10.0,
+            "audio_recovery": {
+                "enabled": False,
+                "applied": True,
+                "automatic": True,
+                "reasons": ["early_end"],
+            },
+        })
+
+        self.assertIsNotNone(load_episode_checkpoint(tmp_dir, episode_info))
 
     @patch("lib.pipeline.validate_episode_render")
     def test_episode_checkpoint_rejects_expected_duration_drift(self, mock_validate):

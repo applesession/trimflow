@@ -1387,10 +1387,14 @@ def update_job_audio_recovery(config, text, enabled):
 
     running = any(job.get("_queue_status") == "running" for job in jobs_to_update)
     lines = [
-        "Audio recovery включён" if enabled else "Audio recovery выключен",
+        "Расширенный audio recovery включён" if enabled else "Расширенный audio recovery выключен",
         "",
         f"Задач обновлено: {len(jobs_to_update)}",
-        "Режим применяется только к аномальным сериям" if enabled else "Следующий render будет строгим",
+        (
+            "Режим применяется только к аномальным сериям"
+            if enabled
+            else "Безопасная автокоррекция хвоста до 3 секунд остаётся включённой"
+        ),
     ]
     if running:
         lines.extend(["", "Активный render не изменится; настройка действует со следующего запуска"])
@@ -2144,8 +2148,8 @@ def build_help_message():
         "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
         "/label <номер> ; <метка|auto> - изменить навигационную метку",
-        "/audiofix-on <номер> - включить восстановление аудио (поддерживает диапазоны)",
-        "/audiofix-off <номер> - выключить восстановление аудио (поддерживает диапазоны)",
+        "/audiofix-on <номер> - включить расширенное восстановление аудио (поддерживает диапазоны)",
+        "/audiofix-off <номер> - оставить только автокоррекцию хвоста до 3 секунд",
         "/blacklist - показать discovery blacklist",
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
         "/unblacklist <номер> - убрать тайтл из discovery blacklist",

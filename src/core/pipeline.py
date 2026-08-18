@@ -216,6 +216,9 @@ def normalize_processing_config(job):
     return dict(job.get("processing") or {})
 
 
+AUTO_AUDIO_TAIL_RECOVERY_SECONDS = 3.0
+
+
 def build_audio_recovery_info(
     enabled,
     path,
@@ -223,21 +226,39 @@ def build_audio_recovery_info(
     video_path=None,
     timeline=None,
 ):
-    if not enabled:
-        return {"enabled": False, "applied": False, "reasons": []}
     if audio_stream_index is None:
-        return {"enabled": True, "applied": False, "reasons": []}
+        return {
+            "enabled": bool(enabled),
+            "applied": False,
+            "automatic": False,
+            "reasons": [],
+        }
     if video_path is not None:
-        return analyze_external_audio_recovery(
+        recovery = analyze_external_audio_recovery(
             video_path,
             path,
             audio_stream_index=audio_stream_index,
+            enforce_limits=enabled,
         )
-    return analyze_audio_recovery(
-        path,
-        audio_stream_index=audio_stream_index,
-        timeline=timeline,
+    else:
+        recovery = analyze_audio_recovery(
+            path,
+            audio_stream_index=audio_stream_index,
+            timeline=timeline,
+            enforce_limits=enabled,
+        )
+    automatic = (
+        not enabled
+        and recovery.get("reasons") == ["early_end"]
+        and float(recovery.get("source_audio_end_shortfall", 0.0))
+        <= AUTO_AUDIO_TAIL_RECOVERY_SECONDS
     )
+    return {
+        **recovery,
+        "enabled": bool(enabled),
+        "applied": bool(recovery.get("applied")) if enabled else automatic,
+        "automatic": automatic,
+    }
 
 
 def validate_expected_episode_duration(validation, expected_duration, path):
@@ -253,7 +274,7 @@ def validate_expected_episode_duration(validation, expected_duration, path):
         )
 
 
-RENDER_PIPELINE_VERSION = 2
+RENDER_PIPELINE_VERSION = 3
 
 
 def _file_identity(path):
@@ -398,7 +419,11 @@ def load_episode_checkpoint(temp_dir, episode_info, audio_recovery_enabled=False
     if not isinstance(manifest_episode, dict) or manifest_episode.get("episode") != episode_number:
         return None
     audio_recovery = manifest_episode.get("audio_recovery") or {}
-    if audio_recovery.get("applied") and not audio_recovery_enabled:
+    if (
+        audio_recovery.get("applied")
+        and not audio_recovery.get("automatic")
+        and not audio_recovery_enabled
+    ):
         return None
     try:
         validate_expected_episode_duration(

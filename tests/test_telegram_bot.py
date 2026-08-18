@@ -495,9 +495,10 @@ class TelegramBotTests(unittest.TestCase):
         state = json.loads((tmp_dir / "state.json").read_text(encoding="utf-8"))
         self.assertTrue(state["release_audio_recovery_overrides"]["77"])
 
-        update_job_audio_recovery(config, "/audiofix-off 1", False)
+        off_result = update_job_audio_recovery(config, "/audiofix-off 1", False)
 
         jobs = load_jobs(config)
+        self.assertIn("автокоррекция хвоста до 3 секунд", off_result)
         self.assertTrue(all("audio_recovery_enabled" not in job.get("processing", {}) for job in jobs))
         compilation = next(job for job in jobs if job["processing_mode"] == "compilation")
         self.assertEqual(compilation["processing"]["source_path_contains"], "AVC")

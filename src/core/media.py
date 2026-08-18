@@ -277,15 +277,29 @@ def ffprobe_episode_timeline(path, audio_stream_index=0):
     return timeline
 
 
-def analyze_audio_recovery(path, audio_stream_index=0, timeline=None):
+def analyze_audio_recovery(
+    path,
+    audio_stream_index=0,
+    timeline=None,
+    enforce_limits=True,
+):
     timeline = timeline or ffprobe_episode_timeline(
         path,
         audio_stream_index=audio_stream_index,
     )
-    return _analyze_audio_recovery_timeline(timeline, path)
+    return _analyze_audio_recovery_timeline(
+        timeline,
+        path,
+        enforce_limits=enforce_limits,
+    )
 
 
-def analyze_external_audio_recovery(video_path, audio_path, audio_stream_index=0):
+def analyze_external_audio_recovery(
+    video_path,
+    audio_path,
+    audio_stream_index=0,
+    enforce_limits=True,
+):
     video_timeline = ffprobe_episode_timeline(video_path).get("video")
     audio_timeline = ffprobe_episode_timeline(
         audio_path,
@@ -294,10 +308,11 @@ def analyze_external_audio_recovery(video_path, audio_path, audio_stream_index=0
     return _analyze_audio_recovery_timeline(
         {"video": video_timeline, "audio": audio_timeline},
         audio_path,
+        enforce_limits=enforce_limits,
     )
 
 
-def _analyze_audio_recovery_timeline(timeline, path):
+def _analyze_audio_recovery_timeline(timeline, path, enforce_limits=True):
     video = timeline.get("video")
     audio = timeline.get("audio")
     if video is None or audio is None:
@@ -328,15 +343,15 @@ def _analyze_audio_recovery_timeline(timeline, path):
         reasons.append("early_end")
 
     inserted_silence = total_gap + start_delay + end_shortfall
-    if max_gap > 2.0:
+    if enforce_limits and max_gap > 2.0:
         raise RuntimeError(
             f"Audio recovery packet gap {max_gap:.3f}s exceeds 2.000s: {path}"
         )
-    if end_shortfall > 15.0:
+    if enforce_limits and end_shortfall > 15.0:
         raise RuntimeError(
             f"Audio recovery end shortfall {end_shortfall:.3f}s exceeds 15.000s: {path}"
         )
-    if inserted_silence > 15.0:
+    if enforce_limits and inserted_silence > 15.0:
         raise RuntimeError(
             f"Audio recovery total silence {inserted_silence:.3f}s exceeds 15.000s: {path}"
         )
