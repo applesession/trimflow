@@ -287,6 +287,22 @@ class TorrentSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected[0]["index"], 4)
 
+    def test_fractional_special_does_not_match_integer_episode(self):
+        selected = select_torrent_episode_files([
+            {
+                "index": 25,
+                "path": "Kuroko no Basket/Kuroko no Basket - 05 "
+                "[BDRip 1920x1080 x264 FLAC].mkv",
+            },
+            {
+                "index": 26,
+                "path": "Kuroko no Basket/Kuroko no Basket - 22.5 "
+                "[BDRip 1920x1080 x264 FLAC].mkv",
+            },
+        ], {5})
+
+        self.assertEqual(selected[0]["index"], 25)
+
     def test_ambiguous_1080p_candidates_fail_before_download(self):
         with self.assertRaisesRegex(RuntimeError, "Multiple torrent files.*AVC.*HEVC"):
             select_torrent_episode_files([

@@ -18,6 +18,15 @@ def extract_episode_number(filename: str):
         if match:
             return int(match.group(1))
 
+    hyphenated_match = re.search(
+        r"\s[-–—]\s*(\d{1,4})(\.\d+)?(?=\s|[._-])",
+        filename,
+    )
+    if hyphenated_match:
+        if hyphenated_match.group(2):
+            return None
+        return int(hyphenated_match.group(1))
+
     generic_matches = re.findall(r"(?<=[\s._-])(\d{1,4})(?=[\s._-])", filename)
     if generic_matches:
         return int(generic_matches[-1])
