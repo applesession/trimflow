@@ -1,12 +1,57 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from lib.aniskip import build_quality_summary, summarize_skips
-from lib.detector import build_detector_cache_key, normalize_timing_detection_config
+from lib.detector import (
+    DETECTOR_RESULT_VERSION,
+    _build_cache_paths,
+    _build_zone_results,
+    _derive_local_confidence,
+    _load_context_from_cache,
+    _needs_reference_fallback,
+    build_detector_cache_key,
+    normalize_timing_detection_config,
+)
 from lib.media import build_hybrid_subsegments, cap_subsegment_durations
-from lib.pipeline import build_type_info
+from lib.pipeline import build_type_info, merge_timing_sources
 
 
 class TimingLogicTests(unittest.TestCase):
+    @staticmethod
+    def _zone_tracks(count):
+        return [
+            {"episode": episode, "zone_start": 0.0, "cache_hit": False}
+            for episode in range(1, count + 1)
+        ]
+
+    @staticmethod
+    def _pair_matcher(groups, *, score=0.9):
+        groups_by_episode = {
+            episode: (group_index, start_frame)
+            for group_index, (episodes, start_frame) in enumerate(groups)
+            for episode in episodes
+        }
+
+        def match(track_a, track_b, _config):
+            group_a = groups_by_episode.get(track_a["episode"])
+            group_b = groups_by_episode.get(track_b["episode"])
+            if group_a is None or group_b is None or group_a[0] != group_b[0]:
+                return None
+            return {
+                "episode_a": track_a["episode"],
+                "episode_b": track_b["episode"],
+                "start_frame_a": group_a[1],
+                "start_frame_b": group_b[1],
+                "end_frame_a": group_a[1] + 359,
+                "end_frame_b": group_b[1] + 359,
+                "length_frames": 360,
+                "score": score,
+            }
+
+        return match
+
     def test_normalize_timing_detection_config_uses_defaults(self):
         config = normalize_timing_detection_config({})
 
@@ -59,6 +104,177 @@ class TimingLogicTests(unittest.TestCase):
             build_detector_cache_key(episode_infos, base_config),
             build_detector_cache_key(episode_infos, changed_config),
         )
+
+    def test_build_detector_cache_key_tracks_result_algorithm_version(self):
+        config = normalize_timing_detection_config({})
+        episode_infos = [{"episode": 1, "path": "a.mkv", "duration": 1400.0}]
+
+        current = build_detector_cache_key(episode_infos, config)
+        with patch("lib.detector.DETECTOR_RESULT_VERSION", "future_version"):
+            future = build_detector_cache_key(episode_infos, config)
+
+        self.assertNotEqual(current, future)
+
+    def test_old_detector_result_cache_is_not_loaded(self):
+        config = normalize_timing_detection_config({})
+        context = {
+            "results": {"op": {}, "ed": {}},
+            "reference_episodes": {"op": [], "ed": []},
+        }
+        with TemporaryDirectory() as tmp:
+            paths = _build_cache_paths(Path(tmp), config, "old")
+            paths["results"].mkdir(parents=True)
+            paths["result_file"].write_text(
+                '{"algorithm_version": "legacy", "available": true}',
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(_load_context_from_cache(context, paths))
+
+    def test_local_consensus_is_independent_of_total_episode_count(self):
+        config = normalize_timing_detection_config({})
+        group = [(range(1, 21), 40)]
+        matcher = self._pair_matcher(group)
+
+        with patch("lib.detector._find_pairwise_candidate", side_effect=matcher):
+            short = _build_zone_results(self._zone_tracks(20), config, "op")
+            long = _build_zone_results(self._zone_tracks(130), config, "op")
+
+        self.assertTrue(all(short["results"][episode]["confidence"] == "high" for episode in range(1, 21)))
+        self.assertEqual(
+            [short["results"][episode] for episode in range(1, 21)],
+            [long["results"][episode] for episode in range(1, 21)],
+        )
+
+    def test_local_consensus_supports_multiple_opening_groups(self):
+        config = normalize_timing_detection_config({})
+        groups = [
+            (range(1, 21), 40),
+            (range(21, 41), 80),
+            (range(41, 61), 120),
+        ]
+
+        with patch(
+            "lib.detector._find_pairwise_candidate",
+            side_effect=self._pair_matcher(groups),
+        ):
+            result = _build_zone_results(self._zone_tracks(130), config, "op")
+
+        self.assertTrue(all(result["results"][episode]["confidence"] == "high" for episode in range(1, 61)))
+        self.assertTrue(all(result["results"][episode]["match_strategy"] == "local_consensus" for episode in range(1, 61)))
+        self.assertTrue(all(result["results"][episode]["source"] == "not_found" for episode in range(61, 131)))
+
+    def test_local_consensus_drives_final_removed_episode_count(self):
+        config = normalize_timing_detection_config({})
+        matcher = self._pair_matcher([(range(1, 21), 40)])
+        with patch("lib.detector._find_pairwise_candidate", side_effect=matcher):
+            result = _build_zone_results(self._zone_tracks(130), config, "op")
+
+        detector = {
+            "enabled": True,
+            "reason": None,
+            "reference_episodes": {"op": result["reference_episodes"]},
+            "results": {"op": result["results"], "ed": {}},
+        }
+        empty_provider = {"segments": [], "request_error": None}
+        empty_aniskip = {**empty_provider, "used_fallback": False}
+        manifest_episodes = []
+        for episode in range(1, 131):
+            per_type, segments, _, _ = merge_timing_sources(
+                ["op"], empty_provider, empty_aniskip, detector, episode
+            )
+            manifest_episodes.append({
+                "episode": episode,
+                "skip_summary": summarize_skips(segments, ["op"], per_type),
+                "timing_info": {
+                    "strategy": "detector_only",
+                    "per_type": {"op": per_type["op"]},
+                },
+            })
+
+        summary = build_quality_summary(manifest_episodes, ["op"])
+
+        self.assertEqual(summary["episodes_with_op_removed"], 20)
+
+    def test_local_consensus_rejects_small_or_unstable_groups(self):
+        config = normalize_timing_detection_config({})
+        too_small = {
+            "support_episode_count": 2,
+            "score": 0.99,
+            "start": 10.0,
+            "end": 100.0,
+            "votes": [{"start": 10.0, "end": 100.0}],
+        }
+        unstable = {
+            "support_episode_count": 3,
+            "score": 0.99,
+            "start": 20.0,
+            "end": 110.0,
+            "votes": [
+                {"start": 10.0, "end": 100.0},
+                {"start": 20.0, "end": 110.0},
+            ],
+        }
+        low_similarity = {
+            "support_episode_count": 3,
+            "score": 0.7,
+            "start": 10.0,
+            "end": 100.0,
+            "votes": [
+                {"start": 10.0, "end": 100.0},
+                {"start": 10.0, "end": 100.0},
+            ],
+        }
+
+        self.assertEqual(_derive_local_confidence(too_small, config), "low")
+        self.assertEqual(_derive_local_confidence(unstable, config), "medium")
+        self.assertEqual(_derive_local_confidence(low_similarity, config), "medium")
+
+    def test_reference_fallback_is_identical_for_op_and_ed_results(self):
+        partial_result = {
+            "confidence": "high",
+            "results": {
+                1: {"confidence": "high", "review_required": False},
+                2: {"confidence": "medium", "review_required": True},
+            },
+        }
+
+        self.assertTrue(_needs_reference_fallback(partial_result))
+
+    def test_exact_provider_timing_keeps_priority_over_detector(self):
+        provider_result = {
+            "segments": [{
+                "type": "op",
+                "start": 10.0,
+                "end": 100.0,
+                "source": "anilibria_exact",
+                "confidence": "high",
+            }],
+            "request_error": None,
+        }
+        empty_aniskip = {"segments": [], "request_error": None, "used_fallback": False}
+        detector = {
+            "enabled": True,
+            "reason": None,
+            "reference_episodes": {},
+            "results": {
+                "op": {1: {
+                    "source": "audio_fingerprint",
+                    "confidence": "high",
+                    "start": 20.0,
+                    "end": 110.0,
+                    "review_required": False,
+                }},
+                "ed": {},
+            },
+        }
+
+        per_type, segments, _, _ = merge_timing_sources(
+            ["op"], provider_result, empty_aniskip, detector, 1
+        )
+
+        self.assertEqual(per_type["op"]["source"], "anilibria_exact")
+        self.assertEqual(segments[0]["start"], 10.0)
 
     def test_build_detector_cache_key_changes_on_reference_inputs(self):
         config = normalize_timing_detection_config({})

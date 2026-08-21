@@ -15,6 +15,7 @@ from api.aniskip import (
 )
 from api.anilibria import extract_release_poster_url, get_anilibria_segments, get_release_details
 from core.detector import (
+    DETECTOR_RESULT_VERSION,
     build_detector_context,
     get_detector_type_result,
     normalize_timing_detection_config,
@@ -97,6 +98,9 @@ def _compact_type_info(type_info):
         "reference_source",
         "reference_episode",
         "reference_similarity",
+        "support_episode_count",
+        "consensus_score",
+        "reference_interval",
     ]
     for field in optional_fields:
         value = type_info.get(field)
@@ -197,6 +201,7 @@ def build_compact_manifest(
             "enabled": timing_detection["enabled"],
             "available": detector_context["available"],
             "reason": detector_context["reason"],
+            "algorithm_version": DETECTOR_RESULT_VERSION,
         },
         "timing_sources_summary": timing_sources_summary or build_timing_sources_summary(
             prefetched_anilibria_results,
@@ -347,6 +352,9 @@ def build_episode_fingerprint(
         "source": job.get("source"),
         "skip_types": job.get("skip_types", ["op", "ed"]),
         "timing_detection": timing_detection,
+        **({
+            "timing_detection_algorithm_version": DETECTOR_RESULT_VERSION,
+        } if timing_detection.get("enabled") else {}),
         "timing_providers": job.get("timing_providers") or {},
         "encoding": _effective_episode_encoding(job.get("encoding")),
         "preferred_audio_language": preferred_language,
@@ -386,8 +394,14 @@ def initialize_episode_checkpoints(temp_dir, fingerprint):
         or checkpoint.get("render_pipeline_version") != RENDER_PIPELINE_VERSION
         or checkpoint.get("fingerprint") != fingerprint
     ):
-        shutil.rmtree(temp_dir, ignore_errors=True)
         temp_dir.mkdir(parents=True, exist_ok=True)
+        for item in temp_dir.iterdir():
+            if item.name == "timing_detection_cache":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
         checkpoint = {
             "render_pipeline_version": RENDER_PIPELINE_VERSION,
             "fingerprint": fingerprint,
@@ -1638,6 +1652,12 @@ def load_render_checkpoint(job, artifacts):
         and manifest.get("render_pipeline_version") != RENDER_PIPELINE_VERSION
     ):
         return None
+    if (
+        bool((job.get("timing_detection") or {}).get("enabled", False))
+        and (manifest.get("timing_detection") or {}).get("algorithm_version")
+        != DETECTOR_RESULT_VERSION
+    ):
+        return None
     if manifest.get("title") != job.get("title"):
         return None
     if str(manifest.get("season", "")).lstrip("0") != str(job.get("season", "")).lstrip("0"):
@@ -1904,6 +1924,10 @@ def process_multi_season_job(job, runtime_status_path=None):
             "output_timestamps": artifacts["output_txt"].name,
             "delivery_summary": delivery_summary,
             "quality_summary": quality_summary,
+            "timing_detection": {
+                "enabled": timing_detection["enabled"],
+                "algorithm_version": DETECTOR_RESULT_VERSION,
+            },
             "timing_sources_summary": {
                 key: any(summary.get(key) for summary in timing_summaries)
                 for key in ("anilibria_available", "aniskip_available", "detector_available")

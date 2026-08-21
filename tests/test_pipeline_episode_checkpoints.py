@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lib.detector import DETECTOR_RESULT_VERSION
 from lib.pipeline import (
     AUTO_AUDIO_TAIL_RECOVERY_SECONDS,
     RENDER_PIPELINE_VERSION,
@@ -205,6 +206,56 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         external_audio.write_bytes(b"changed audio")
         self.assertNotEqual(with_external, fingerprint())
 
+    def test_episode_fingerprint_tracks_detector_algorithm_version(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        source = tmp_dir / "episode.mkv"
+        source.write_bytes(b"source")
+        job = self.make_job(tmp_dir, "001")
+        episode_infos = [{
+            "episode": 1,
+            "path": str(source),
+            "duration": 10.0,
+            "frame_rate": "30/1",
+            "width": 1920,
+            "height": 1080,
+        }]
+
+        current = build_episode_fingerprint(
+            job,
+            episode_infos,
+            watermark_path=job["watermark_path"],
+            timing_detection=job["timing_detection"],
+            preferred_language="rus",
+        )
+        with patch("lib.pipeline.DETECTOR_RESULT_VERSION", "future_version"):
+            disabled_future = build_episode_fingerprint(
+                job,
+                episode_infos,
+                watermark_path=job["watermark_path"],
+                timing_detection=job["timing_detection"],
+                preferred_language="rus",
+            )
+        self.assertEqual(current, disabled_future)
+
+        job["timing_detection"]["enabled"] = True
+        current = build_episode_fingerprint(
+            job,
+            episode_infos,
+            watermark_path=job["watermark_path"],
+            timing_detection=job["timing_detection"],
+            preferred_language="rus",
+        )
+        with patch("lib.pipeline.DETECTOR_RESULT_VERSION", "future_version"):
+            future = build_episode_fingerprint(
+                job,
+                episode_infos,
+                watermark_path=job["watermark_path"],
+                timing_detection=job["timing_detection"],
+                preferred_language="rus",
+            )
+
+        self.assertNotEqual(current, future)
+
     @patch("lib.pipeline.ffprobe_episode_timeline")
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
@@ -293,11 +344,15 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         stale = temp_dir / "chunk_001" / "rendered.mkv"
         stale.parent.mkdir()
         stale.write_bytes(b"old")
+        feature_cache = temp_dir / "timing_detection_cache" / "features" / "cached.npz"
+        feature_cache.parent.mkdir(parents=True)
+        feature_cache.write_bytes(b"features")
 
         checkpoint = initialize_episode_checkpoints(temp_dir, "same")
 
         self.assertEqual(checkpoint["render_pipeline_version"], RENDER_PIPELINE_VERSION)
         self.assertFalse(stale.exists())
+        self.assertTrue(feature_cache.exists())
 
         job = self.make_job(tmp_dir)
         artifacts = build_output_artifacts(job, job["output_dir"])
@@ -316,6 +371,32 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         with patch("lib.pipeline.ffprobe_duration", return_value=10.0):
             self.assertIsNone(load_render_checkpoint(job, artifacts))
             manifest["render_pipeline_version"] = RENDER_PIPELINE_VERSION
+            artifacts["output_manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertIsNotNone(load_render_checkpoint(job, artifacts))
+
+    def test_old_detector_output_checkpoint_is_invalid(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir)
+        job["timing_detection"]["enabled"] = True
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        artifacts["job_output_dir"].mkdir(parents=True)
+        artifacts["output_video"].write_bytes(b"video")
+        artifacts["output_txt"].write_text("00:00:00 - 1 серия\n", encoding="utf-8")
+        manifest = {
+            "render_complete": True,
+            "render_pipeline_version": RENDER_PIPELINE_VERSION,
+            "title": job["title"],
+            "season": "01",
+            "episodes_range": job["episodes_range"],
+            "output_video": artifacts["output_video"].name,
+            "output_timestamps": artifacts["output_txt"].name,
+            "timing_detection": {"enabled": True},
+        }
+        artifacts["output_manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+
+        with patch("lib.pipeline.ffprobe_duration", return_value=10.0):
+            self.assertIsNone(load_render_checkpoint(job, artifacts))
+            manifest["timing_detection"]["algorithm_version"] = DETECTOR_RESULT_VERSION
             artifacts["output_manifest"].write_text(json.dumps(manifest), encoding="utf-8")
             self.assertIsNotNone(load_render_checkpoint(job, artifacts))
 

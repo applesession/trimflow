@@ -11,6 +11,7 @@ from shared.constants import DEFAULT_TIMING_DETECTION
 
 SEASON_CLUSTER_TOLERANCE_SECONDS = 10.0
 HIGH_CONFIDENCE_BOUNDARY_TOLERANCE = 5.0
+DETECTOR_RESULT_VERSION = "multi_cluster_v1"
 
 
 def normalize_timing_detection_config(job):
@@ -91,6 +92,7 @@ def build_detector_cache_key(episode_infos, config, detector_inputs=None):
         "detector_version": config["detector_version"],
     }
     payload = {
+        "result_version": DETECTOR_RESULT_VERSION,
         "config": relevant_config,
         "episodes": [
             {
@@ -452,25 +454,31 @@ def _build_episode_candidates(pair_candidates, zone_tracks, config):
     return episode_candidates
 
 
-def _derive_confidence(season_cluster, total_episodes, config):
-    if season_cluster is None:
+def _derive_local_confidence(candidate, config):
+    if candidate is None:
         return "none"
 
-    majority_count = total_episodes // 2 + 1
-    starts = [candidate["start"] for candidate in season_cluster["cluster"]]
-    ends = [candidate["end"] for candidate in season_cluster["cluster"]]
-    max_start_delta = max(abs(start - season_cluster["start"]) for start in starts)
-    max_end_delta = max(abs(end - season_cluster["end"]) for end in ends)
+    votes = candidate.get("votes") or []
+    starts = [vote["start"] for vote in votes]
+    ends = [vote["end"] for vote in votes]
+    max_start_delta = max(
+        (abs(start - candidate["start"]) for start in starts),
+        default=float("inf"),
+    )
+    max_end_delta = max(
+        (abs(end - candidate["end"]) for end in ends),
+        default=float("inf"),
+    )
 
     if (
-        season_cluster["support"] >= majority_count
-        and season_cluster["avg_score"] >= config["consensus_min_similarity"]
+        candidate["support_episode_count"] >= config["min_support_episodes"]
+        and candidate["score"] >= config["consensus_min_similarity"]
         and max_start_delta <= HIGH_CONFIDENCE_BOUNDARY_TOLERANCE
         and max_end_delta <= HIGH_CONFIDENCE_BOUNDARY_TOLERANCE
     ):
         return "high"
 
-    if season_cluster["support"] >= config["min_support_episodes"]:
+    if candidate["support_episode_count"] >= config["min_support_episodes"]:
         return "medium"
 
     return "low"
@@ -495,47 +503,6 @@ def _build_zone_results(zone_tracks, config, zone_type):
         }
 
     episode_candidates = _build_episode_candidates(pair_candidates, zone_tracks, config)
-    season_cluster = _cluster_interval_votes(
-        list(episode_candidates.values()),
-        config["min_support_episodes"],
-    )
-
-    if not season_cluster:
-        return {
-            "results": {
-                episode: {
-                    "found": False,
-                    "source": "not_found",
-                    "confidence": "none",
-                    "start": None,
-                    "end": None,
-                    "review_required": True,
-                    "reason": "insufficient_consensus",
-                    "support_episode_count": 0,
-                    "consensus_score": None,
-                    "reference_interval": None,
-                    "cache_hit": False,
-                    "match_strategy": "not_found",
-                    "reference_episode": None,
-                    "reference_source": "none",
-                    "reference_similarity": None,
-                }
-                for episode in [track["episode"] for track in zone_tracks]
-            },
-            "reference_episodes": [],
-            "reference_interval": None,
-            "consensus_score": None,
-            "confidence": "none",
-            "error": "insufficient_consensus",
-        }
-
-    confidence = _derive_confidence(season_cluster, len(zone_tracks), config)
-    reference_interval = {
-        "start": season_cluster["start"],
-        "end": season_cluster["end"],
-    }
-    reference_episodes = [candidate["episode"] for candidate in season_cluster["cluster"]]
-    season_support_set = set(reference_episodes)
     results = {}
 
     for track in zone_tracks:
@@ -554,7 +521,7 @@ def _build_zone_results(zone_tracks, config, zone_type):
                 "reason": "insufficient_consensus",
                 "support_episode_count": 0,
                 "consensus_score": None,
-                "reference_interval": reference_interval,
+                "reference_interval": None,
                 "cache_hit": cache_hit,
                 "match_strategy": "not_found",
                 "reference_episode": None,
@@ -563,32 +530,55 @@ def _build_zone_results(zone_tracks, config, zone_type):
             }
             continue
 
-        in_consensus = episode in season_support_set
-        results[episode] = {
-            "found": in_consensus,
-            "source": "audio_fingerprint",
-            "confidence": confidence if in_consensus else "medium",
+        confidence = _derive_local_confidence(candidate, config)
+        accepted = confidence == "high"
+        reference_interval = {
             "start": candidate["start"],
             "end": candidate["end"],
-            "review_required": not in_consensus or confidence != "high",
-            "reason": None if in_consensus and confidence == "high" else "insufficient_consensus",
+        }
+        results[episode] = {
+            "found": accepted,
+            "source": "audio_fingerprint",
+            "confidence": confidence,
+            "start": candidate["start"],
+            "end": candidate["end"],
+            "review_required": not accepted,
+            "reason": None if accepted else "insufficient_local_consensus",
             "support_episode_count": candidate["support_episode_count"],
             "consensus_score": candidate["score"],
             "reference_interval": reference_interval,
             "cache_hit": cache_hit,
-            "match_strategy": "season_consensus",
+            "match_strategy": "local_consensus",
             "reference_episode": None,
             "reference_source": "none",
             "reference_similarity": candidate["score"],
         }
 
+    confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
+    confidence = max(
+        (result["confidence"] for result in results.values()),
+        key=lambda value: confidence_rank.get(value, 0),
+        default="none",
+    )
+    accepted_results = [
+        result for result in results.values()
+        if result["confidence"] == "high" and not result["review_required"]
+    ]
+    primary_result = max(
+        accepted_results,
+        key=lambda result: (result["support_episode_count"], result["consensus_score"]),
+        default=None,
+    )
     return {
         "results": results,
-        "reference_episodes": reference_episodes,
-        "reference_interval": reference_interval,
-        "consensus_score": season_cluster["avg_score"],
+        "reference_episodes": sorted(
+            episode for episode, result in results.items()
+            if result["confidence"] == "high" and not result["review_required"]
+        ),
+        "reference_interval": primary_result["reference_interval"] if primary_result else None,
+        "consensus_score": primary_result["consensus_score"] if primary_result else None,
         "confidence": confidence,
-        "error": None if confidence == "high" else "insufficient_consensus",
+        "error": None if accepted_results else "insufficient_local_consensus",
     }
 
 
@@ -841,6 +831,7 @@ def _merge_zone_results(preferred_result, fallback_result):
 
 def _serialize_context_for_cache(context):
     payload = {
+        "algorithm_version": DETECTOR_RESULT_VERSION,
         "available": context["available"],
         "reason": context["reason"],
         "results": context["results"],
@@ -859,6 +850,8 @@ def _load_context_from_cache(context, cache_paths):
         return None
 
     payload = json.loads(result_file.read_text(encoding="utf-8"))
+    if payload.get("algorithm_version") != DETECTOR_RESULT_VERSION:
+        return None
     context["available"] = payload.get("available", False)
     context["reason"] = "cache_hit"
     cached_results = payload.get("results", context["results"])
@@ -880,12 +873,21 @@ def _load_context_from_cache(context, cache_paths):
     return context
 
 
+def _needs_reference_fallback(zone_result):
+    return zone_result["confidence"] == "none" or any(
+        result.get("review_required", True)
+        or result.get("confidence") != "high"
+        for result in zone_result["results"].values()
+    )
+
+
 def build_detector_context(episode_infos, config, temp_dir: Path, detector_inputs=None):
     cache_key = build_detector_cache_key(episode_infos, config, detector_inputs)
     cache_paths = _build_cache_paths(temp_dir, config, cache_key)
     aniskip_by_episode = (detector_inputs or {}).get("aniskip_by_episode", {})
     anilibria_by_episode = (detector_inputs or {}).get("anilibria_by_episode", {})
     context = {
+        "algorithm_version": DETECTOR_RESULT_VERSION,
         "enabled": config["enabled"],
         "available": False,
         "reason": None,
@@ -962,14 +964,7 @@ def build_detector_context(episode_infos, config, temp_dir: Path, detector_input
         for zone_type in ["op", "ed"]:
             print(f"[DETECTOR] zone analysis start: zone={zone_type}")
             zone_result = _build_zone_results(zone_tracks[zone_type], config, zone_type)
-            should_try_reference = zone_result["confidence"] == "none" or (
-                zone_type == "ed"
-                and any(
-                    result.get("review_required", True)
-                    or result.get("confidence") != "high"
-                    for result in zone_result["results"].values()
-                )
-            )
+            should_try_reference = _needs_reference_fallback(zone_result)
             if should_try_reference:
                 reference_result = _build_reference_results(
                     zone_tracks[zone_type],
@@ -1012,11 +1007,13 @@ def build_detector_context(episode_infos, config, temp_dir: Path, detector_input
         ):
             context["reason"] = "reference_match_used"
         elif all(confidence == "high" for confidence in context["zone_confidences"].values() if confidence != "none"):
-            context["reason"] = "season_consensus_only"
+            context["reason"] = "local_consensus_only"
 
         debug_payload = {
+            "algorithm_version": DETECTOR_RESULT_VERSION,
             "cache_key": cache_key,
             "reason": context["reason"],
+            "results": context["results"],
             "reference_episodes": context["reference_episodes"],
             "reference_intervals": context["reference_intervals"],
             "consensus_scores": context["consensus_scores"],
