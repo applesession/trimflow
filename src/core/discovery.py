@@ -10,7 +10,6 @@ def extract_episode_number(filename: str):
         r"\[(\d{1,4})[\s_]+of[\s_]+(?:\d{1,4}|[Xx]{1,4})\]",
         r"\[(\d{1,4})\]",
         r"[Ss]\d{1,2}[Ee](\d{1,4})",
-        r"[\s._-](\d{1,4})[\s._-]",
         r"[Ee]pisode[\s._-]*(\d{1,4})",
     ]
 
@@ -18,6 +17,10 @@ def extract_episode_number(filename: str):
         match = re.search(pattern, filename)
         if match:
             return int(match.group(1))
+
+    generic_matches = re.findall(r"(?<=[\s._-])(\d{1,4})(?=[\s._-])", filename)
+    if generic_matches:
+        return int(generic_matches[-1])
 
     return None
 

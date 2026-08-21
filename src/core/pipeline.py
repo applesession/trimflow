@@ -518,13 +518,23 @@ def build_multi_season_timestamps(manifest_episodes):
     return timestamps
 
 
-def renumber_season_part_episodes(manifest_episodes, season, episode_offset):
+def renumber_season_part_episodes(
+    manifest_episodes,
+    season,
+    episode_offset,
+    source_episode_start=1,
+):
     return [
         {
             **episode,
             "season": int(season),
             "source_episode": int(episode["episode"]),
-            "episode": int(episode_offset) + int(episode["episode"]),
+            "episode": (
+                int(episode_offset)
+                + int(episode["episode"])
+                - int(source_episode_start)
+                + 1
+            ),
         }
         for episode in manifest_episodes
     ]
@@ -1811,7 +1821,7 @@ def process_multi_season_job(job, runtime_status_path=None):
             )
             print(
                 f"[SEASON] {season}: found {len(episodes)} episodes, "
-                f"part {part_index}, range 1-{episodes[-1]}"
+                f"part {part_index}, range {episodes[0]}-{episodes[-1]}"
             )
             discovered.append((season, part_index, part, part_dir, episodes))
 
@@ -1848,7 +1858,9 @@ def process_multi_season_job(job, runtime_status_path=None):
             subjob = deepcopy(job)
             subjob["season"] = season
             subjob["episodes_range"] = (
-                "001" if len(episodes) == 1 else f"001-{episodes[-1]:03d}"
+                f"{episodes[0]:03d}"
+                if len(episodes) == 1
+                else f"{episodes[0]:03d}-{episodes[-1]:03d}"
             )
             subjob["processing_mode"] = "compilation"
             subjob["source"] = {"type": "local", "input_dir": str(part_dir)}
@@ -1877,6 +1889,7 @@ def process_multi_season_job(job, runtime_status_path=None):
                 season_manifest.get("episodes", []),
                 season,
                 episode_offset,
+                source_episode_start=episodes[0],
             ))
             episode_offsets[season] = episode_offset + len(episodes)
 

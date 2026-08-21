@@ -559,6 +559,19 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             [(5, 1, 13), (5, 2, 14)],
         )
 
+    def test_later_season_part_keeps_continuous_source_numbering(self):
+        episodes = renumber_season_part_episodes(
+            [{"episode": 14}, {"episode": 15}],
+            season=5,
+            episode_offset=13,
+            source_episode_start=14,
+        )
+
+        self.assertEqual(
+            [(episode["season"], episode["source_episode"], episode["episode"]) for episode in episodes],
+            [(5, 14, 14), (5, 15, 15)],
+        )
+
     def _mock_render_plan(self, episode_info, **kwargs):
         episode = episode_info["episode"]
         return {

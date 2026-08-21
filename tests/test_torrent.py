@@ -95,6 +95,21 @@ class TorrentSelectionTests(unittest.TestCase):
         self.assertEqual(episodes, [1, 2, 3])
 
     @patch("core.torrent.prepare_torrent_metadata")
+    def test_discovers_contiguous_season_part_starting_after_one(self, mock_prepare):
+        mock_prepare.return_value = (Path("release.torrent"), [
+            {"index": 14, "path": "Show [014].mkv"},
+            {"index": 15, "path": "Show [015].mkv"},
+            {"index": 16, "path": "Show [016].mkv"},
+        ])
+
+        episodes = discover_torrent_episode_numbers(
+            "magnet:?xt=urn:btih:test",
+            self.make_temp_dir(),
+        )
+
+        self.assertEqual(episodes, [14, 15, 16])
+
+    @patch("core.torrent.prepare_torrent_metadata")
     def test_discovery_rejects_internal_gap(self, mock_prepare):
         mock_prepare.return_value = (Path("release.torrent"), [
             {"index": 1, "path": "Show [001].mkv"},
@@ -219,6 +234,17 @@ class TorrentSelectionTests(unittest.TestCase):
         ], {1156})
 
         self.assertEqual(selected[0]["episode"], 1156)
+
+    def test_title_season_number_does_not_override_episode_number(self):
+        selected = select_torrent_episode_files([
+            {"index": 1, "path": "Kuroko no Basuke 3 - 01 [DiWilliam].mkv"},
+            {"index": 2, "path": "Kuroko no Basuke 3 - 02 [DiWilliam].mkv"},
+        ], {1, 2})
+
+        self.assertEqual(
+            [(item["episode"], item["index"]) for item in selected],
+            [(1, 1), (2, 2)],
+        )
 
     def test_selects_legacy_avi_episode(self):
         selected = select_torrent_episode_files([{

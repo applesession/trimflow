@@ -197,7 +197,7 @@ def discover_torrent_episode_numbers(magnet, download_dir, path_filter=None, tim
     if not episodes:
         raise RuntimeError("Torrent contains no detectable episode files")
 
-    expected = set(range(1, max(episodes) + 1))
+    expected = set(range(min(episodes), max(episodes) + 1))
     missing = sorted(expected - episodes)
     if missing:
         raise RuntimeError(f"Torrent season has missing episodes: {missing}")
