@@ -464,6 +464,26 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("ffmpeg code 228", message)
         self.assertIn("Too many packets buffered", message)
 
+    def test_error_message_does_not_treat_codec_tag_as_http_status(self):
+        error = (
+            "RuntimeError('Audio stream not found: "
+            "Kuroko no Basket - 21 [BDRip 1920x1080 x264 FLAC].mkv')"
+        )
+
+        message = format_error_message("job_failed:Баскетбол Куроко", error)
+
+        self.assertIn("Audio stream not found", message)
+        self.assertIn("x264 FLAC", message)
+        self.assertNotIn("Причина: `264 FLAC`", message)
+
+    def test_error_message_formats_explicit_http_client_error(self):
+        message = format_error_message(
+            "job_failed:Test",
+            "HTTPError('404 Client Error: Not Found for url: https://example.test/file')",
+        )
+
+        self.assertIn("Причина: `404 Not Found`", message)
+
     def test_vk_publish_success_message_formats_markdown_with_partial_warning(self):
         message = format_vk_publish_success_message(
             {

@@ -516,13 +516,12 @@ def normalize_notification_error_reason(error):
     if called_process_match:
         return f"ffmpeg exited with code {called_process_match.group(1)}"
 
-    gateway_match = re.search(r"(\d{3})\s+Server Error:\s*([^']+?)\s+for url:", text)
-    if gateway_match:
-        return f"{gateway_match.group(1)} {gateway_match.group(2).strip()}"
-
-    http_match = re.search(r"(\d{3}\s+[A-Za-z][A-Za-z -]+)", text)
+    http_match = re.search(
+        r"\b(\d{3})\s+(?:Server|Client)\s+Error:\s*([^'\r\n]+?)(?:\s+for url:|['\r\n]|$)",
+        text,
+    )
     if http_match:
-        return http_match.group(1).strip()
+        return f"{http_match.group(1)} {http_match.group(2).strip()}"
 
     runtime_vk_match = re.search(r"failed:\s*(.+)", text, re.DOTALL)
     if runtime_vk_match:
