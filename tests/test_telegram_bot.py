@@ -37,11 +37,13 @@ from lib.telegram_bot import (
     format_log_message_markdown,
     format_jobs_message,
     format_jobs_message_markdown,
+    format_main_worker_section,
     format_next_message,
     format_publish_success_message,
     format_render_interrupted_message,
     format_vk_publish_error_message,
     format_vk_publish_success_message,
+    format_upscale_worker_section,
     get_jobs_pagination_page,
     get_pending_action,
     get_display_title,
@@ -693,8 +695,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(keyboard["keyboard"][0][1]["text"], "Очередь")
         self.assertEqual(keyboard["keyboard"][1][0]["text"], "Ошибки")
         self.assertEqual(keyboard["keyboard"][1][1]["text"], "Лог")
-        self.assertEqual(keyboard["keyboard"][2][0]["text"], "4K")
-        self.assertEqual(keyboard["keyboard"][2][1]["text"], "Помощь")
+        self.assertEqual(keyboard["keyboard"][2], [{"text": "Помощь"}])
 
     def test_normalize_command_text_maps_button_aliases(self):
         self.assertEqual(normalize_command_text("Статус"), "Статус")
@@ -702,13 +703,17 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(normalize_command_text("Очередь"), "/jobs")
         self.assertEqual(normalize_command_text("Ошибки"), "/errors")
         self.assertEqual(normalize_command_text("Лог"), "/log")
-        self.assertEqual(normalize_command_text("4K"), "/upscale")
+        self.assertEqual(normalize_command_text("4K"), "4K")
         self.assertEqual(normalize_command_text("Помощь"), "/help")
         self.assertEqual(normalize_command_text("/jobs"), "/jobs")
 
     def test_status_command_is_removed(self):
         self.assertEqual(handle_command({}, "/status"), "Неизвестная команда. Напиши /help")
         self.assertNotIn("/status", build_help_message())
+
+    def test_upscale_command_is_removed(self):
+        self.assertEqual(handle_command({}, "/upscale"), "Неизвестная команда. Напиши /help")
+        self.assertNotIn("/upscale", build_help_message())
 
     @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
     @patch("lib.telegram_bot.load_state", return_value={})
@@ -717,7 +722,8 @@ class TelegramBotTests(unittest.TestCase):
         response = handle_command({}, "/current")
 
         self.assertEqual(response["parse_mode"], "MarkdownV2")
-        self.assertIn("Пайплайн свободен", response["text"])
+        self.assertIn("Основной worker свободен", response["text"])
+        self.assertIn("4K worker свободен", response["text"])
 
     def test_elapsed_format_supports_minutes_and_hours(self):
         now = datetime(2026, 6, 13, 12, 31, tzinfo=timezone.utc)
@@ -753,9 +759,9 @@ class TelegramBotTests(unittest.TestCase):
             "last_run": None,
         }
 
-        message = format_current_message({})
+        message = format_main_worker_section({})
 
-        self.assertIn("Текущая обработка", message)
+        self.assertIn("Основной worker", message)
         self.assertIn("Русский тайтл", message)
         self.assertIn("Сезон 1 · серии `001-010`", message)
         self.assertIn("Этап: `вырезка сегментов`", message)
@@ -782,7 +788,7 @@ class TelegramBotTests(unittest.TestCase):
             },
         }
 
-        message = format_current_message({})
+        message = format_main_worker_section({})
 
         self.assertIn("Hero \\* Academy", message)
         self.assertIn("Сезоны `1-5`", message)
@@ -799,9 +805,9 @@ class TelegramBotTests(unittest.TestCase):
             "current_job": None,
         }
 
-        message = format_current_message({})
+        message = format_main_worker_section({})
 
-        self.assertIn("Worker запущен", message)
+        self.assertIn("Основной worker запущен", message)
         self.assertIn("Этап: `обработка очереди`", message)
 
     @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
@@ -821,9 +827,9 @@ class TelegramBotTests(unittest.TestCase):
             },
         }
 
-        message = format_current_message({})
+        message = format_main_worker_section({})
 
-        self.assertIn("Worker аварийно остановлен", message)
+        self.assertIn("Основной worker аварийно остановлен", message)
         self.assertIn("Последняя серия: `3`/`10`", message)
 
     @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
@@ -854,9 +860,9 @@ class TelegramBotTests(unittest.TestCase):
             },
         }
 
-        message = format_current_message({})
+        message = format_main_worker_section({})
 
-        self.assertIn("Пайплайн свободен", message)
+        self.assertIn("Основной worker свободен", message)
         self.assertIn("Очередь пуста", message)
         self.assertIn("Последнее выполнение", message)
         self.assertIn("Русский тайтл", message)
@@ -868,10 +874,92 @@ class TelegramBotTests(unittest.TestCase):
     def test_current_message_shows_pending_queue_when_idle(self, _mock_runtime, _mock_state, _mock_lock):
         save_jobs({}, [{"title": "Waiting", "season": 1, "episodes_range": "001"}])
 
-        message = format_current_message({})
+        message = format_main_worker_section({})
 
-        self.assertIn("Ожидает следующего запуска", message)
+        self.assertIn("Основной worker ожидает запуска", message)
         self.assertIn("В очереди: `1`", message)
+
+    @patch("lib.telegram_bot.get_upscale_worker_lock_state", return_value=("alive", {"pid": 456}))
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_upscale_section_shows_active_job(self, mock_load_runtime_status, _mock_lock):
+        mock_load_runtime_status.return_value = {
+            "run_status": "running",
+            "updated_at": "2026-06-13T10:03:00+00:00",
+            "current_job": {
+                "title": "Hero * 4K",
+                "season": 2,
+                "episodes_range": "001-025",
+                "stage": "upscale_render",
+                "started_at": "2026-06-13T10:01:00+00:00",
+                "current_episode": 7,
+                "total_episodes": 25,
+            },
+        }
+
+        message = format_upscale_worker_section({})
+
+        self.assertIn("🚀 *4K worker*\n\n🎬", message)
+        self.assertIn("`001-025`\n\n📍 Этап", message)
+        self.assertIn("4K worker", message)
+        self.assertIn("Hero \\* 4K", message)
+        self.assertIn("Сезон 2 · серии `001-025`", message)
+        self.assertIn("Этап: `4K upscale`", message)
+        self.assertIn("Серия: `7`/`25`", message)
+
+    @patch("lib.telegram_bot.get_upscale_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_upscale_section_detects_dead_worker(self, mock_load_runtime_status, _mock_lock):
+        mock_load_runtime_status.return_value = {
+            "run_status": "running",
+            "current_stage": "upscale_render",
+            "current_job": {
+                "title": "Interrupted 4K",
+                "season": 1,
+                "episodes_range": "001-012",
+                "current_episode": 4,
+                "total_episodes": 12,
+            },
+        }
+
+        message = format_upscale_worker_section({})
+
+        self.assertIn("4K worker аварийно остановлен", message)
+        self.assertIn("Последняя серия: `4`/`12`", message)
+
+    @patch("lib.telegram_bot.get_upscale_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_runtime_status", return_value={"run_status": "idle"})
+    def test_upscale_section_shows_pending_queue(self, _mock_runtime, _mock_lock):
+        save_jobs({}, [{
+            "title": "Waiting 4K",
+            "season": 1,
+            "episodes_range": "001",
+            "processing_mode": "upscale_4k",
+        }])
+
+        message = format_upscale_worker_section({})
+
+        self.assertIn("4K worker ожидает запуска", message)
+        self.assertIn("4K worker ожидает запуска*\n\n📋 В очереди: `1`", message)
+
+    @patch("lib.telegram_bot.get_upscale_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_upscale_section_shows_last_run_compactly(self, mock_load_runtime_status, _mock_lock):
+        mock_load_runtime_status.return_value = {
+            "run_status": "completed",
+            "last_run": {
+                "title": "Finished 4K",
+                "status": "completed",
+                "current_episode": 12,
+                "total_episodes": 12,
+            },
+        }
+
+        message = format_upscale_worker_section({})
+
+        self.assertIn("4K worker свободен", message)
+        self.assertIn("4K worker свободен*\n\n📋 Очередь пуста", message)
+        self.assertIn("*Последнее выполнение*\n🎬 *Finished 4K*", message)
+        self.assertIn("`успешно` · `серия 12/12`", message)
 
     @patch("lib.telegram_bot.load_runtime_errors")
     def test_errors_message_shows_empty_state(self, mock_load_runtime_errors):

@@ -75,7 +75,7 @@ def build_main_keyboard():
         "keyboard": [
             [{"text": "Текущая"}, {"text": "Очередь"}],
             [{"text": "Ошибки"}, {"text": "Лог"}],
-            [{"text": "4K"}, {"text": "Помощь"}],
+            [{"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -530,7 +530,8 @@ def normalize_notification_error_reason(error):
 
 
 def format_markdown_code(text):
-    return "`" + str(text or "").replace("\\", "\\\\").replace("`", "\\`") + "`"
+    value = "" if text is None else str(text)
+    return "`" + value.replace("\\", "\\\\").replace("`", "\\`") + "`"
 
 
 def format_skip_counts_line(quality_summary):
@@ -794,12 +795,20 @@ def format_job_scope_markdown(job):
     return " · ".join(parts)
 
 
-def get_main_worker_lock_state():
-    lock_path = ensure_runtime_paths()["lock_path"]
+def get_worker_lock_state(lock_path):
     if not lock_path.exists():
         return "missing", None
     stale, payload = is_lock_stale(lock_path)
     return ("stale" if stale else "alive"), payload
+
+
+def get_main_worker_lock_state():
+    return get_worker_lock_state(ensure_runtime_paths()["lock_path"])
+
+
+def get_upscale_worker_lock_state():
+    paths = ensure_runtime_paths()
+    return get_worker_lock_state(paths["runtime_dir"] / "upscale.lock")
 
 
 def format_runtime_stage_ru(stage):
@@ -971,7 +980,7 @@ def sanitize_code_block_content(text):
     return str(text or "").replace("```", "``\u200b`")
 
 
-def format_current_message(config):
+def format_main_worker_section(config):
     runtime_status = load_runtime_status()
     run_status = runtime_status.get("run_status")
     current_job = runtime_status.get("current_job") or {}
@@ -983,7 +992,7 @@ def format_current_message(config):
     updated_at = runtime_status.get("updated_at")
 
     if run_status == "running" and lock_state != "alive":
-        lines = ["⚠️ *Worker аварийно остановлен*"]
+        lines = ["⚠️ *Основной worker аварийно остановлен*"]
         if current_job:
             lines.extend([
                 "",
@@ -1003,7 +1012,7 @@ def format_current_message(config):
 
     if lock_state == "alive" and not current_job:
         return "\n".join([
-            "⏳ *Worker запущен*",
+            "⏳ *Основной worker запущен*",
             "",
             f"📍 Этап: {format_markdown_code(format_runtime_stage_ru(runtime_status.get('current_stage') or 'processing'))}",
             f"📋 Ожидает в очереди: {format_markdown_code(len(pending_jobs))}",
@@ -1014,7 +1023,7 @@ def format_current_message(config):
 
     if run_status == "running" and current_job:
         return "\n".join([
-            "⚙️ *Текущая обработка*",
+            "⚙️ *Основной worker*",
             "",
             f"🎬 *{escape_markdown_v2(get_display_title(current_job))}*",
             f"└ {format_job_scope_markdown(current_job)}",
@@ -1034,7 +1043,7 @@ def format_current_message(config):
 
     state = load_state(config)
     lines = [
-        "⏳ *Ожидает следующего запуска*" if pending_jobs else "💤 *Пайплайн свободен*",
+        "⏳ *Основной worker ожидает запуска*" if pending_jobs else "💤 *Основной worker свободен*",
         "",
         f"📋 В очереди: {format_markdown_code(len(pending_jobs))}" if pending_jobs else "📋 Очередь пуста",
     ]
@@ -1062,30 +1071,85 @@ def format_current_message(config):
     return "\n".join(lines)
 
 
-def format_upscale_message():
+def format_upscale_worker_section(config):
     status_path = ensure_runtime_paths()["runtime_dir"] / "upscale_status.json"
     runtime_status = load_runtime_status(status_path)
+    run_status = runtime_status.get("run_status")
     current_job = runtime_status.get("current_job") or {}
     last_run = runtime_status.get("last_run") or {}
-    if runtime_status.get("run_status") == "running" and current_job:
+    pending_jobs = load_jobs(config, status="pending", processing_mode="upscale_4k")
+    lock_state, _lock_payload = get_upscale_worker_lock_state()
+    started_at = current_job.get("started_at") or runtime_status.get("run_started_at")
+    updated_at = runtime_status.get("updated_at")
+
+    if run_status == "running" and lock_state != "alive":
+        lines = ["⚠️ *4K worker аварийно остановлен*", ""]
+        if current_job:
+            lines.extend([
+                f"🎬 *{escape_markdown_v2(get_display_title(current_job))}*",
+                f"└ {format_job_scope_markdown(current_job)}",
+                "",
+                f"📍 Последний этап: {format_markdown_code(format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage')))}",
+                f"📺 Последняя серия: {format_markdown_code(current_job.get('current_episode') or '?')}/{format_markdown_code(current_job.get('total_episodes') or '?')}",
+            ])
+        lines.append(f"📋 В очереди 4K: {format_markdown_code(len(pending_jobs))}")
+        return "\n".join(lines)
+
+    if lock_state == "alive" and not current_job:
         return "\n".join([
-            "Текущий 4K upscale",
+            "⏳ *4K worker запущен*",
             "",
-            f"Тайтл: {get_display_title(current_job)}",
-            *_navigation_lines(current_job),
-            f"Серия: {current_job.get('current_episode') or 'подготовка'} / {current_job.get('total_episodes') or '?'}",
-            f"Этап: {format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage'))}",
-            f"Старт: {format_datetime_ru(current_job.get('started_at') or runtime_status.get('run_started_at'))}",
+            f"📍 Этап: {format_markdown_code(format_runtime_stage_ru(runtime_status.get('current_stage') or 'processing'))}",
+            f"📋 В очереди 4K: {format_markdown_code(len(pending_jobs))}",
+            f"🕒 Старт: {format_markdown_code(format_datetime_ru(runtime_status.get('run_started_at')))}",
+            f"⏱ Работает: {format_markdown_code(format_elapsed_ru(runtime_status.get('run_started_at')))}",
         ])
-    if last_run:
+
+    if run_status == "running" and current_job:
         return "\n".join([
-            "4K-worker сейчас свободен",
+            "🚀 *4K worker*",
             "",
-            f"Последний тайтл: {get_display_title(last_run)}",
-            f"Статус: {'успешно' if last_run.get('status') == 'completed' else 'с ошибкой'}",
-            f"Последняя серия: {last_run.get('current_episode') or '?'} / {last_run.get('total_episodes') or '?'}",
+            f"🎬 *{escape_markdown_v2(get_display_title(current_job))}*",
+            f"└ {format_job_scope_markdown(current_job)}",
+            "",
+            f"📍 Этап: {format_markdown_code(format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage')))}",
+            f"📺 Серия: {format_markdown_code(current_job.get('current_episode') or '?')}/{format_markdown_code(current_job.get('total_episodes') or '?')}",
+            f"🕒 Старт: {format_markdown_code(format_datetime_ru(started_at))}",
+            f"⏱ Работает: {format_markdown_code(format_elapsed_ru(started_at))}",
+            f"🔄 Обновлено: {format_markdown_code(format_datetime_ru(updated_at))}",
         ])
-    return "4K-worker сейчас свободен\nИстория запусков пока пуста"
+
+    lines = [
+        "⏳ *4K worker ожидает запуска*" if pending_jobs else "💤 *4K worker свободен*",
+        "",
+        f"📋 В очереди: {format_markdown_code(len(pending_jobs))}" if pending_jobs else "📋 Очередь пуста",
+    ]
+    if not last_run:
+        return "\n".join(lines)
+
+    result = "успешно" if last_run.get("status") == "completed" else "ошибка"
+    episode = last_run.get("current_episode")
+    total = last_run.get("total_episodes")
+    details = [result]
+    if episode or total:
+        details.append(f"серия {episode or '?'}/{total or '?'}")
+    finished_at = last_run.get("finished_at") or runtime_status.get("run_finished_at")
+    if finished_at:
+        details.append(format_datetime_ru(finished_at))
+    lines.extend([
+        "",
+        "*Последнее выполнение*",
+        f"🎬 *{escape_markdown_v2(get_display_title(last_run))}*",
+        f"└ {' · '.join(format_markdown_code(item) for item in details)}",
+    ])
+    return "\n".join(lines)
+
+
+def format_current_message(config):
+    return "\n\n".join([
+        format_main_worker_section(config),
+        format_upscale_worker_section(config),
+    ])
 
 
 def format_errors_message(limit=5):
@@ -1970,7 +2034,6 @@ def normalize_command_text(text):
         "Очередь": "/jobs",
         "Ошибки": "/errors",
         "Лог": "/log",
-        "4K": "/upscale",
         "Помощь": "/help",
     }
     return aliases.get(normalized, normalized)
@@ -2373,8 +2436,7 @@ def build_help_message():
         "Команды бота",
         "",
         "/start - краткая справка",
-        "/current - состояние worker, очереди и текущей обработки",
-        "/upscale - состояние 4K-worker",
+        "/current - состояние основного и 4K worker",
         "/jobs - показать аниме в очереди (с приоритетом выполнения)",
         "/errors - последние ошибки выполнения",
         "/log - хвост cron.log",
@@ -2413,8 +2475,6 @@ def handle_command(config, text):
             "text": format_current_message(config),
             "parse_mode": "MarkdownV2",
         }
-    if text.startswith("/upscale"):
-        return format_upscale_message()
     if text.startswith("/errors"):
         return format_errors_message()
     if text.startswith("/log"):
