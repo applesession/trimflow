@@ -217,7 +217,7 @@ python src/telegram_bot.py
 Поддерживаемые команды:
 - `/start` — краткая справка
 - `/help` — формат команд
-- `/status` — lock, количество job'ов, время последнего discovery
+- `/current` — состояние worker, очереди и текущей обработки
 - `/upscale` — состояние 4K-worker
 - `/jobs` — последние job'ы из очереди
 - `/audiofix-on <номер>` — включить audio recovery; диапазоны: `1-3,5`
@@ -263,7 +263,7 @@ Audio recovery по умолчанию выключен. При opt-in worker а
 Замечания:
 - бот использует `long polling`, не webhook;
 - доступ ограничен только чатами из `TELEGRAM_ALLOWED_CHAT_IDS`;
-- для быстрых действий бот показывает reply-кнопки `Статус`, `Очередь`, `Помощь`;
+- для быстрых действий бот показывает reply-кнопки `Текущая`, `Очередь`, `Ошибки`, `Лог`, `4K`, `Помощь`;
 - `telegram_state.json` хранит `last_update_id`, записывается атомарно и не должен коммититься в git;
 - повреждённый state сохраняется как `telegram_state.json.corrupt.<timestamp>`, бот запускается с default state.
 

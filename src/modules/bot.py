@@ -3,7 +3,7 @@ import os
 import re
 import secrets
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -26,7 +26,6 @@ from shared.config import load_completed_jobs, load_jobs, load_state, save_compl
 from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
 from shared.db import (
     get_discovery_blacklist,
-    get_episode_tracking_counts,
     insert_one_job,
     remove_job as _db_cancel_job,
     remove_pending_job as _db_remove_job,
@@ -43,7 +42,7 @@ from shared.helpers import (
     set_navigation_label,
 )
 from core.runner import build_execution_order
-from shared.runtime import ensure_runtime_paths, load_runtime_errors, load_runtime_status
+from shared.runtime import ensure_runtime_paths, is_lock_stale, load_runtime_errors, load_runtime_status
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -74,9 +73,9 @@ def format_reason_ru(reason):
 def build_main_keyboard():
     return {
         "keyboard": [
-            [{"text": "Статус"}, {"text": "Текущая"}],
-            [{"text": "Очередь"}, {"text": "Ошибки"}],
-            [{"text": "Лог"}, {"text": "Помощь"}],
+            [{"text": "Текущая"}, {"text": "Очередь"}],
+            [{"text": "Ошибки"}, {"text": "Лог"}],
+            [{"text": "4K"}, {"text": "Помощь"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -754,6 +753,55 @@ def format_datetime_ru(iso_value):
     return parsed.astimezone().strftime("%d.%m.%Y %H:%M")
 
 
+def format_elapsed_ru(started_at, now=None):
+    try:
+        started = datetime.fromisoformat(str(started_at))
+    except (TypeError, ValueError):
+        return "неизвестно"
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    total_minutes = max(0, int((current - started).total_seconds() // 60))
+    if total_minutes < 1:
+        return "меньше минуты"
+    hours, minutes = divmod(total_minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes or not parts:
+        parts.append(f"{minutes} мин")
+    return " ".join(parts)
+
+
+def format_job_scope_markdown(job):
+    processing_mode = str(job.get("processing_mode") or "compilation").strip().lower()
+    if processing_mode == "multi_season":
+        season_range = job.get("season_range") or (job.get("processing") or {}).get("season_range") or "?"
+        return f"Сезоны {format_markdown_code(season_range)}"
+
+    navigation_label = get_navigation_label(job)
+    episodes_range = job.get("episodes_range") or "?"
+    episode_label = "серия" if processing_mode == "single_episode" else "серии"
+    parts = []
+    if navigation_label:
+        parts.append(escape_markdown_v2(navigation_label))
+    parts.append(f"{episode_label} {format_markdown_code(episodes_range)}")
+    return " · ".join(parts)
+
+
+def get_main_worker_lock_state():
+    lock_path = ensure_runtime_paths()["lock_path"]
+    if not lock_path.exists():
+        return "missing", None
+    stale, payload = is_lock_stale(lock_path)
+    return ("stale" if stale else "alive"), payload
+
+
 def format_runtime_stage_ru(stage):
     mapping = {
         "cron_start": "запуск cron",
@@ -923,80 +971,95 @@ def sanitize_code_block_content(text):
     return str(text or "").replace("```", "``\u200b`")
 
 
-def format_status_message(config):
-    jobs = load_jobs(config)
-    state = load_state(config)
-    runtime_status = load_runtime_status()
-    current_job = runtime_status.get("current_job") or {}
-    active_title = (
-        get_display_title(current_job)
-        if runtime_status.get("run_status") == "running" and current_job
-        else None
-    )
-    episode_counts = get_episode_tracking_counts()
-
-    lines = [
-        "Статус пайплайна",
-        "",
-        f"Активная задача: {active_title or 'сейчас ничего не обрабатывается'}",
-        f"Аниме в очереди: {len(jobs)}",
-        f"Последнее обновление очереди: {format_datetime_ru(state.get('last_discovery_at'))}",
-        f"Эпизодов в очереди: {episode_counts['queued']}",
-        f"Завершённых эпизодов: {episode_counts['completed']}",
-        f"В blacklist discovery: {len(get_blacklist_entries(config))}",
-        "Выполнение может идти с приоритетом ongoing, даже если порядок в /jobs другой",
-    ]
-    return "\n".join(lines)
-
-
-def format_current_message():
+def format_current_message(config):
     runtime_status = load_runtime_status()
     run_status = runtime_status.get("run_status")
     current_job = runtime_status.get("current_job") or {}
     queue_progress = runtime_status.get("queue_progress") or {}
     last_run = runtime_status.get("last_run") or {}
+    pending_jobs = load_jobs(config, status="pending", exclude_processing_modes={"upscale_4k"})
+    lock_state, _lock_payload = get_main_worker_lock_state()
+    started_at = current_job.get("started_at") or runtime_status.get("run_started_at")
+    updated_at = runtime_status.get("updated_at")
+
+    if run_status == "running" and lock_state != "alive":
+        lines = ["⚠️ *Worker аварийно остановлен*"]
+        if current_job:
+            lines.extend([
+                "",
+                f"🎬 *{escape_markdown_v2(get_display_title(current_job))}*",
+                f"└ {format_job_scope_markdown(current_job)}",
+                "",
+                f"📍 Последний этап: {format_markdown_code(format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage')))}",
+                f"📺 Последняя серия: {format_markdown_code(current_job.get('current_episode') or '?')}/{format_markdown_code(current_job.get('total_episodes') or '?')}",
+            ])
+        lines.extend([
+            f"📋 Ожидает в очереди: {format_markdown_code(len(pending_jobs))}",
+            f"🕒 Последнее обновление: {format_markdown_code(format_datetime_ru(updated_at))}",
+            "",
+            "Восстановление при следующем запуске",
+        ])
+        return "\n".join(lines)
+
+    if lock_state == "alive" and not current_job:
+        return "\n".join([
+            "⏳ *Worker запущен*",
+            "",
+            f"📍 Этап: {format_markdown_code(format_runtime_stage_ru(runtime_status.get('current_stage') or 'processing'))}",
+            f"📋 Ожидает в очереди: {format_markdown_code(len(pending_jobs))}",
+            f"🕒 Старт: {format_markdown_code(format_datetime_ru(runtime_status.get('run_started_at')))}",
+            f"⏱ Работает: {format_markdown_code(format_elapsed_ru(runtime_status.get('run_started_at')))}",
+            f"🔄 Обновлено: {format_markdown_code(format_datetime_ru(updated_at))}",
+        ])
 
     if run_status == "running" and current_job:
         return "\n".join([
-            "Текущая обработка",
+            "⚙️ *Текущая обработка*",
             "",
-            f"Тайтл: {get_display_title(current_job)}",
-            *_navigation_lines(current_job),
-            f"Эпизоды: {current_job.get('episodes_range', '?')}",
-            f"Этап: {format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage'))}",
+            f"🎬 *{escape_markdown_v2(get_display_title(current_job))}*",
+            f"└ {format_job_scope_markdown(current_job)}",
+            "",
+            f"📍 Этап: {format_markdown_code(format_runtime_stage_ru(current_job.get('stage') or runtime_status.get('current_stage')))}",
+            f"📺 Серия: {format_markdown_code(current_job.get('current_episode') or '?')}/{format_markdown_code(current_job.get('total_episodes') or '?')}",
             (
-                "Прогресс очереди: "
-                f"{queue_progress.get('current_job_index', 0)}/{queue_progress.get('total_jobs', 0)}"
-                f" | готово {queue_progress.get('jobs_processed', 0)}"
-                f" | ошибок {queue_progress.get('jobs_failed', 0)}"
+                f"📋 Очередь: {format_markdown_code(queue_progress.get('current_job_index', 0))}/"
+                f"{format_markdown_code(queue_progress.get('total_jobs', 0))} · "
+                f"готово {format_markdown_code(queue_progress.get('jobs_processed', 0))} · "
+                f"ошибок {format_markdown_code(queue_progress.get('jobs_failed', 0))}"
             ),
-            f"Текущая серия: {current_job.get('current_episode') or 'ещё не началась'}",
-            f"Всего серий: {current_job.get('total_episodes') or 'неизвестно'}",
-            f"Файл серии: {current_job.get('current_episode_file') or 'ещё не выбран'}",
-            f"Старт: {format_datetime_ru(current_job.get('started_at') or runtime_status.get('run_started_at'))}",
+            f"🕒 Старт: {format_markdown_code(format_datetime_ru(started_at))}",
+            f"⏱ Работает: {format_markdown_code(format_elapsed_ru(started_at))}",
+            f"🔄 Обновлено: {format_markdown_code(format_datetime_ru(updated_at))}",
         ])
 
+    state = load_state(config)
+    lines = [
+        "⏳ *Ожидает следующего запуска*" if pending_jobs else "💤 *Пайплайн свободен*",
+        "",
+        f"📋 В очереди: {format_markdown_code(len(pending_jobs))}" if pending_jobs else "📋 Очередь пуста",
+    ]
     if last_run:
-        return "\n".join([
-            "Сейчас ничего не обрабатывается",
+        result = "успешно" if last_run.get("status") == "completed" else "ошибка"
+        episode = last_run.get("current_episode")
+        total = last_run.get("total_episodes")
+        details = [result]
+        if episode or total:
+            details.append(f"серия {episode or '?'}/{total or '?'}")
+        details.append(format_datetime_ru(last_run.get("finished_at") or runtime_status.get("run_finished_at")))
+        lines.extend([
             "",
-            "Последний запуск",
-            f"Тайтл: {get_display_title(last_run)}",
-            f"Статус: {'успешно' if last_run.get('status') == 'completed' else 'с ошибкой'}",
-            f"Финальный этап: {format_runtime_stage_ru(last_run.get('stage') or runtime_status.get('current_stage'))}",
-            f"Завершено: {format_datetime_ru(last_run.get('finished_at') or runtime_status.get('run_finished_at'))}",
-            (
-                "Прогресс очереди: "
-                f"готово {last_run.get('jobs_processed', 0)}"
-                f" | ошибок {last_run.get('jobs_failed', 0)}"
-            ),
-            f"Последняя серия: {last_run.get('current_episode') or 'неизвестно'} / {last_run.get('total_episodes') or 'неизвестно'}",
+            "*Последнее выполнение*",
+            f"🎬 *{escape_markdown_v2(get_display_title(last_run))}*",
+            f"└ {' · '.join(format_markdown_code(item) for item in details)}",
         ])
-
-    return "\n".join([
-        "Сейчас ничего не обрабатывается",
-        "История запусков пока пуста",
-    ])
+    else:
+        lines.extend(["", "История запусков пока пуста"])
+    if state.get("last_discovery_at"):
+        lines.extend([
+            "",
+            f"🔄 Очередь обновлена: {format_markdown_code(format_datetime_ru(state['last_discovery_at']))}",
+        ])
+    return "\n".join(lines)
 
 
 def format_upscale_message():
@@ -1156,27 +1219,15 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
 
     def _job_line(index, job):
         title = escape_markdown_v2(get_display_title(job))
-        navigation_label = get_navigation_label(job)
-        eps = job.get("episodes_range", "?")
-        processing_mode = (job.get("processing_mode") or "").strip().lower()
-        is_single = processing_mode == "single_episode"
-        eps_label = "серия" if is_single else "серии"
         mode_labels = []
         if job.get("processing_mode") == "upscale_4k":
             mode_labels.append("`4K`")
         if (job.get("processing") or {}).get("audio_recovery_enabled"):
             mode_labels.append("`audiofix`")
         mode_label = " · " + " · ".join(mode_labels) if mode_labels else ""
-        if processing_mode == "multi_season":
-            season_range = (job.get("processing") or {}).get("season_range") or "?"
-            details = [f"Сезоны `{season_range}`"]
-        else:
-            details = [f"{eps_label} `{eps}`"]
-            if navigation_label:
-                details.insert(0, escape_markdown_v2(navigation_label))
         return [
             f"*{index}\\. {title}*",
-            f"└ {' · '.join(details)}{mode_label}",
+            f"└ {format_job_scope_markdown(job)}{mode_label}",
         ]
 
     title_word = "тайтл" if total == 1 else ("тайтла" if 2 <= total <= 4 else "тайтлов")
@@ -1915,11 +1966,11 @@ def confirm_pending_action(config, chat_id, text):
 def normalize_command_text(text):
     normalized = str(text or "").strip()
     aliases = {
-        "Статус": "/status",
         "Текущая": "/current",
         "Очередь": "/jobs",
         "Ошибки": "/errors",
         "Лог": "/log",
+        "4K": "/upscale",
         "Помощь": "/help",
     }
     return aliases.get(normalized, normalized)
@@ -2322,8 +2373,7 @@ def build_help_message():
         "Команды бота",
         "",
         "/start - краткая справка",
-        "/status - статус очереди и runtime",
-        "/current - текущее или последнее выполнение",
+        "/current - состояние worker, очереди и текущей обработки",
         "/upscale - состояние 4K-worker",
         "/jobs - показать аниме в очереди (с приоритетом выполнения)",
         "/errors - последние ошибки выполнения",
@@ -2358,10 +2408,11 @@ def handle_command(config, text):
         return build_help_message()
     if text.startswith("/help"):
         return build_help_message()
-    if text.startswith("/status"):
-        return format_status_message(config)
     if text.startswith("/current"):
-        return format_current_message()
+        return {
+            "text": format_current_message(config),
+            "parse_mode": "MarkdownV2",
+        }
     if text.startswith("/upscale"):
         return format_upscale_message()
     if text.startswith("/errors"):

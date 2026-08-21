@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -29,6 +30,7 @@ from lib.telegram_bot import (
     build_help_message,
     format_current_message,
     format_discovery_message,
+    format_elapsed_ru,
     format_error_message,
     format_errors_message,
     format_log_message,
@@ -38,12 +40,12 @@ from lib.telegram_bot import (
     format_next_message,
     format_publish_success_message,
     format_render_interrupted_message,
-    format_status_message,
     format_vk_publish_error_message,
     format_vk_publish_success_message,
     get_jobs_pagination_page,
     get_pending_action,
     get_display_title,
+    handle_command,
     handle_update,
     is_allowed_chat,
     load_telegram_state,
@@ -526,35 +528,6 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("🔧 Этап: `vk_publish`", message)
         self.assertIn("Причина: `504 Gateway Time-out`", message)
 
-    def test_status_command_reads_jobs_and_state(self):
-        tmp_dir = self.make_workspace_temp_dir()
-        config = self.make_config(tmp_dir)
-        save_jobs(config, [{"title": "A", "season": 1, "episodes_range": "001"}])
-        save_state(config, {
-            "schema_version": 2,
-            "last_discovery_at": "2026-06-07T10:00:00+00:00",
-            "queued_release_episodes": {"1:001": True},
-            "completed_release_episodes": {"1:001": True, "1:002": True},
-            "job_index": {},
-            "skipped_items": [],
-        })
-        mark_episodes_queued(1, [3])
-        mark_episodes_completed(1, [1, 2])
-
-        with patch("lib.telegram_bot.load_runtime_status", return_value={
-            "run_status": "running",
-            "current_job": {"title": "A"},
-        }):
-            message = format_status_message(config)
-
-        self.assertIn("Активная задача: A", message)
-        self.assertIn("Аниме в очереди: 1", message)
-        self.assertIn("Последнее обновление очереди: ", message)
-        self.assertIn("Эпизодов в очереди: 1", message)
-        self.assertIn("Завершённых эпизодов: 2", message)
-        self.assertIn("В blacklist discovery: 0", message)
-        self.assertNotIn("Последний discovery", message)
-
     def test_jobs_message_prefers_title_ru(self):
         tmp_dir = self.make_workspace_temp_dir()
         config = self.make_config(tmp_dir)
@@ -716,27 +689,49 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertTrue(keyboard["resize_keyboard"])
         self.assertFalse(keyboard["one_time_keyboard"])
-        self.assertEqual(keyboard["keyboard"][0][0]["text"], "Статус")
-        self.assertEqual(keyboard["keyboard"][0][1]["text"], "Текущая")
-        self.assertEqual(keyboard["keyboard"][1][0]["text"], "Очередь")
-        self.assertEqual(keyboard["keyboard"][1][1]["text"], "Ошибки")
-        self.assertEqual(keyboard["keyboard"][2][0]["text"], "Лог")
+        self.assertEqual(keyboard["keyboard"][0][0]["text"], "Текущая")
+        self.assertEqual(keyboard["keyboard"][0][1]["text"], "Очередь")
+        self.assertEqual(keyboard["keyboard"][1][0]["text"], "Ошибки")
+        self.assertEqual(keyboard["keyboard"][1][1]["text"], "Лог")
+        self.assertEqual(keyboard["keyboard"][2][0]["text"], "4K")
         self.assertEqual(keyboard["keyboard"][2][1]["text"], "Помощь")
 
     def test_normalize_command_text_maps_button_aliases(self):
-        self.assertEqual(normalize_command_text("Статус"), "/status")
+        self.assertEqual(normalize_command_text("Статус"), "Статус")
         self.assertEqual(normalize_command_text("Текущая"), "/current")
         self.assertEqual(normalize_command_text("Очередь"), "/jobs")
         self.assertEqual(normalize_command_text("Ошибки"), "/errors")
         self.assertEqual(normalize_command_text("Лог"), "/log")
+        self.assertEqual(normalize_command_text("4K"), "/upscale")
         self.assertEqual(normalize_command_text("Помощь"), "/help")
         self.assertEqual(normalize_command_text("/jobs"), "/jobs")
 
+    def test_status_command_is_removed(self):
+        self.assertEqual(handle_command({}, "/status"), "Неизвестная команда. Напиши /help")
+        self.assertNotIn("/status", build_help_message())
+
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_state", return_value={})
+    @patch("lib.telegram_bot.load_runtime_status", return_value={"run_status": "idle"})
+    def test_current_command_returns_markdown_payload(self, _mock_runtime, _mock_state, _mock_lock):
+        response = handle_command({}, "/current")
+
+        self.assertEqual(response["parse_mode"], "MarkdownV2")
+        self.assertIn("Пайплайн свободен", response["text"])
+
+    def test_elapsed_format_supports_minutes_and_hours(self):
+        now = datetime(2026, 6, 13, 12, 31, tzinfo=timezone.utc)
+
+        self.assertEqual(format_elapsed_ru("2026-06-13T12:00:00+00:00", now=now), "31 мин")
+        self.assertEqual(format_elapsed_ru("2026-06-13T10:00:00+00:00", now=now), "2 ч 31 мин")
+
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("alive", {"pid": 123}))
     @patch("lib.telegram_bot.load_runtime_status")
-    def test_current_message_shows_active_job(self, mock_load_runtime_status):
+    def test_current_message_shows_active_job(self, mock_load_runtime_status, _mock_lock):
         mock_load_runtime_status.return_value = {
             "run_status": "running",
             "run_started_at": "2026-06-13T10:00:00+00:00",
+            "updated_at": "2026-06-13T10:03:00+00:00",
             "current_stage": "processing",
             "queue_progress": {
                 "current_job_index": 2,
@@ -758,16 +753,83 @@ class TelegramBotTests(unittest.TestCase):
             "last_run": None,
         }
 
-        message = format_current_message()
+        message = format_current_message({})
 
         self.assertIn("Текущая обработка", message)
         self.assertIn("Русский тайтл", message)
-        self.assertIn("Этап: вырезка сегментов", message)
-        self.assertIn("Текущая серия: 3", message)
-        self.assertIn("Всего серий: 10", message)
+        self.assertIn("Сезон 1 · серии `001-010`", message)
+        self.assertIn("Этап: `вырезка сегментов`", message)
+        self.assertIn("Серия: `3`/`10`", message)
+        self.assertNotIn("ep03.mkv", message)
 
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("alive", {"pid": 123}))
     @patch("lib.telegram_bot.load_runtime_status")
-    def test_current_message_shows_last_run_when_idle(self, mock_load_runtime_status):
+    def test_current_message_shows_multi_season_range(self, mock_load_runtime_status, _mock_lock):
+        mock_load_runtime_status.return_value = {
+            "run_status": "running",
+            "updated_at": "2026-06-13T10:03:00+00:00",
+            "queue_progress": {"current_job_index": 1, "total_jobs": 1},
+            "current_job": {
+                "title": "Hero * Academy",
+                "season": 1,
+                "processing_mode": "multi_season",
+                "season_range": "1-5",
+                "episodes_range": "001",
+                "stage": "season_render",
+                "started_at": "2026-06-13T10:01:00+00:00",
+                "current_episode": 3,
+                "total_episodes": 100,
+            },
+        }
+
+        message = format_current_message({})
+
+        self.assertIn("Hero \\* Academy", message)
+        self.assertIn("Сезоны `1-5`", message)
+        self.assertNotIn("серии `001`", message)
+
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("alive", {"pid": 123}))
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_current_message_shows_worker_preparation(self, mock_load_runtime_status, _mock_lock):
+        mock_load_runtime_status.return_value = {
+            "run_status": "running",
+            "run_started_at": "2026-06-13T10:00:00+00:00",
+            "updated_at": "2026-06-13T10:00:00+00:00",
+            "current_stage": "processing",
+            "current_job": None,
+        }
+
+        message = format_current_message({})
+
+        self.assertIn("Worker запущен", message)
+        self.assertIn("Этап: `обработка очереди`", message)
+
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_current_message_detects_dead_worker(self, mock_load_runtime_status, _mock_lock):
+        mock_load_runtime_status.return_value = {
+            "run_status": "running",
+            "updated_at": "2026-06-13T10:03:00+00:00",
+            "current_stage": "render_episode",
+            "current_job": {
+                "title": "Interrupted",
+                "season": 1,
+                "episodes_range": "001-010",
+                "stage": "render_episode",
+                "current_episode": 3,
+                "total_episodes": 10,
+            },
+        }
+
+        message = format_current_message({})
+
+        self.assertIn("Worker аварийно остановлен", message)
+        self.assertIn("Последняя серия: `3`/`10`", message)
+
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_state", return_value={"last_discovery_at": "2026-06-13T09:00:00+00:00"})
+    @patch("lib.telegram_bot.load_runtime_status")
+    def test_current_message_shows_last_run_when_idle(self, mock_load_runtime_status, _mock_state, _mock_lock):
         mock_load_runtime_status.return_value = {
             "run_status": "completed",
             "run_finished_at": "2026-06-13T12:00:00+00:00",
@@ -792,13 +854,24 @@ class TelegramBotTests(unittest.TestCase):
             },
         }
 
-        message = format_current_message()
+        message = format_current_message({})
 
-        self.assertIn("Сейчас ничего не обрабатывается", message)
-        self.assertIn("Последний запуск", message)
+        self.assertIn("Пайплайн свободен", message)
+        self.assertIn("Очередь пуста", message)
+        self.assertIn("Последнее выполнение", message)
         self.assertIn("Русский тайтл", message)
-        self.assertIn("Статус: с ошибкой", message)
-        self.assertIn("Последняя серия: 8 / 12", message)
+        self.assertIn("`ошибка` · `серия 8/12`", message)
+
+    @patch("lib.telegram_bot.get_main_worker_lock_state", return_value=("missing", None))
+    @patch("lib.telegram_bot.load_state", return_value={})
+    @patch("lib.telegram_bot.load_runtime_status", return_value={"run_status": "completed"})
+    def test_current_message_shows_pending_queue_when_idle(self, _mock_runtime, _mock_state, _mock_lock):
+        save_jobs({}, [{"title": "Waiting", "season": 1, "episodes_range": "001"}])
+
+        message = format_current_message({})
+
+        self.assertIn("Ожидает следующего запуска", message)
+        self.assertIn("В очереди: `1`", message)
 
     @patch("lib.telegram_bot.load_runtime_errors")
     def test_errors_message_shows_empty_state(self, mock_load_runtime_errors):
@@ -872,7 +945,7 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertIn("Сезоны: 1-5", plain)
         self.assertNotIn("Эпизоды: 001", plain)
-        self.assertIn("сезоны `1-5`", markdown)
+        self.assertIn("Сезоны `1-5`", markdown)
         self.assertNotIn("серии `001`", markdown)
         self.assertNotIn("Сезон 1", markdown)
 

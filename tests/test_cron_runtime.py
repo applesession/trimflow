@@ -22,6 +22,8 @@ from lib.runtime import (
     load_runtime_errors,
     load_runtime_status,
     log_line,
+    mark_runtime_job_finish,
+    mark_runtime_job_start,
     release_lock,
     update_runtime_status,
 )
@@ -53,6 +55,40 @@ class CronRuntimeTests(unittest.TestCase):
         temp_dir.mkdir(parents=True, exist_ok=True)
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         return temp_dir
+
+    def test_runtime_snapshot_preserves_multi_season_scope(self):
+        status_path = self.make_workspace_temp_dir() / "runtime_status.json"
+        job = {
+            "title": "Hero",
+            "season": 1,
+            "episodes_range": "001",
+            "processing_mode": "multi_season",
+            "processing": {"season_range": "1-5"},
+        }
+
+        mark_runtime_job_start(
+            status_path,
+            job,
+            current_job_index=1,
+            total_jobs=1,
+            jobs_processed=0,
+            jobs_failed=0,
+        )
+        self.assertEqual(load_runtime_status(status_path)["current_job"]["season_range"], "1-5")
+
+        mark_runtime_job_finish(
+            status_path,
+            job,
+            status="completed",
+            stage="job_completed",
+            current_episode=10,
+            total_episodes=10,
+            jobs_processed=1,
+            jobs_failed=0,
+        )
+        last_run = load_runtime_status(status_path)["last_run"]
+        self.assertEqual(last_run["processing_mode"], "multi_season")
+        self.assertEqual(last_run["season_range"], "1-5")
 
     @staticmethod
     def completed_result():
