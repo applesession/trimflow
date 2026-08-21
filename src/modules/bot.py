@@ -1309,7 +1309,7 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
         lines.append("")
         for idx, job in group_jobs:
             lines.extend(_job_line(idx, job))
-            lines.append("")
+        lines.append("")
 
     return "\n".join(lines).rstrip()
 

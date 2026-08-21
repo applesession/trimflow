@@ -1037,6 +1037,17 @@ class TelegramBotTests(unittest.TestCase):
         self.assertNotIn("серии `001`", markdown)
         self.assertNotIn("Сезон 1", markdown)
 
+    def test_jobs_markdown_has_no_blank_line_between_titles_in_same_group(self):
+        jobs = [
+            {"title": "A", "season": 1, "episodes_range": "001"},
+            {"title": "B", "season": 2, "episodes_range": "002"},
+        ]
+
+        message = format_jobs_message_markdown({}, jobs=jobs)
+
+        self.assertIn("серии `001`\n*2\\. B*", message)
+        self.assertNotIn("серии `001`\n\n*2\\. B*", message)
+
     def test_jobs_message_keeps_storage_order_even_for_ongoing_items(self):
         tmp_dir = self.make_workspace_temp_dir()
         config = self.make_config(tmp_dir)
