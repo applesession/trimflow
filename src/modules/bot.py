@@ -1118,8 +1118,11 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True, jobs=None):
         lines.append(
             f"{prefix}{get_display_title(job)}{ongoing_marker}{upscale_marker}{audiofix_marker}"
         )
-        lines.extend(_navigation_lines(job, "  Метка: "))
-        lines.append(f"  Эпизоды: {job.get('episodes_range', '?')}")
+        if str(job.get("processing_mode") or "").strip().lower() == "multi_season":
+            lines.append(f"Сезоны: {(job.get('processing') or {}).get('season_range') or '?'}")
+        else:
+            lines.extend(_navigation_lines(job, "  Метка: "))
+            lines.append(f"Эпизоды: {job.get('episodes_range', '?')}")
     return "\n".join(lines)
 
 
@@ -1155,7 +1158,8 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
         title = escape_markdown_v2(get_display_title(job))
         navigation_label = get_navigation_label(job)
         eps = job.get("episodes_range", "?")
-        is_single = (job.get("processing_mode") or "").strip().lower() == "single_episode"
+        processing_mode = (job.get("processing_mode") or "").strip().lower()
+        is_single = processing_mode == "single_episode"
         eps_label = "серия" if is_single else "серии"
         mode_labels = []
         if job.get("processing_mode") == "upscale_4k":
@@ -1163,9 +1167,13 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
         if (job.get("processing") or {}).get("audio_recovery_enabled"):
             mode_labels.append("`audiofix`")
         mode_label = " · " + " · ".join(mode_labels) if mode_labels else ""
-        details = [f"{eps_label} `{eps}`"]
-        if navigation_label:
-            details.insert(0, escape_markdown_v2(navigation_label))
+        if processing_mode == "multi_season":
+            season_range = (job.get("processing") or {}).get("season_range") or "?"
+            details = [f"Сезоны `{season_range}`"]
+        else:
+            details = [f"{eps_label} `{eps}`"]
+            if navigation_label:
+                details.insert(0, escape_markdown_v2(navigation_label))
         return [
             f"*{index}\\. {title}*",
             f"└ {' · '.join(details)}{mode_label}",
@@ -1186,7 +1194,7 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
         lines.append("")
         for idx, job in group_jobs:
             lines.extend(_job_line(idx, job))
-        lines.append("")
+            lines.append("")
 
     return "\n".join(lines).rstrip()
 

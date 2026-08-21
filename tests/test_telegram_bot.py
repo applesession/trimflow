@@ -34,6 +34,7 @@ from lib.telegram_bot import (
     format_log_message,
     format_log_message_markdown,
     format_jobs_message,
+    format_jobs_message_markdown,
     format_next_message,
     format_publish_success_message,
     format_render_interrupted_message,
@@ -855,6 +856,25 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertIn("1. А", message)
         self.assertIn("2. Б", message)
+
+    def test_jobs_messages_show_season_range_for_multi_season_job(self):
+        job = {
+            "title": "Kuroko",
+            "title_ru": "Баскетбол Куроко",
+            "season": 1,
+            "episodes_range": "001",
+            "processing_mode": "multi_season",
+            "processing": {"season_range": "1-5"},
+        }
+
+        plain = format_jobs_message({}, jobs=[job])
+        markdown = format_jobs_message_markdown({}, jobs=[job])
+
+        self.assertIn("Сезоны: 1-5", plain)
+        self.assertNotIn("Эпизоды: 001", plain)
+        self.assertIn("сезоны `1-5`", markdown)
+        self.assertNotIn("серии `001`", markdown)
+        self.assertNotIn("Сезон 1", markdown)
 
     def test_jobs_message_keeps_storage_order_even_for_ongoing_items(self):
         tmp_dir = self.make_workspace_temp_dir()
