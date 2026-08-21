@@ -11,6 +11,7 @@ from shared.helpers import run
 
 
 SOURCE_MARKER_NAME = ".torrent_source.json"
+BONUS_DIRECTORY_NAMES = {"bonus", "bonuses", "extra", "extras", "special", "specials"}
 
 
 class TorrentSelectionError(RuntimeError):
@@ -132,6 +133,11 @@ def _is_episode_path(path):
     return "episodes" in (part.casefold() for part in PurePosixPath(str(path).replace("\\", "/")).parts[:-1])
 
 
+def _is_bonus_path(path):
+    directories = PurePosixPath(str(path).replace("\\", "/")).parts[:-1]
+    return any(part.casefold() in BONUS_DIRECTORY_NAMES for part in directories)
+
+
 def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=None):
     requested = sorted(int(episode) for episode in allowed_episodes)
     filter_text = str(path_filter or "").strip().casefold()
@@ -159,6 +165,9 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
             episode_paths = [item for item in items if _is_episode_path(item["path"])]
             if episode_paths:
                 items = episode_paths
+            regular_paths = [item for item in items if not _is_bonus_path(item["path"])]
+            if regular_paths:
+                items = regular_paths
             preferred = [item for item in items if _looks_1080p(item["path"])]
             if len(preferred) == 1:
                 items = preferred
