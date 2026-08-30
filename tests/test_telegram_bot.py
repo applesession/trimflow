@@ -1672,6 +1672,10 @@ class TelegramBotTests(unittest.TestCase):
             "title_ru": "Токийский Гуль: Перерождение",
             "season": 2,
             "episodes_range": "001-024",
+            "source": {
+                "type": "magnet",
+                "magnet": "magnet:?xt=urn:btih:testhash",
+            },
         }
         result = {
             "quality_summary": {
@@ -1693,13 +1697,19 @@ class TelegramBotTests(unittest.TestCase):
                     "error": "HTTPError('504 Server Error: Gateway Time-out for url: https://pu.vk.com/upload.php')",
                 },
                 "s3": {
-                    "enabled": False,
-                    "uploaded": False,
+                    "enabled": True,
+                    "uploaded": True,
+                    "uploaded_files": {
+                        "manifest": "animonster/tokyo-ghoul-re/S02/result_manifest.json",
+                    },
                 },
             },
         }
 
-        with patch.dict(os.environ, {"TELEGRAM_STATE_PATH": str(state_path)}):
+        with patch.dict(os.environ, {
+            "TELEGRAM_STATE_PATH": str(state_path),
+            "S3_BUCKET_NAME": "anime-bucket",
+        }):
             reply_markup = build_notification_details_reply_markup(
                 build_notification_details_payload(job, result),
             )
@@ -1730,6 +1740,12 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("• anilibria\\_with\\_detector: `4`", message)
         self.assertIn("• VK video: `ok`", message)
         self.assertIn("• VK comment: `failed`", message)
+        self.assertIn("• S3 upload: `ok`", message)
+        self.assertIn("🧲 Torrent: `magnet:?xt=urn:btih:testhash`", message)
+        self.assertIn(
+            "📄 S3 manifest: `s3://anime-bucket/animonster/tokyo-ghoul-re/S02/result_manifest.json`",
+            message,
+        )
         self.assertIn("Причина partial failure: `504 Gateway Time-out`", message)
         self.assertEqual(mock_send_formatted_message.call_args.kwargs["parse_mode"], "MarkdownV2")
 

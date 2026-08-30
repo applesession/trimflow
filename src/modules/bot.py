@@ -570,6 +570,40 @@ def _format_delivery_status_line(label, value):
     return f"• {escape_markdown_v2(label)}: {format_markdown_code(normalized)}"
 
 
+def _extract_torrent_links(job):
+    source = (job or {}).get("source") or {}
+    if source.get("type") != "magnet":
+        return []
+
+    candidates = [source.get("magnet")]
+    candidates.extend(
+        part.get("magnet")
+        for part in source.get("parts", []) or []
+        if isinstance(part, dict)
+    )
+    links = []
+    for candidate in candidates:
+        link = str(candidate or "").strip()
+        if link and link not in links:
+            links.append(link)
+    return links
+
+
+def _build_s3_manifest_uri(s3_summary):
+    manifest_key = str(
+        ((s3_summary or {}).get("uploaded_files") or {}).get("manifest") or ""
+    ).strip()
+    if not manifest_key:
+        return None
+    if "://" in manifest_key:
+        return manifest_key
+
+    bucket = (os.getenv("S3_BUCKET_NAME") or "").strip()
+    if not bucket:
+        return manifest_key
+    return f"s3://{bucket}/{manifest_key.lstrip('/')}"
+
+
 def format_job_details_message(payload):
     job = payload.get("job") or {}
     quality_summary = payload.get("quality_summary") or {}
@@ -617,6 +651,17 @@ def format_job_details_message(payload):
     if delivery_lines:
         lines.extend(["", "🚚 *Delivery:*", *delivery_lines])
 
+    resource_lines = []
+    torrent_links = _extract_torrent_links(job)
+    for index, torrent_link in enumerate(torrent_links, start=1):
+        label = "Torrent" if len(torrent_links) == 1 else f"Torrent {index}"
+        resource_lines.append(f"🧲 {label}: {format_markdown_code(torrent_link)}")
+    manifest_uri = _build_s3_manifest_uri(s3_summary)
+    if manifest_uri:
+        resource_lines.append(f"📄 S3 manifest: {format_markdown_code(manifest_uri)}")
+    if resource_lines:
+        lines.extend(["", "🔗 *Ссылки:*", *resource_lines])
+
     error_reason = None
     if vk_summary.get("error"):
         error_reason = normalize_notification_error_reason(vk_summary.get("error"))
@@ -640,6 +685,7 @@ def build_notification_details_payload(job, result):
             "title_ru": job.get("title_ru"),
             "season": job.get("season"),
             "episodes_range": job.get("episodes_range"),
+            "source": job.get("source", {}),
         },
         "quality_summary": result.get("quality_summary", {}),
         "delivery_summary": result.get("delivery_summary", {}),
