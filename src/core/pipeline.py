@@ -17,6 +17,7 @@ from api.anilibria import extract_release_poster_url, get_anilibria_segments, ge
 from core.detector import (
     DETECTOR_RESULT_VERSION,
     build_detector_context,
+    confidence_meets_threshold,
     get_detector_type_result,
     normalize_timing_detection_config,
 )
@@ -805,6 +806,10 @@ def merge_timing_sources(skip_types, anilibria_result, aniskip_result, detector_
         if detector_result is None:
             continue
 
+        detector_auto_cut_threshold = (detector_context.get("config") or {}).get(
+            "auto_cut_min_confidence",
+            "high",
+        )
         per_type[skip_type] = build_type_info(
             source=detector_result["source"],
             confidence=detector_result["confidence"],
@@ -818,7 +823,10 @@ def merge_timing_sources(skip_types, anilibria_result, aniskip_result, detector_
             ),
             review_required=detector_result["review_required"],
             removed=detector_result["source"] == "audio_fingerprint"
-            and detector_result["confidence"] == "high"
+            and confidence_meets_threshold(
+                detector_result["confidence"],
+                detector_auto_cut_threshold,
+            )
             and not detector_result["review_required"],
             reason=detector_result.get("reason") or detector_reason,
             consensus_score=detector_result.get("consensus_score"),

@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,8 +11,9 @@ from shared.constants import DEFAULT_TIMING_DETECTION
 
 
 SEASON_CLUSTER_TOLERANCE_SECONDS = 10.0
-HIGH_CONFIDENCE_BOUNDARY_TOLERANCE = 5.0
-DETECTOR_RESULT_VERSION = "multi_cluster_v1"
+DETECTOR_RESULT_VERSION = "validated_segments_v2"
+CONFIDENCE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+VALID_AUTO_CUT_MIN_CONFIDENCE = {"medium", "high", "disabled"}
 
 
 def normalize_timing_detection_config(job):
@@ -31,11 +33,38 @@ def normalize_timing_detection_config(job):
     )
     merged["consensus_min_similarity"] = float(merged["consensus_min_similarity"])
     merged["pair_match_min_seconds"] = float(merged["pair_match_min_seconds"])
+    merged["high_confidence_boundary_tolerance_seconds"] = float(
+        merged["high_confidence_boundary_tolerance_seconds"]
+    )
     merged["cache_enabled"] = bool(merged.get("cache_enabled", True))
     cache_dir = merged.get("cache_dir")
     merged["cache_dir"] = None if cache_dir in (None, "") else str(cache_dir)
     merged["detector_version"] = str(merged["detector_version"])
     merged["auto_cut_min_confidence"] = str(merged["auto_cut_min_confidence"]).lower()
+
+    if merged["min_support_episodes"] < 2:
+        raise ValueError("timing_detection.min_support_episodes must be at least 2")
+    if merged["frame_step_seconds"] <= 0:
+        raise ValueError("timing_detection.frame_step_seconds must be greater than 0")
+    if merged["min_segment_seconds"] <= 0:
+        raise ValueError("timing_detection.min_segment_seconds must be greater than 0")
+    if merged["max_segment_seconds"] < merged["min_segment_seconds"]:
+        raise ValueError(
+            "timing_detection.max_segment_seconds must be greater than or equal to min_segment_seconds"
+        )
+    if not 0 < merged["consensus_min_similarity"] <= 1:
+        raise ValueError("timing_detection.consensus_min_similarity must be between 0 and 1")
+    if not 0 < merged["pair_match_min_seconds"] <= merged["max_segment_seconds"]:
+        raise ValueError(
+            "timing_detection.pair_match_min_seconds must be greater than 0 and not exceed max_segment_seconds"
+        )
+    if merged["high_confidence_boundary_tolerance_seconds"] < 0:
+        raise ValueError(
+            "timing_detection.high_confidence_boundary_tolerance_seconds must not be negative"
+        )
+    if merged["auto_cut_min_confidence"] not in VALID_AUTO_CUT_MIN_CONFIDENCE:
+        allowed = ", ".join(sorted(VALID_AUTO_CUT_MIN_CONFIDENCE))
+        raise ValueError(f"timing_detection.auto_cut_min_confidence must be one of: {allowed}")
 
     if merged["feature_hop_length"] is None:
         merged["feature_hop_length"] = max(
@@ -44,6 +73,25 @@ def normalize_timing_detection_config(job):
         )
 
     return merged
+
+
+def confidence_meets_threshold(confidence, minimum_confidence):
+    minimum = str(minimum_confidence or "high").lower()
+    if minimum == "disabled":
+        return False
+    return CONFIDENCE_RANK.get(str(confidence).lower(), 0) >= CONFIDENCE_RANK[minimum]
+
+
+def _interval_is_valid(start, end, config):
+    try:
+        start = float(start)
+        end = float(end)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        return False
+    duration = end - start
+    return config["min_segment_seconds"] <= duration <= config["max_segment_seconds"]
 
 
 def _optional_dependency_available(module_name):
@@ -89,7 +137,11 @@ def build_detector_cache_key(episode_infos, config, detector_inputs=None):
         "feature_hop_length": config["feature_hop_length"],
         "consensus_min_similarity": config["consensus_min_similarity"],
         "pair_match_min_seconds": config["pair_match_min_seconds"],
+        "high_confidence_boundary_tolerance_seconds": config[
+            "high_confidence_boundary_tolerance_seconds"
+        ],
         "detector_version": config["detector_version"],
+        "auto_cut_min_confidence": config["auto_cut_min_confidence"],
     }
     payload = {
         "result_version": DETECTOR_RESULT_VERSION,
@@ -331,7 +383,8 @@ def _find_pairwise_candidate(track_a, track_b, config):
     if features_a.size == 0 or features_b.size == 0:
         return None
 
-    min_frames = max(1, int(round(config["pair_match_min_seconds"] / config["frame_step_seconds"])))
+    min_match_seconds = max(config["pair_match_min_seconds"], config["min_segment_seconds"])
+    min_frames = max(1, int(round(min_match_seconds / config["frame_step_seconds"])))
     max_frames = max(min_frames, int(round(config["max_segment_seconds"] / config["frame_step_seconds"])))
     similarity_matrix = np.matmul(features_a, features_b.T)
 
@@ -419,6 +472,13 @@ def _build_episode_candidates(pair_candidates, zone_tracks, config):
     frame_step = config["frame_step_seconds"]
 
     for candidate in pair_candidates:
+        candidate_duration = candidate["length_frames"] * frame_step
+        if not (
+            config["min_segment_seconds"]
+            <= candidate_duration
+            <= config["max_segment_seconds"]
+        ):
+            continue
         track_a = next(track for track in zone_tracks if track["episode"] == candidate["episode_a"])
         track_b = next(track for track in zone_tracks if track["episode"] == candidate["episode_b"])
 
@@ -457,6 +517,8 @@ def _build_episode_candidates(pair_candidates, zone_tracks, config):
 def _derive_local_confidence(candidate, config):
     if candidate is None:
         return "none"
+    if not _interval_is_valid(candidate.get("start"), candidate.get("end"), config):
+        return "none"
 
     votes = candidate.get("votes") or []
     starts = [vote["start"] for vote in votes]
@@ -473,8 +535,8 @@ def _derive_local_confidence(candidate, config):
     if (
         candidate["support_episode_count"] >= config["min_support_episodes"]
         and candidate["score"] >= config["consensus_min_similarity"]
-        and max_start_delta <= HIGH_CONFIDENCE_BOUNDARY_TOLERANCE
-        and max_end_delta <= HIGH_CONFIDENCE_BOUNDARY_TOLERANCE
+        and max_start_delta <= config["high_confidence_boundary_tolerance_seconds"]
+        and max_end_delta <= config["high_confidence_boundary_tolerance_seconds"]
     ):
         return "high"
 
@@ -531,7 +593,10 @@ def _build_zone_results(zone_tracks, config, zone_type):
             continue
 
         confidence = _derive_local_confidence(candidate, config)
-        accepted = confidence == "high"
+        accepted = confidence_meets_threshold(
+            confidence,
+            config["auto_cut_min_confidence"],
+        )
         reference_interval = {
             "start": candidate["start"],
             "end": candidate["end"],
@@ -554,15 +619,14 @@ def _build_zone_results(zone_tracks, config, zone_type):
             "reference_similarity": candidate["score"],
         }
 
-    confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
     confidence = max(
         (result["confidence"] for result in results.values()),
-        key=lambda value: confidence_rank.get(value, 0),
+        key=lambda value: CONFIDENCE_RANK.get(value, 0),
         default="none",
     )
     accepted_results = [
         result for result in results.values()
-        if result["confidence"] == "high" and not result["review_required"]
+        if result["source"] == "audio_fingerprint" and not result["review_required"]
     ]
     primary_result = max(
         accepted_results,
@@ -573,7 +637,7 @@ def _build_zone_results(zone_tracks, config, zone_type):
         "results": results,
         "reference_episodes": sorted(
             episode for episode, result in results.items()
-            if result["confidence"] == "high" and not result["review_required"]
+            if result["source"] == "audio_fingerprint" and not result["review_required"]
         ),
         "reference_interval": primary_result["reference_interval"] if primary_result else None,
         "consensus_score": primary_result["consensus_score"] if primary_result else None,
@@ -582,13 +646,15 @@ def _build_zone_results(zone_tracks, config, zone_type):
     }
 
 
-def _select_reference_segment(zone_type, aniskip_by_episode, anilibria_by_episode=None):
+def _select_reference_segment(zone_type, aniskip_by_episode, anilibria_by_episode, config):
     priority = {"anilibria_exact": 0, "aniskip_exact": 1, "aniskip_lengthless": 2}
     candidates = []
     for provider_payload in [anilibria_by_episode or {}, aniskip_by_episode]:
         for episode, result in sorted(provider_payload.items()):
             for segment in result.get("segments", []):
                 if segment["type"] != zone_type:
+                    continue
+                if not _interval_is_valid(segment.get("start"), segment.get("end"), config):
                     continue
                 candidates.append({
                     "episode": episode,
@@ -618,7 +684,8 @@ def _match_reference_to_track(reference_track, reference_interval, target_track,
         return None
 
     reference_frames = reference_features.shape[0]
-    min_frames = max(1, int(round(config["pair_match_min_seconds"] / frame_step)))
+    min_match_seconds = max(config["pair_match_min_seconds"], config["min_segment_seconds"])
+    min_frames = max(1, int(round(min_match_seconds / frame_step)))
     if reference_frames < min_frames:
         return None
 
@@ -642,7 +709,12 @@ def _match_reference_to_track(reference_track, reference_interval, target_track,
 
 
 def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode, anilibria_by_episode):
-    reference_segment = _select_reference_segment(zone_type, aniskip_by_episode, anilibria_by_episode)
+    reference_segment = _select_reference_segment(
+        zone_type,
+        aniskip_by_episode,
+        anilibria_by_episode,
+        config,
+    )
     if reference_segment is None:
         return {
             "results": {},
@@ -677,13 +749,14 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
 
     for track in zone_tracks:
         if track["episode"] == reference_segment["episode"]:
+            accepted = confidence_meets_threshold("high", config["auto_cut_min_confidence"])
             results[track["episode"]] = {
-                "found": True,
+                "found": accepted,
                 "source": "audio_fingerprint",
                 "confidence": "high",
                 "start": reference_interval["start"],
                 "end": reference_interval["end"],
-                "review_required": False,
+                "review_required": not accepted,
                 "reason": "reference_match_used",
                 "support_episode_count": 1,
                 "consensus_score": 1.0,
@@ -725,20 +798,21 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
         start = round(track["zone_start"] + match["start_frame"] * config["frame_step_seconds"], 3)
         end = round(start + reference_length, 3)
         similarity = match["score"]
-        duration_delta = abs((end - start) - reference_length)
         confidence = "low"
         review_required = True
         found = False
         reason = "reference_match_not_found"
 
-        if similarity >= high_threshold and duration_delta <= 5.0:
+        if similarity >= high_threshold and _interval_is_valid(start, end, config):
             confidence = "high"
-            review_required = False
-            found = True
             reason = "reference_match_used"
         elif similarity >= medium_threshold:
             confidence = "medium"
             reason = "reference_match_used"
+
+        accepted = confidence_meets_threshold(confidence, config["auto_cut_min_confidence"])
+        review_required = not accepted
+        found = accepted
 
         results[track["episode"]] = {
             "found": found,
@@ -795,24 +869,17 @@ def _merge_zone_results(preferred_result, fallback_result):
             merged_results[episode] = preferred_episode
             continue
 
-        if (
-            preferred_episode.get("confidence") == "high"
-            and not preferred_episode.get("review_required", True)
-        ):
+        if not preferred_episode.get("review_required", True):
             merged_results[episode] = preferred_episode
             continue
 
-        fallback_is_better = (
-            fallback_episode.get("confidence") == "high"
-            and not fallback_episode.get("review_required", True)
-        )
+        fallback_is_better = not fallback_episode.get("review_required", True)
         if fallback_is_better:
             merged_results[episode] = fallback_episode
             continue
 
-        confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
-        preferred_rank = confidence_rank.get(preferred_episode.get("confidence", "none"), 0)
-        fallback_rank = confidence_rank.get(fallback_episode.get("confidence", "none"), 0)
+        preferred_rank = CONFIDENCE_RANK.get(preferred_episode.get("confidence", "none"), 0)
+        fallback_rank = CONFIDENCE_RANK.get(fallback_episode.get("confidence", "none"), 0)
         if fallback_rank > preferred_rank:
             merged_results[episode] = fallback_episode
         else:

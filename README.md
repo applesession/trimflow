@@ -289,7 +289,7 @@ VK-доставка теперь поддерживает два сценари�
 - Если AniSkip не нашёл тайминги по реальной длине эпизода, скрипт делает fallback-запрос с `episodeLength=0` и сохраняет источник таймингов в `timing_info` внутри manifest.
 - По умолчанию `AniSkip` сейчас выключен через `timing_providers.aniskip_enabled = false`, и pipeline опирается на `AniLiberty + local detector`.
 - Если включён `timing_detection`, скрипт пытается достроить отсутствующие `OP/ED` локальным audio-detector'ом; разные повторяющиеся заставки внутри длинного диапазона получают независимый локальный consensus.
-- Detector режет автоматически только интервалы с `high` confidence; всё остальное помечается как `manual_review` в `timing_info`.
+- Detector режет автоматически только интервалы не ниже `timing_detection.auto_cut_min_confidence` (`high` по умолчанию); всё остальное помечается как `manual_review` в `timing_info`. Значение `disabled` полностью запрещает автоматические вырезы detector'а.
 - Каждая серия за один encode получает точные OP/ED-вырезы, обнулённые PTS и watermark; soft subtitles в VK-компиляцию не переносятся.
 - После успешной обработки временные папки могут очищаться автоматически, если это включено в `cleanup`.
 - При ошибке compilation render готовые episode-checkpoints остаются в `temp/`; retry повторяет только повреждённую/неготовую серию, а итоговая сборка выполняется через `ffmpeg -c copy`.

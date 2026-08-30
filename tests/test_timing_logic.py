@@ -3,14 +3,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import numpy as np
+
 from lib.aniskip import build_quality_summary, summarize_skips
 from lib.detector import (
     DETECTOR_RESULT_VERSION,
     _build_cache_paths,
     _build_zone_results,
     _derive_local_confidence,
+    _find_pairwise_candidate,
     _load_context_from_cache,
     _needs_reference_fallback,
+    _select_reference_segment,
     build_detector_cache_key,
     normalize_timing_detection_config,
 )
@@ -61,6 +65,7 @@ class TimingLogicTests(unittest.TestCase):
         self.assertEqual(config["feature_sample_rate"], 16000)
         self.assertTrue(config["cache_enabled"])
         self.assertEqual(config["auto_cut_min_confidence"], "high")
+        self.assertEqual(config["high_confidence_boundary_tolerance_seconds"], 2.0)
 
     def test_normalize_timing_detection_config_applies_overrides(self):
         config = normalize_timing_detection_config({
@@ -78,6 +83,20 @@ class TimingLogicTests(unittest.TestCase):
         self.assertEqual(config["frame_step_seconds"], 0.5)
         self.assertEqual(config["feature_sample_rate"], 22050)
         self.assertEqual(config["consensus_min_similarity"], 0.81)
+
+    def test_normalize_timing_detection_config_rejects_unsafe_values(self):
+        invalid_configs = [
+            {"min_support_episodes": 1},
+            {"min_segment_seconds": 0},
+            {"min_segment_seconds": 90, "max_segment_seconds": 45},
+            {"consensus_min_similarity": 1.1},
+            {"auto_cut_min_confidence": "low"},
+        ]
+
+        for timing_detection in invalid_configs:
+            with self.subTest(timing_detection=timing_detection):
+                with self.assertRaises(ValueError):
+                    normalize_timing_detection_config({"timing_detection": timing_detection})
 
     def test_build_detector_cache_key_is_stable(self):
         config = normalize_timing_detection_config({})
@@ -103,6 +122,18 @@ class TimingLogicTests(unittest.TestCase):
         self.assertNotEqual(
             build_detector_cache_key(episode_infos, base_config),
             build_detector_cache_key(episode_infos, changed_config),
+        )
+
+    def test_build_detector_cache_key_tracks_auto_cut_threshold(self):
+        base_config = normalize_timing_detection_config({})
+        disabled_config = normalize_timing_detection_config({
+            "timing_detection": {"auto_cut_min_confidence": "disabled"}
+        })
+        episode_infos = [{"episode": 1, "path": "a.mkv", "duration": 1400.0}]
+
+        self.assertNotEqual(
+            build_detector_cache_key(episode_infos, base_config),
+            build_detector_cache_key(episode_infos, disabled_config),
         )
 
     def test_build_detector_cache_key_tracks_result_algorithm_version(self):
@@ -229,6 +260,91 @@ class TimingLogicTests(unittest.TestCase):
         self.assertEqual(_derive_local_confidence(too_small, config), "low")
         self.assertEqual(_derive_local_confidence(unstable, config), "medium")
         self.assertEqual(_derive_local_confidence(low_similarity, config), "medium")
+
+    def test_pairwise_match_rejects_preview_shorter_than_min_segment(self):
+        config = normalize_timing_detection_config({
+            "timing_detection": {
+                "frame_step_seconds": 0.25,
+                "min_segment_seconds": 45,
+                "pair_match_min_seconds": 20,
+            }
+        })
+        short_features = np.ones((160, 1), dtype=np.float32)
+        long_features = np.ones((180, 1), dtype=np.float32)
+
+        short = _find_pairwise_candidate(
+            {"episode": 1, "features": short_features},
+            {"episode": 2, "features": short_features},
+            config,
+        )
+        long = _find_pairwise_candidate(
+            {"episode": 1, "features": long_features},
+            {"episode": 2, "features": long_features},
+            config,
+        )
+
+        self.assertIsNone(short)
+        self.assertIsNotNone(long)
+        self.assertGreaterEqual(
+            long["length_frames"] * config["frame_step_seconds"],
+            config["min_segment_seconds"],
+        )
+
+    def test_short_provider_interval_is_not_used_as_detector_reference(self):
+        config = normalize_timing_detection_config({})
+        short_reference = {
+            1: {
+                "segments": [{
+                    "type": "ed",
+                    "start": 1370.0,
+                    "end": 1400.0,
+                    "source": "anilibria_exact",
+                }]
+            }
+        }
+
+        selected = _select_reference_segment("ed", {}, short_reference, config)
+
+        self.assertIsNone(selected)
+
+    def test_auto_cut_min_confidence_medium_accepts_medium_consensus(self):
+        config = normalize_timing_detection_config({
+            "timing_detection": {"auto_cut_min_confidence": "medium"}
+        })
+        matcher = self._pair_matcher([(range(1, 4), 40)], score=0.7)
+        with patch("lib.detector._find_pairwise_candidate", side_effect=matcher):
+            result = _build_zone_results(self._zone_tracks(3), config, "op")
+
+        self.assertEqual(result["results"][1]["confidence"], "medium")
+        self.assertFalse(result["results"][1]["review_required"])
+
+        detector = {
+            "enabled": True,
+            "reason": None,
+            "config": config,
+            "reference_episodes": {"op": result["reference_episodes"]},
+            "results": {"op": result["results"], "ed": {}},
+        }
+        empty_provider = {"segments": [], "request_error": None}
+        empty_aniskip = {**empty_provider, "used_fallback": False}
+        per_type, segments, _, _ = merge_timing_sources(
+            ["op"], empty_provider, empty_aniskip, detector, 1
+        )
+
+        self.assertTrue(per_type["op"]["removed"])
+        self.assertEqual(len(segments), 1)
+
+    def test_auto_cut_disabled_never_accepts_detector_result(self):
+        config = normalize_timing_detection_config({
+            "timing_detection": {"auto_cut_min_confidence": "disabled"}
+        })
+        matcher = self._pair_matcher([(range(1, 4), 40)], score=0.99)
+        with patch("lib.detector._find_pairwise_candidate", side_effect=matcher):
+            result = _build_zone_results(self._zone_tracks(3), config, "op")
+
+        self.assertEqual(result["results"][1]["confidence"], "high")
+        self.assertTrue(result["results"][1]["review_required"])
+        self.assertFalse(result["results"][1]["found"])
 
     def test_reference_fallback_is_identical_for_op_and_ed_results(self):
         partial_result = {
