@@ -23,6 +23,7 @@ from lib.pipeline import (
     load_episode_checkpoint,
     load_render_checkpoint,
     process_job,
+    process_multi_season_job,
     save_episode_checkpoint,
     select_compilation_frame_rate,
     select_compilation_frame_size,
@@ -546,6 +547,86 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             "00:00:00 - 1 сезон, 1 серия",
             "00:00:10 - 2 сезон, 1 серия",
         ])
+
+    def test_multi_season_manifest_includes_normalized_timing_detection(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        temp_dir = tmp_dir / "temp"
+        temp_dir.mkdir()
+        job = self.make_job(tmp_dir)
+        job.update({
+            "processing_mode": "multi_season",
+            "processing": {"season_range": "1-2"},
+            "source": {
+                "type": "magnet",
+                "parts": [
+                    {"season": 1, "magnet": "magnet:?xt=urn:btih:first"},
+                    {"season": 2, "magnet": "magnet:?xt=urn:btih:second"},
+                ],
+            },
+            "timing_detection": {"enabled": True},
+        })
+
+        def fake_process_subjob(subjob, runtime_status_path=None):
+            output_dir = Path(subjob["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            video = output_dir / "season.mkv"
+            manifest = output_dir / "season_manifest.json"
+            video.write_bytes(b"season")
+            manifest.write_text(json.dumps({
+                "timing_sources_summary": {"detector_available": True},
+                "episodes": [{
+                    "episode": 1,
+                    "cleaned_duration": 10.0,
+                    "timing_info": {},
+                    "skip_summary": {},
+                }],
+            }), encoding="utf-8")
+            return {"output_video": str(video), "output_manifest": str(manifest)}
+
+        def fake_find_episode_files(part_dir):
+            source = Path(part_dir) / "episode.mkv"
+            return [(1, source)], []
+
+        def fake_build_episode_infos(selected, _external_audio, _language):
+            episode, source = selected[0]
+            return [{
+                "episode": episode,
+                "path": str(source),
+                "duration": 10.0,
+                "frame_rate": "30/1",
+                "width": 1920,
+                "height": 1080,
+            }]
+
+        with patch("lib.pipeline.prepare_temp_dir", return_value=temp_dir), patch(
+            "lib.pipeline.discover_torrent_episode_numbers", return_value=[1]
+        ), patch("lib.pipeline.download_selected_episodes"), patch(
+            "lib.pipeline.find_episode_files", side_effect=fake_find_episode_files
+        ), patch(
+            "lib.pipeline.filter_episode_files", side_effect=lambda detected, _episodes: (detected, [])
+        ), patch("lib.pipeline.find_external_audio_files", return_value={}), patch(
+            "lib.pipeline.build_episode_infos", side_effect=fake_build_episode_infos
+        ), patch("lib.pipeline.process_job", side_effect=fake_process_subjob), patch(
+            "lib.pipeline.ffprobe_media_signature", return_value=SIGNATURE
+        ), patch(
+            "lib.pipeline.ffprobe_duration",
+            side_effect=lambda path: 20.0 if ".partial" in str(path) else 10.0,
+        ), patch(
+            "lib.pipeline.render_concat",
+            side_effect=lambda _concat, output, **_kwargs: Path(output).write_bytes(b"combined"),
+        ), patch("lib.pipeline.deliver_rendered_output") as mock_deliver:
+            mock_deliver.return_value = {
+                "output_video": "combined.mkv",
+                "delivery_summary": {},
+            }
+            process_multi_season_job(job)
+
+        manifest = mock_deliver.call_args.kwargs["manifest"]
+        self.assertTrue(manifest["timing_detection"]["enabled"])
+        self.assertEqual(
+            manifest["timing_detection"]["algorithm_version"],
+            DETECTOR_RESULT_VERSION,
+        )
 
     def test_later_season_part_restarts_source_numbering(self):
         episodes = renumber_season_part_episodes(

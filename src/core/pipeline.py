@@ -1771,6 +1771,7 @@ def set_runtime_stage(runtime_status_path, stage, **current_job_updates):
 
 def process_multi_season_job(job, runtime_status_path=None):
     processing = normalize_processing_config(job)
+    timing_detection = normalize_timing_detection_config(job)
     source_parts = (job.get("source") or {}).get("parts") or []
     season_range = str(processing.get("season_range") or "").strip()
     if not season_range or not source_parts:
