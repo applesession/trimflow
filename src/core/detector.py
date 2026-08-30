@@ -11,7 +11,8 @@ from shared.constants import DEFAULT_TIMING_DETECTION
 
 
 SEASON_CLUSTER_TOLERANCE_SECONDS = 10.0
-DETECTOR_RESULT_VERSION = "validated_segments_v2"
+DETECTOR_FEATURE_VERSION = "balanced_families_v1"
+DETECTOR_RESULT_VERSION = "balanced_features_v3"
 CONFIDENCE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 VALID_AUTO_CUT_MIN_CONFIDENCE = {"medium", "high", "disabled"}
 
@@ -249,9 +250,9 @@ def _compute_feature_matrix(samples, config):
         y=samples,
         sr=sample_rate,
         hop_length=hop_length,
-        n_mfcc=8,
+        n_mfcc=9,
         n_fft=n_fft,
-    )
+    )[1:]
     spectral_centroid = librosa.feature.spectral_centroid(
         y=samples,
         sr=sample_rate,
@@ -265,7 +266,21 @@ def _compute_feature_matrix(samples, config):
         n_fft=n_fft,
     )
 
-    stacked = np.vstack([chroma, mfcc, spectral_centroid, spectral_rolloff]).T
+    chroma_rows = _normalize_feature_rows(np, chroma.T)
+    mfcc_rows = _normalize_feature_rows(np, mfcc.T)
+    nyquist = max(float(sample_rate) / 2.0, 1.0)
+    spectral_rows = _normalize_feature_rows(
+        np,
+        np.hstack([
+            spectral_centroid.T / nyquist,
+            spectral_rolloff.T / nyquist,
+        ]),
+    )
+    stacked = np.hstack([
+        chroma_rows,
+        mfcc_rows,
+        spectral_rows * 0.25,
+    ])
     stacked = np.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0)
     return _normalize_feature_rows(np, stacked.astype(np.float32))
 
@@ -292,6 +307,7 @@ def _build_zone_track(episode_info, zone_type, search_seconds, config, cache_pat
                 "sample_rate": config["feature_sample_rate"],
                 "hop_length": config["feature_hop_length"],
                 "version": config["detector_version"],
+                "feature_version": DETECTOR_FEATURE_VERSION,
             },
             sort_keys=True,
             ensure_ascii=False,

@@ -10,6 +10,7 @@ from lib.detector import (
     DETECTOR_RESULT_VERSION,
     _build_cache_paths,
     _build_zone_results,
+    _compute_feature_matrix,
     _derive_local_confidence,
     _find_pairwise_candidate,
     _load_context_from_cache,
@@ -289,6 +290,41 @@ class TimingLogicTests(unittest.TestCase):
             long["length_frames"] * config["frame_step_seconds"],
             config["min_segment_seconds"],
         )
+
+    def test_feature_families_are_balanced_before_similarity(self):
+        class FakeFeatures:
+            @staticmethod
+            def chroma_stft(**_kwargs):
+                return np.ones((12, 4), dtype=np.float32)
+
+            @staticmethod
+            def mfcc(**_kwargs):
+                values = np.ones((9, 4), dtype=np.float32)
+                values[0] = 1000.0
+                return values
+
+            @staticmethod
+            def spectral_centroid(**_kwargs):
+                return np.full((1, 4), 5000.0, dtype=np.float32)
+
+            @staticmethod
+            def spectral_rolloff(**_kwargs):
+                return np.full((1, 4), 7500.0, dtype=np.float32)
+
+        class FakeLibrosa:
+            feature = FakeFeatures()
+
+        config = normalize_timing_detection_config({})
+        samples = np.ones(16000, dtype=np.float32)
+        with patch("lib.detector._load_numeric_dependencies", return_value=(np, FakeLibrosa())):
+            features = _compute_feature_matrix(samples, config)
+
+        chroma_energy = np.mean(np.sum(features[:, :12] ** 2, axis=1))
+        mfcc_energy = np.mean(np.sum(features[:, 12:20] ** 2, axis=1))
+        spectral_energy = np.mean(np.sum(features[:, 20:22] ** 2, axis=1))
+        self.assertGreater(chroma_energy, 0.4)
+        self.assertGreater(mfcc_energy, 0.4)
+        self.assertLess(spectral_energy, 0.1)
 
     def test_short_provider_interval_is_not_used_as_detector_reference(self):
         config = normalize_timing_detection_config({})
