@@ -126,6 +126,8 @@ pip install -r requirements.txt
 - `frame_step_seconds`
 - `min_segment_seconds`
 - `max_segment_seconds`
+- `analysis_audio_language` — предпочитаемая дорожка только для audio-detector (`jpn` по умолчанию; output-аудио не меняет)
+- `reference_core_trim_seconds` — отступ от краёв provider-эталона для контрольного core-match
 - `auto_cut_min_confidence`
 
 `encoding` управляет encode каждой готовой серии:

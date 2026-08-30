@@ -14,12 +14,34 @@ from lib.media import (
     render_episode,
     render_final,
     render_segment_copy,
+    select_audio_stream_by_language,
     select_external_audio,
     validate_episode_render,
 )
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    def test_selects_japanese_embedded_audio_for_analysis(self):
+        streams = [
+            {"audio_index": 0, "language": "rus", "title": "Russian", "is_default": True},
+            {"audio_index": 1, "language": "jpn", "title": "Japanese", "is_default": False},
+        ]
+
+        selected = select_audio_stream_by_language(streams, "jpn", fallback=False)
+
+        self.assertEqual(selected["audio_index"], 1)
+
+    def test_analysis_audio_selection_has_no_implicit_fallback(self):
+        streams = [
+            {"audio_index": 0, "language": "rus", "title": "Russian", "is_default": True},
+        ]
+
+        self.assertIsNone(select_audio_stream_by_language(streams, "jpn", fallback=False))
+        self.assertEqual(
+            select_audio_stream_by_language(streams, "jpn", fallback=True)["audio_index"],
+            0,
+        )
+
     @patch("lib.media.ffprobe_audio_timeline", return_value={"start_time": 0.0, "duration": 100.4})
     @patch("lib.media.detect_audio_streams")
     def test_external_audio_prefers_unique_language_match(self, mock_streams, _mock_timeline):

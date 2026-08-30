@@ -16,6 +16,7 @@ from lib.pipeline import (
     build_output_artifacts,
     build_multi_season_timestamps,
     build_timestamps_from_episodes,
+    compact_manifest_episode,
     describe_media_signature_groups,
     deliver_rendered_output,
     renumber_season_part_episodes,
@@ -257,6 +258,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
         self.assertNotEqual(current, future)
 
+    @patch("lib.pipeline.detect_audio_streams", return_value=[])
     @patch("lib.pipeline.ffprobe_episode_timeline")
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
@@ -265,6 +267,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         mock_signature,
         mock_duration,
         mock_timeline,
+        _mock_audio_streams,
     ):
         mock_signature.return_value = {
             "video": {
@@ -286,6 +289,51 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         self.assertEqual(infos[0]["frame_rate"], "24000/1001")
         self.assertEqual((infos[0]["width"], infos[0]["height"]), (1440, 1080))
 
+    @patch("lib.pipeline.select_external_audio", return_value=None)
+    @patch("lib.pipeline.detect_audio_streams")
+    @patch("lib.pipeline.ffprobe_episode_timeline")
+    @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
+    @patch("lib.pipeline.ffprobe_media_signature")
+    def test_episode_scan_uses_japanese_audio_only_for_detector(
+        self,
+        mock_signature,
+        _mock_duration,
+        mock_timeline,
+        mock_audio_streams,
+        _mock_external_audio,
+    ):
+        mock_signature.return_value = {
+            "video": {"r_frame_rate": "24/1", "width": 1920, "height": 1080},
+            "audio": {},
+        }
+        mock_timeline.return_value = {
+            "video": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.0},
+            "audio": {"start": 0.0, "duration": 10.0, "max_packet_gap": 0.0},
+        }
+        mock_audio_streams.return_value = [
+            {"audio_index": 0, "stream_index": 1, "language": "rus", "title": "Russian", "is_default": True},
+            {"audio_index": 1, "stream_index": 2, "language": "jpn", "title": "Japanese", "is_default": False},
+        ]
+
+        info = build_episode_infos(
+            [(1, Path("episode.mkv"))],
+            preferred_language="rus",
+            analysis_audio_language="jpn",
+        )[0]
+
+        self.assertEqual(info["analysis_audio"]["audio_index"], 1)
+        self.assertEqual(info["analysis_audio"]["language"], "jpn")
+        self.assertIsNone(info["external_audio"])
+
+        mock_audio_streams.return_value = [mock_audio_streams.return_value[0]]
+        fallback = build_episode_infos(
+            [(1, Path("episode.mkv"))],
+            preferred_language="rus",
+            analysis_audio_language="jpn",
+        )[0]
+        self.assertEqual(fallback["analysis_audio"]["audio_index"], 0)
+        self.assertEqual(fallback["analysis_audio"]["language"], "rus")
+
     def test_compilation_frame_rate_uses_majority_and_first_on_tie(self):
         self.assertEqual(select_compilation_frame_rate([
             {"frame_rate": "30/1"},
@@ -296,6 +344,25 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             {"frame_rate": "24000/1001"},
             {"frame_rate": "30/1"},
         ]), "24000/1001")
+
+    def test_compact_manifest_keeps_detector_analysis_audio(self):
+        episode = compact_manifest_episode({
+            "episode": 1,
+            "source_file": "episode.mkv",
+            "original_duration": 10.0,
+            "cleaned_duration": 10.0,
+            "timing_info": {"per_type": {}},
+            "analysis_audio": {
+                "path": "episode.mkv",
+                "audio_index": 1,
+                "stream_index": 2,
+                "language": "jpn",
+                "source": "embedded",
+            },
+        }, ["op", "ed"])
+
+        self.assertEqual(episode["analysis_audio"]["audio_index"], 1)
+        self.assertEqual(episode["analysis_audio"]["language"], "jpn")
         self.assertEqual(select_compilation_frame_rate([
             {"frame_rate": "24000/1001"},
             {"frame_rate": "24000/1001"},
@@ -587,7 +654,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             source = Path(part_dir) / "episode.mkv"
             return [(1, source)], []
 
-        def fake_build_episode_infos(selected, _external_audio, _language):
+        def fake_build_episode_infos(selected, _external_audio, _language, _analysis_language):
             episode, source = selected[0]
             return [{
                 "episode": episode,
@@ -627,6 +694,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             manifest["timing_detection"]["algorithm_version"],
             DETECTOR_RESULT_VERSION,
         )
+        self.assertEqual(manifest["timing_detection"]["analysis_audio_language"], "jpn")
 
     def test_later_season_part_restarts_source_numbering(self):
         episodes = renumber_season_part_episodes(

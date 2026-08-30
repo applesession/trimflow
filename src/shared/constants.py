@@ -59,6 +59,8 @@ DEFAULT_TIMING_DETECTION = {
     "consensus_min_similarity": 0.78,
     "pair_match_min_seconds": 35,
     "high_confidence_boundary_tolerance_seconds": 2.0,
+    "analysis_audio_language": "jpn",
+    "reference_core_trim_seconds": 10.0,
     "cache_enabled": True,
     "cache_dir": None,
     "detector_version": "v2",

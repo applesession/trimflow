@@ -47,7 +47,7 @@ from shared.helpers import (
     sanitize_filename,
     seconds_to_timestamp,
 )
-from shared.constants import TEMP_ROOT
+from shared.constants import DEFAULT_TIMING_DETECTION, TEMP_ROOT
 from core.media import (
     analyze_audio_recovery,
     analyze_external_audio_recovery,
@@ -60,6 +60,7 @@ from core.media import (
     render_concat,
     render_episode,
     render_final,
+    select_audio_stream_by_language,
     select_external_audio,
     validate_episode_render,
 )
@@ -102,6 +103,9 @@ def _compact_type_info(type_info):
         "support_episode_count",
         "consensus_score",
         "reference_interval",
+        "analysis_audio",
+        "full_reference_similarity",
+        "reference_core_similarity",
     ]
     for field in optional_fields:
         value = type_info.get(field)
@@ -158,6 +162,8 @@ def compact_manifest_episode(manifest_episode, skip_types):
         compact["audio_recovery"] = manifest_episode["audio_recovery"]
     if manifest_episode.get("audio"):
         compact["audio"] = manifest_episode["audio"]
+    if manifest_episode.get("analysis_audio"):
+        compact["analysis_audio"] = manifest_episode["analysis_audio"]
     return compact
 
 
@@ -203,6 +209,10 @@ def build_compact_manifest(
             "available": detector_context["available"],
             "reason": detector_context["reason"],
             "algorithm_version": DETECTOR_RESULT_VERSION,
+            "analysis_audio_language": timing_detection.get(
+                "analysis_audio_language",
+                DEFAULT_TIMING_DETECTION["analysis_audio_language"],
+            ),
         },
         "timing_sources_summary": timing_sources_summary or build_timing_sources_summary(
             prefetched_anilibria_results,
@@ -375,6 +385,7 @@ def build_episode_fingerprint(
                         "stream_index": item["external_audio"]["stream_index"],
                     }
                 } if item.get("external_audio") else {}),
+                **({"analysis_audio": item["analysis_audio"]} if item.get("analysis_audio") else {}),
             }
             for item in episode_infos
         ],
@@ -549,7 +560,12 @@ def build_timing_sources_summary(prefetched_anilibria_results, prefetched_aniski
     }
 
 
-def build_episode_infos(episode_files, external_audio_files=None, preferred_language="rus"):
+def build_episode_infos(
+    episode_files,
+    external_audio_files=None,
+    preferred_language="rus",
+    analysis_audio_language="jpn",
+):
     external_by_episode = {}
     for episode_number, path in external_audio_files or []:
         external_by_episode.setdefault(episode_number, []).append(path)
@@ -568,6 +584,44 @@ def build_episode_infos(episode_files, external_audio_files=None, preferred_lang
             container_duration,
             preferred_language,
         )
+        embedded_audio_streams = detect_audio_streams(path)
+        analysis_stream = select_audio_stream_by_language(
+            embedded_audio_streams,
+            analysis_audio_language,
+            fallback=False,
+        )
+        if analysis_stream is not None:
+            analysis_audio = {
+                "path": str(path),
+                "audio_index": analysis_stream["audio_index"],
+                "stream_index": analysis_stream["stream_index"],
+                "language": analysis_stream.get("language") or analysis_audio_language,
+                "source": "embedded",
+            }
+        elif external_audio is not None:
+            analysis_audio = {
+                "path": external_audio["path"],
+                "audio_index": external_audio["audio_index"],
+                "stream_index": external_audio["stream_index"],
+                "language": external_audio.get("language") or preferred_language,
+                "source": "external",
+            }
+        else:
+            fallback_stream = select_audio_stream_by_language(
+                embedded_audio_streams,
+                preferred_language,
+            )
+            analysis_audio = (
+                {
+                    "path": str(path),
+                    "audio_index": fallback_stream["audio_index"],
+                    "stream_index": fallback_stream["stream_index"],
+                    "language": fallback_stream.get("language") or preferred_language,
+                    "source": "embedded",
+                }
+                if fallback_stream is not None
+                else None
+            )
         episode_infos.append({
             "episode": episode_number,
             "path": str(path),
@@ -578,6 +632,7 @@ def build_episode_infos(episode_files, external_audio_files=None, preferred_lang
             "width": video.get("width"),
             "height": video.get("height"),
             "external_audio": external_audio,
+            "analysis_audio": analysis_audio,
         })
     return episode_infos
 
@@ -744,6 +799,9 @@ def build_type_info(
     reference_episode=None,
     reference_source="none",
     reference_similarity=None,
+    analysis_audio=None,
+    full_reference_similarity=None,
+    reference_core_similarity=None,
 ):
     return {
         "source": source,
@@ -760,6 +818,9 @@ def build_type_info(
         "reference_episode": reference_episode,
         "reference_source": reference_source,
         "reference_similarity": reference_similarity,
+        "analysis_audio": analysis_audio,
+        "full_reference_similarity": full_reference_similarity,
+        "reference_core_similarity": reference_core_similarity,
     }
 
 
@@ -837,6 +898,9 @@ def merge_timing_sources(skip_types, anilibria_result, aniskip_result, detector_
             reference_episode=detector_result.get("reference_episode"),
             reference_source=detector_result.get("reference_source", "none"),
             reference_similarity=detector_result.get("reference_similarity"),
+            analysis_audio=detector_result.get("analysis_audio"),
+            full_reference_similarity=detector_result.get("full_reference_similarity"),
+            reference_core_similarity=detector_result.get("reference_core_similarity"),
         )
 
         if per_type[skip_type]["removed"]:
@@ -900,6 +964,9 @@ def build_timing_info(skip_types, per_type, anilibria_result, aniskip_result, de
                 "reference_episode": per_type[skip_type]["reference_episode"],
                 "reference_source": per_type[skip_type]["reference_source"],
                 "reference_similarity": per_type[skip_type]["reference_similarity"],
+                "analysis_audio": per_type[skip_type]["analysis_audio"],
+                "full_reference_similarity": per_type[skip_type]["full_reference_similarity"],
+                "reference_core_similarity": per_type[skip_type]["reference_core_similarity"],
             }
             for skip_type in skip_types
         },
@@ -1025,6 +1092,7 @@ def build_episode_render_plan(
         ],
         "audio_recovery": audio_recovery,
         "audio": audio_manifest,
+        "analysis_audio": episode_info.get("analysis_audio"),
     }
     return {
         "keep_segments": keep_segments,
@@ -1852,7 +1920,12 @@ def process_multi_season_job(job, runtime_status_path=None):
             selected, excluded = filter_episode_files(detected, set(episodes))
             external_audio = find_external_audio_files(part_dir, set(episodes))
             log_episode_selection(selected, ignored + excluded)
-            infos = build_episode_infos(selected, external_audio, preferred_language)
+            infos = build_episode_infos(
+                selected,
+                external_audio,
+                preferred_language,
+                timing_detection["analysis_audio_language"],
+            )
             all_episode_infos.extend(infos)
             season_inputs.append((season, part_index, part_dir, episodes))
 
@@ -1949,6 +2022,10 @@ def process_multi_season_job(job, runtime_status_path=None):
             "timing_detection": {
                 "enabled": timing_detection["enabled"],
                 "algorithm_version": DETECTOR_RESULT_VERSION,
+                "analysis_audio_language": timing_detection.get(
+                    "analysis_audio_language",
+                    DEFAULT_TIMING_DETECTION["analysis_audio_language"],
+                ),
             },
             "timing_sources_summary": {
                 key: any(summary.get(key) for summary in timing_summaries)
@@ -2095,6 +2172,7 @@ def process_job(job, runtime_status_path=None):
                 episode_files,
                 external_audio_files,
                 preferred_language,
+                timing_detection["analysis_audio_language"],
             )[0]
             external_audio = episode_info.get("external_audio")
             pretty_base_name = artifacts["pretty_base_name"]
@@ -2220,6 +2298,7 @@ def process_job(job, runtime_status_path=None):
             episode_files,
             external_audio_files,
             preferred_language,
+            timing_detection["analysis_audio_language"],
         )
         frame_rate = processing.get("target_frame_rate") or select_compilation_frame_rate(episode_infos)
         if processing.get("target_frame_width") and processing.get("target_frame_height"):

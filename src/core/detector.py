@@ -11,8 +11,8 @@ from shared.constants import DEFAULT_TIMING_DETECTION
 
 
 SEASON_CLUSTER_TOLERANCE_SECONDS = 10.0
-DETECTOR_FEATURE_VERSION = "balanced_families_v1"
-DETECTOR_RESULT_VERSION = "balanced_features_v3"
+DETECTOR_FEATURE_VERSION = "analysis_audio_v2"
+DETECTOR_RESULT_VERSION = "reference_core_v4"
 CONFIDENCE_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 VALID_AUTO_CUT_MIN_CONFIDENCE = {"medium", "high", "disabled"}
 
@@ -36,6 +36,12 @@ def normalize_timing_detection_config(job):
     merged["pair_match_min_seconds"] = float(merged["pair_match_min_seconds"])
     merged["high_confidence_boundary_tolerance_seconds"] = float(
         merged["high_confidence_boundary_tolerance_seconds"]
+    )
+    merged["analysis_audio_language"] = str(
+        merged.get("analysis_audio_language") or ""
+    ).strip().lower()
+    merged["reference_core_trim_seconds"] = float(
+        merged["reference_core_trim_seconds"]
     )
     merged["cache_enabled"] = bool(merged.get("cache_enabled", True))
     cache_dir = merged.get("cache_dir")
@@ -63,6 +69,10 @@ def normalize_timing_detection_config(job):
         raise ValueError(
             "timing_detection.high_confidence_boundary_tolerance_seconds must not be negative"
         )
+    if not merged["analysis_audio_language"]:
+        raise ValueError("timing_detection.analysis_audio_language must not be empty")
+    if merged["reference_core_trim_seconds"] < 0:
+        raise ValueError("timing_detection.reference_core_trim_seconds must not be negative")
     if merged["auto_cut_min_confidence"] not in VALID_AUTO_CUT_MIN_CONFIDENCE:
         allowed = ", ".join(sorted(VALID_AUTO_CUT_MIN_CONFIDENCE))
         raise ValueError(f"timing_detection.auto_cut_min_confidence must be one of: {allowed}")
@@ -141,6 +151,8 @@ def build_detector_cache_key(episode_infos, config, detector_inputs=None):
         "high_confidence_boundary_tolerance_seconds": config[
             "high_confidence_boundary_tolerance_seconds"
         ],
+        "analysis_audio_language": config["analysis_audio_language"],
+        "reference_core_trim_seconds": config["reference_core_trim_seconds"],
         "detector_version": config["detector_version"],
         "auto_cut_min_confidence": config["auto_cut_min_confidence"],
     }
@@ -152,6 +164,7 @@ def build_detector_cache_key(episode_infos, config, detector_inputs=None):
                 "episode": info["episode"],
                 "path": str(info["path"]),
                 "duration": round(float(info["duration"]), 3),
+                "analysis_audio": info.get("analysis_audio"),
             }
             for info in sorted(episode_infos, key=lambda item: item["episode"])
         ],
@@ -193,7 +206,13 @@ def _build_cache_paths(temp_dir: Path, config, cache_key):
     }
 
 
-def _extract_audio_samples(path: Path, start: float, duration: float, sample_rate: int):
+def _extract_audio_samples(
+    path: Path,
+    start: float,
+    duration: float,
+    sample_rate: int,
+    audio_index: int = 0,
+):
     np, _ = _load_numeric_dependencies()
     print(
         "[DETECTOR] ffmpeg extract start:"
@@ -208,6 +227,7 @@ def _extract_audio_samples(path: Path, start: float, duration: float, sample_rat
         "-ss", f"{start:.3f}",
         "-t", f"{duration:.3f}",
         "-i", str(path),
+        "-map", f"0:a:{int(audio_index)}",
         "-vn",
         "-ac", "1",
         "-ar", str(sample_rate),
@@ -288,6 +308,16 @@ def _compute_feature_matrix(samples, config):
 def _build_zone_track(episode_info, zone_type, search_seconds, config, cache_paths):
     np, _ = _load_numeric_dependencies()
     episode_path = Path(episode_info["path"])
+    analysis_audio = dict(episode_info.get("analysis_audio") or {})
+    analysis_audio_path = Path(analysis_audio.get("path") or episode_path)
+    analysis_audio_index = int(analysis_audio.get("audio_index", 0))
+    normalized_analysis_audio = {
+        "path": str(analysis_audio_path),
+        "audio_index": analysis_audio_index,
+        "stream_index": analysis_audio.get("stream_index"),
+        "language": analysis_audio.get("language"),
+        "source": analysis_audio.get("source", "embedded"),
+    }
     duration = float(episode_info["duration"])
     zone_duration = min(duration, float(search_seconds))
 
@@ -308,6 +338,7 @@ def _build_zone_track(episode_info, zone_type, search_seconds, config, cache_pat
                 "hop_length": config["feature_hop_length"],
                 "version": config["detector_version"],
                 "feature_version": DETECTOR_FEATURE_VERSION,
+                "analysis_audio": normalized_analysis_audio,
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -334,13 +365,15 @@ def _build_zone_track(episode_info, zone_type, search_seconds, config, cache_pat
             f" zone={zone_type}"
             f" start={zone_start:.3f}"
             f" duration={zone_duration:.3f}"
-            f" file={episode_path.name}"
+            f" file={analysis_audio_path.name}"
+            f" audio_index={analysis_audio_index}"
         )
         samples = _extract_audio_samples(
-            episode_path,
+            analysis_audio_path,
             start=zone_start,
             duration=zone_duration,
             sample_rate=config["feature_sample_rate"],
+            audio_index=analysis_audio_index,
         )
         features = _compute_feature_matrix(samples, config)
         print(
@@ -361,6 +394,7 @@ def _build_zone_track(episode_info, zone_type, search_seconds, config, cache_pat
         "zone_duration": zone_duration,
         "features": features,
         "cache_hit": cache_hit,
+        "analysis_audio": normalized_analysis_audio,
     }
 
 
@@ -605,6 +639,7 @@ def _build_zone_results(zone_tracks, config, zone_type):
                 "reference_episode": None,
                 "reference_source": "none",
                 "reference_similarity": None,
+                "analysis_audio": track.get("analysis_audio"),
             }
             continue
 
@@ -633,6 +668,7 @@ def _build_zone_results(zone_tracks, config, zone_type):
             "reference_episode": None,
             "reference_source": "none",
             "reference_similarity": candidate["score"],
+            "analysis_audio": track.get("analysis_audio"),
         }
 
     confidence = max(
@@ -724,6 +760,45 @@ def _match_reference_to_track(reference_track, reference_interval, target_track,
     return best
 
 
+def _match_reference_core_to_track(
+    reference_track,
+    reference_interval,
+    target_track,
+    config,
+):
+    reference_length = reference_interval["end"] - reference_interval["start"]
+    max_trim = max(0.0, (reference_length - config["min_segment_seconds"]) / 2.0)
+    trim = min(config["reference_core_trim_seconds"], max_trim)
+    if trim <= 0:
+        return None
+
+    core_interval = {
+        "start": reference_interval["start"] + trim,
+        "end": reference_interval["end"] - trim,
+    }
+    match = _match_reference_to_track(
+        reference_track,
+        core_interval,
+        target_track,
+        config,
+    )
+    if match is None:
+        return None
+
+    core_start = (
+        target_track["zone_start"]
+        + match["start_frame"] * config["frame_step_seconds"]
+    )
+    start = round(core_start - trim, 3)
+    end = round(start + reference_length, 3)
+    return {
+        "start": start,
+        "end": end,
+        "score": match["score"],
+        "trim_seconds": round(trim, 3),
+    }
+
+
 def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode, anilibria_by_episode):
     reference_segment = _select_reference_segment(
         zone_type,
@@ -762,6 +837,11 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
     reference_length = reference_interval["end"] - reference_interval["start"]
     high_threshold = max(config["consensus_min_similarity"], 0.8)
     medium_threshold = max(config["consensus_min_similarity"] - 0.08, 0.6)
+    base_strategy = (
+        "anilibria_reference"
+        if reference_segment["source"] == "anilibria_exact"
+        else "aniskip_reference"
+    )
 
     for track in zone_tracks:
         if track["episode"] == reference_segment["episode"]:
@@ -778,14 +858,11 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
                 "consensus_score": 1.0,
                 "reference_interval": reference_interval,
                 "cache_hit": track.get("cache_hit", False),
-                "match_strategy": (
-                    "anilibria_reference"
-                    if reference_segment["source"] == "anilibria_exact"
-                    else "aniskip_reference"
-                ),
+                "match_strategy": base_strategy,
                 "reference_episode": reference_segment["episode"],
                 "reference_source": reference_segment["source"],
                 "reference_similarity": 1.0,
+                "analysis_audio": track.get("analysis_audio"),
             }
             best_scores.append(1.0)
             continue
@@ -808,6 +885,7 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
                 "reference_episode": reference_segment["episode"],
                 "reference_source": reference_segment["source"],
                 "reference_similarity": None,
+                "analysis_audio": track.get("analysis_audio"),
             }
             continue
 
@@ -818,13 +896,47 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
         review_required = True
         found = False
         reason = "reference_match_not_found"
+        match_strategy = "not_found"
+        result_similarity = None
+        full_reference_similarity = None
+        reference_core_similarity = None
 
         if similarity >= high_threshold and _interval_is_valid(start, end, config):
             confidence = "high"
             reason = "reference_match_used"
+            match_strategy = base_strategy
+            result_similarity = similarity
         elif similarity >= medium_threshold:
             confidence = "medium"
             reason = "reference_match_used"
+            match_strategy = base_strategy
+            result_similarity = similarity
+
+            core_match = _match_reference_core_to_track(
+                reference_track,
+                reference_interval,
+                track,
+                config,
+            )
+            if core_match is not None:
+                full_reference_similarity = similarity
+                reference_core_similarity = core_match["score"]
+                tolerance = config["high_confidence_boundary_tolerance_seconds"]
+                boundaries_agree = (
+                    abs(core_match["start"] - start) <= tolerance
+                    and abs(core_match["end"] - end) <= tolerance
+                )
+                if (
+                    core_match["score"] >= high_threshold
+                    and boundaries_agree
+                    and _interval_is_valid(core_match["start"], core_match["end"], config)
+                ):
+                    confidence = "high"
+                    start = core_match["start"]
+                    end = core_match["end"]
+                    result_similarity = core_match["score"]
+                    reason = "reference_core_match_used"
+                    match_strategy = f"{base_strategy}_core"
 
         accepted = confidence_meets_threshold(confidence, config["auto_cut_min_confidence"])
         review_required = not accepted
@@ -839,22 +951,19 @@ def _build_reference_results(zone_tracks, config, zone_type, aniskip_by_episode,
             "review_required": review_required,
             "reason": reason,
             "support_episode_count": 2 if confidence != "low" else 0,
-            "consensus_score": similarity if confidence != "low" else None,
+            "consensus_score": result_similarity if confidence != "low" else None,
             "reference_interval": reference_interval,
             "cache_hit": track.get("cache_hit", False),
-                "match_strategy": (
-                    "anilibria_reference"
-                    if confidence != "low" and reference_segment["source"] == "anilibria_exact"
-                    else "aniskip_reference"
-                    if confidence != "low"
-                    else "not_found"
-                ),
-                "reference_episode": reference_segment["episode"],
-                "reference_source": reference_segment["source"],
-                "reference_similarity": similarity if confidence != "low" else None,
+            "match_strategy": match_strategy,
+            "reference_episode": reference_segment["episode"],
+            "reference_source": reference_segment["source"],
+            "reference_similarity": result_similarity if confidence != "low" else None,
+            "full_reference_similarity": full_reference_similarity,
+            "reference_core_similarity": reference_core_similarity,
+            "analysis_audio": track.get("analysis_audio"),
         }
         if confidence != "low":
-            best_scores.append(similarity)
+            best_scores.append(result_similarity)
 
     confidence = "none"
     if any(result.get("confidence") == "high" for result in results.values()):
@@ -883,6 +992,19 @@ def _merge_zone_results(preferred_result, fallback_result):
             continue
         if fallback_episode is None:
             merged_results[episode] = preferred_episode
+            continue
+
+        fallback_strategy = fallback_episode.get("match_strategy", "")
+        if (
+            fallback_episode.get("confidence") == "high"
+            and fallback_strategy in {
+                "anilibria_reference",
+                "anilibria_reference_core",
+                "aniskip_reference",
+                "aniskip_reference_core",
+            }
+        ):
+            merged_results[episode] = fallback_episode
             continue
 
         if not preferred_episode.get("review_required", True):
@@ -923,6 +1045,7 @@ def _serialize_context_for_cache(context):
         "consensus_scores": context.get("consensus_scores", {}),
         "zone_confidences": context.get("zone_confidences", {}),
         "input_reference_episodes": context.get("input_reference_episodes", {}),
+        "analysis_audio_by_episode": context.get("analysis_audio_by_episode", {}),
     }
     return payload
 
@@ -947,6 +1070,10 @@ def _load_context_from_cache(context, cache_paths):
     context["consensus_scores"] = payload.get("consensus_scores", {"op": None, "ed": None})
     context["zone_confidences"] = payload.get("zone_confidences", {"op": "none", "ed": "none"})
     context["input_reference_episodes"] = payload.get("input_reference_episodes", {"op": [], "ed": []})
+    context["analysis_audio_by_episode"] = {
+        int(episode): value
+        for episode, value in payload.get("analysis_audio_by_episode", {}).items()
+    }
 
     for zone_results in context["results"].values():
         for episode_result in zone_results.values():
@@ -981,6 +1108,10 @@ def build_detector_context(episode_infos, config, temp_dir: Path, detector_input
         "consensus_scores": {skip_type: None for skip_type in ["op", "ed"]},
         "zone_confidences": {skip_type: "none" for skip_type in ["op", "ed"]},
         "input_reference_episodes": {skip_type: [] for skip_type in ["op", "ed"]},
+        "analysis_audio_by_episode": {
+            info["episode"]: info.get("analysis_audio")
+            for info in episode_infos
+        },
         "analysis_dir": str((temp_dir / "timing_detection").resolve()),
         "cache_key": cache_key,
         "cache_root": str(cache_paths["root"].resolve()),
@@ -1084,7 +1215,12 @@ def build_detector_context(episode_infos, config, temp_dir: Path, detector_input
 
         context["available"] = True
         if any(
-            result.get("match_strategy") in {"aniskip_reference", "anilibria_reference"}
+            result.get("match_strategy") in {
+                "aniskip_reference",
+                "aniskip_reference_core",
+                "anilibria_reference",
+                "anilibria_reference_core",
+            }
             for zone_results in context["results"].values()
             for result in zone_results.values()
         ):
@@ -1102,6 +1238,7 @@ def build_detector_context(episode_infos, config, temp_dir: Path, detector_input
             "consensus_scores": context["consensus_scores"],
             "zone_confidences": context["zone_confidences"],
             "input_reference_episodes": context["input_reference_episodes"],
+            "analysis_audio_by_episode": context["analysis_audio_by_episode"],
         }
         (analysis_dir / "detector_summary.json").write_text(
             json.dumps(debug_payload, indent=2, ensure_ascii=False),

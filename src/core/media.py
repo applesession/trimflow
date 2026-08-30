@@ -50,36 +50,43 @@ def _build_language_variants(preferred_language):
     return {normalized} if normalized else set()
 
 
-def get_preferred_audio_stream(video_path, preferred_language="rus"):
-    streams = detect_audio_streams(video_path)
+def select_audio_stream_by_language(streams, preferred_language="rus", *, fallback=True):
     if not streams:
-        return 0
+        return None
 
     preferred_variants = _build_language_variants(preferred_language)
     best_match = None
 
     for stream in streams:
-        score = 0
+        language_score = 0
         language = str(stream.get("language") or "").strip().lower()
         title = str(stream.get("title") or "").strip().lower()
         handler_name = str(stream.get("handler_name") or "").strip().lower()
         searchable_text = " ".join(part for part in [language, title, handler_name] if part)
 
         if language in preferred_variants:
-            score += 100
+            language_score = 100
         elif any(variant and variant in searchable_text for variant in preferred_variants):
-            score += 60
+            language_score = 60
 
-        if stream.get("is_default"):
-            score += 5
+        if language_score <= 0:
+            continue
 
+        score = language_score + (5 if stream.get("is_default") else 0)
         candidate = (score, -stream["audio_index"], stream["audio_index"])
         if best_match is None or candidate > best_match:
             best_match = candidate
 
-    if best_match and best_match[0] > 0:
-        return best_match[2]
-    return streams[0]["audio_index"]
+    if best_match:
+        selected_index = best_match[2]
+        return next(stream for stream in streams if stream["audio_index"] == selected_index)
+    return streams[0] if fallback else None
+
+
+def get_preferred_audio_stream(video_path, preferred_language="rus"):
+    streams = detect_audio_streams(video_path)
+    selected = select_audio_stream_by_language(streams, preferred_language)
+    return selected["audio_index"] if selected is not None else 0
 
 
 def _external_language_score(path, stream, preferred_language):

@@ -9,11 +9,14 @@ from lib.aniskip import build_quality_summary, summarize_skips
 from lib.detector import (
     DETECTOR_RESULT_VERSION,
     _build_cache_paths,
+    _build_reference_results,
     _build_zone_results,
     _compute_feature_matrix,
     _derive_local_confidence,
+    _extract_audio_samples,
     _find_pairwise_candidate,
     _load_context_from_cache,
+    _match_reference_core_to_track,
     _needs_reference_fallback,
     _select_reference_segment,
     build_detector_cache_key,
@@ -67,6 +70,8 @@ class TimingLogicTests(unittest.TestCase):
         self.assertTrue(config["cache_enabled"])
         self.assertEqual(config["auto_cut_min_confidence"], "high")
         self.assertEqual(config["high_confidence_boundary_tolerance_seconds"], 2.0)
+        self.assertEqual(config["analysis_audio_language"], "jpn")
+        self.assertEqual(config["reference_core_trim_seconds"], 10.0)
 
     def test_normalize_timing_detection_config_applies_overrides(self):
         config = normalize_timing_detection_config({
@@ -76,6 +81,8 @@ class TimingLogicTests(unittest.TestCase):
                 "frame_step_seconds": "0.5",
                 "feature_sample_rate": "22050",
                 "consensus_min_similarity": "0.81",
+                "analysis_audio_language": "JPN",
+                "reference_core_trim_seconds": "8.0",
             }
         })
 
@@ -84,6 +91,8 @@ class TimingLogicTests(unittest.TestCase):
         self.assertEqual(config["frame_step_seconds"], 0.5)
         self.assertEqual(config["feature_sample_rate"], 22050)
         self.assertEqual(config["consensus_min_similarity"], 0.81)
+        self.assertEqual(config["analysis_audio_language"], "jpn")
+        self.assertEqual(config["reference_core_trim_seconds"], 8.0)
 
     def test_normalize_timing_detection_config_rejects_unsafe_values(self):
         invalid_configs = [
@@ -92,6 +101,8 @@ class TimingLogicTests(unittest.TestCase):
             {"min_segment_seconds": 90, "max_segment_seconds": 45},
             {"consensus_min_similarity": 1.1},
             {"auto_cut_min_confidence": "low"},
+            {"analysis_audio_language": ""},
+            {"reference_core_trim_seconds": -1},
         ]
 
         for timing_detection in invalid_configs:
@@ -124,6 +135,34 @@ class TimingLogicTests(unittest.TestCase):
             build_detector_cache_key(episode_infos, base_config),
             build_detector_cache_key(episode_infos, changed_config),
         )
+
+    def test_build_detector_cache_key_changes_on_analysis_audio_stream(self):
+        config = normalize_timing_detection_config({})
+        base = [{
+            "episode": 1,
+            "path": "a.mkv",
+            "duration": 1400.0,
+            "analysis_audio": {"path": "a.mkv", "audio_index": 0, "language": "rus"},
+        }]
+        changed = [{**base[0], "analysis_audio": {
+            "path": "a.mkv", "audio_index": 1, "language": "jpn",
+        }}]
+
+        self.assertNotEqual(
+            build_detector_cache_key(base, config),
+            build_detector_cache_key(changed, config),
+        )
+
+    def test_audio_extraction_maps_selected_audio_stream(self):
+        completed = type("Completed", (), {"stdout": np.ones(4, dtype=np.float32).tobytes()})()
+        with patch("lib.detector._load_numeric_dependencies", return_value=(np, None)), patch(
+            "lib.detector.subprocess.run", return_value=completed
+        ) as mock_run:
+            samples = _extract_audio_samples(Path("episode.mkv"), 0, 10, 16000, audio_index=1)
+
+        command = mock_run.call_args.args[0]
+        self.assertEqual(command[command.index("-map") + 1], "0:a:1")
+        self.assertEqual(len(samples), 4)
 
     def test_build_detector_cache_key_tracks_auto_cut_threshold(self):
         base_config = normalize_timing_detection_config({})
@@ -343,6 +382,71 @@ class TimingLogicTests(unittest.TestCase):
 
         self.assertIsNone(selected)
 
+    @staticmethod
+    def _reference_tracks():
+        return [
+            {"episode": 1, "zone_start": 0.0, "cache_hit": False},
+            {"episode": 2, "zone_start": 0.0, "cache_hit": False},
+        ]
+
+    @staticmethod
+    def _anilibria_ed_reference():
+        return {1: {"segments": [{
+            "type": "ed",
+            "start": 100.0,
+            "end": 190.0,
+            "source": "anilibria_exact",
+        }]}}
+
+    def test_reference_core_promotes_consistent_medium_match_to_high(self):
+        config = normalize_timing_detection_config({})
+        matches = [
+            {"start_frame": 400, "score": 0.75},
+            {"start_frame": 440, "score": 0.81},
+        ]
+        with patch("lib.detector._match_reference_to_track", side_effect=matches):
+            result = _build_reference_results(
+                self._reference_tracks(), config, "ed", {}, self._anilibria_ed_reference()
+            )
+
+        episode = result["results"][2]
+        self.assertEqual(episode["confidence"], "high")
+        self.assertTrue(episode["found"])
+        self.assertEqual(episode["match_strategy"], "anilibria_reference_core")
+        self.assertEqual((episode["start"], episode["end"]), (100.0, 190.0))
+        self.assertEqual(episode["full_reference_similarity"], 0.75)
+        self.assertEqual(episode["reference_core_similarity"], 0.81)
+
+    def test_reference_core_boundary_disagreement_stays_medium(self):
+        config = normalize_timing_detection_config({})
+        matches = [
+            {"start_frame": 400, "score": 0.75},
+            {"start_frame": 480, "score": 0.95},
+        ]
+        with patch("lib.detector._match_reference_to_track", side_effect=matches):
+            result = _build_reference_results(
+                self._reference_tracks(), config, "ed", {}, self._anilibria_ed_reference()
+            )
+
+        episode = result["results"][2]
+        self.assertEqual(episode["confidence"], "medium")
+        self.assertFalse(episode["found"])
+        self.assertTrue(episode["review_required"])
+        self.assertEqual(episode["match_strategy"], "anilibria_reference")
+
+    def test_reference_core_does_not_shorten_reference_below_minimum(self):
+        config = normalize_timing_detection_config({})
+        with patch("lib.detector._match_reference_to_track") as mock_match:
+            result = _match_reference_core_to_track(
+                {"zone_start": 0.0},
+                {"start": 100.0, "end": 145.0},
+                {"zone_start": 0.0},
+                config,
+            )
+
+        self.assertIsNone(result)
+        mock_match.assert_not_called()
+
     def test_auto_cut_min_confidence_medium_accepts_medium_consensus(self):
         config = normalize_timing_detection_config({
             "timing_detection": {"auto_cut_min_confidence": "medium"}
@@ -495,16 +599,22 @@ class TimingLogicTests(unittest.TestCase):
         info = build_type_info(
             source="audio_fingerprint",
             confidence="high",
-            match_strategy="anilibria_reference",
+            match_strategy="anilibria_reference_core",
             reference_episode=2,
             reference_source="anilibria_exact",
-            reference_similarity=0.99,
+            reference_similarity=0.83,
+            analysis_audio={"language": "jpn", "audio_index": 1},
+            full_reference_similarity=0.75,
+            reference_core_similarity=0.83,
         )
 
-        self.assertEqual(info["match_strategy"], "anilibria_reference")
+        self.assertEqual(info["match_strategy"], "anilibria_reference_core")
         self.assertEqual(info["reference_episode"], 2)
         self.assertEqual(info["reference_source"], "anilibria_exact")
-        self.assertEqual(info["reference_similarity"], 0.99)
+        self.assertEqual(info["reference_similarity"], 0.83)
+        self.assertEqual(info["analysis_audio"]["language"], "jpn")
+        self.assertEqual(info["full_reference_similarity"], 0.75)
+        self.assertEqual(info["reference_core_similarity"], 0.83)
 
     def test_summarize_skips_marks_manual_review(self):
         remove_segments = [{
