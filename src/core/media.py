@@ -877,25 +877,30 @@ def _build_episode_render_cmd(
     audio_selector = f"[{audio_input_index}:a:{audio_stream_index}]"
     filters = []
     segment_count = len(keep_segments)
+    filters.append("[0:v:0]setpts=PTS-STARTPTS[vnormalized]")
+    if audio_stream_index is not None:
+        filters.append(
+            f"{audio_selector}asetpts=PTS-STARTPTS[anormalized]"
+        )
     if segment_count > 1:
         filters.append(
-            f"[0:v:0]split={segment_count}"
+            f"[vnormalized]split={segment_count}"
             + "".join(f"[vsrc{index}]" for index in range(segment_count))
         )
         if audio_stream_index is not None:
             filters.append(
-                f"{audio_selector}asplit={segment_count}"
+                f"[anormalized]asplit={segment_count}"
                 + "".join(f"[asrc{index}]" for index in range(segment_count))
             )
 
     for index, (start, end) in enumerate(keep_segments):
-        video_input = f"[vsrc{index}]" if segment_count > 1 else "[0:v:0]"
+        video_input = f"[vsrc{index}]" if segment_count > 1 else "[vnormalized]"
         filters.append(
             f"{video_input}trim=start={start:.6f}:end={end:.6f},"
             f"setpts=PTS-STARTPTS[v{index}]"
         )
         if audio_stream_index is not None:
-            audio_input = f"[asrc{index}]" if segment_count > 1 else audio_selector
+            audio_input = f"[asrc{index}]" if segment_count > 1 else "[anormalized]"
             filters.append(
                 f"{audio_input}atrim=start={start:.6f}:end={end:.6f},"
                 f"asetpts=PTS-STARTPTS[a{index}]"

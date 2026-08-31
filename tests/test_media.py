@@ -103,7 +103,8 @@ class MediaAudioSelectionTests(unittest.TestCase):
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
         self.assertEqual(command[command.index("-filter_complex") - 1], "RUS Sound/episode.mka")
-        self.assertIn("[2:a:1]atrim", graph)
+        self.assertIn("[2:a:1]asetpts=PTS-STARTPTS[anormalized]", graph)
+        self.assertIn("[anormalized]atrim", graph)
         self.assertIn("[acat]apad=pad_dur=15[aexternal]", graph)
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
@@ -225,6 +226,28 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertEqual(command[command.index("-t") + 1], "110.000000")
         self.assertIn("overlay=W-w-20:20", graph)
         self.assertNotIn("0:s", command)
+
+    @patch("lib.media.run")
+    def test_episode_render_normalizes_negative_input_timestamps_before_trim(self, mock_run):
+        render_episode(
+            "episode.mkv",
+            "rendered.mkv",
+            [(0.0, 1422.045)],
+            "watermark.png",
+            {"video_codec": "libx264"},
+            audio_stream_index=0,
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        video_normalization = "[0:v:0]setpts=PTS-STARTPTS[vnormalized]"
+        audio_normalization = "[0:a:0]asetpts=PTS-STARTPTS[anormalized]"
+        video_trim = "[vnormalized]trim=start=0.000000:end=1422.045000"
+        audio_trim = "[anormalized]atrim=start=0.000000:end=1422.045000"
+
+        self.assertLess(graph.index(video_normalization), graph.index(video_trim))
+        self.assertLess(graph.index(audio_normalization), graph.index(audio_trim))
+        self.assertEqual(command[command.index("-t") + 1], "1422.045000")
 
     @patch("lib.media.run")
     def test_episode_render_supports_video_without_audio(self, mock_run):
