@@ -44,7 +44,23 @@ class TorrentSelectionTests(unittest.TestCase):
             {1, 2, 3},
             path_filter="HEVC",
             timeout=60,
+            allow_missing_episodes=False,
         )
+
+    @patch("core.pipeline.find_episode_files", return_value=([(500, Path("episode-500.mkv"))], []))
+    @patch("core.pipeline.download_selected_episodes")
+    def test_flexible_pipeline_allows_missing_torrent_episodes(self, mock_download, _mock_find):
+        from core.pipeline import collect_episode_files
+
+        collect_episode_files(
+            {"type": "magnet", "magnet": "magnet:?xt=urn:btih:test", "download_dir": "downloads/test"},
+            "test",
+            {500, 501},
+            processing={"allow_missing_episodes": True},
+            download_timeout=60,
+        )
+
+        self.assertTrue(mock_download.call_args.kwargs["allow_missing_episodes"])
 
     @patch("core.pipeline.find_episode_files", return_value=([(1, Path("episode-001.mkv"))], []))
     @patch("core.pipeline.download_selected_episodes_from_sources")
@@ -324,6 +340,15 @@ class TorrentSelectionTests(unittest.TestCase):
                 {"index": 1, "path": "Show [001].mkv"},
                 {"index": 2, "path": "Show [002].wmv"},
             ], {1, 2})
+
+    def test_flexible_selection_skips_missing_episode(self):
+        selected = select_torrent_episode_files([
+            {"index": 1, "path": "Show [500].mkv"},
+            {"index": 2, "path": "Show [501].mkv"},
+            {"index": 3, "path": "Show [503].mkv"},
+        ], {500, 501, 502, 503}, allow_missing_episodes=True)
+
+        self.assertEqual([item["episode"] for item in selected], [500, 501, 503])
 
     @patch("core.torrent.subprocess.check_output")
     @patch("core.torrent.run")

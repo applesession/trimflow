@@ -132,6 +132,20 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(payload["source_path_contains"], "HEVC/TV")
         self.assertEqual(result["job"]["processing"]["source_path_contains"], "HEVC/TV")
 
+    def test_add_command_question_mark_allows_missing_torrent_episodes(self):
+        command = "/add One Piece ; 500-600? ; magnet:?xt=urn:btih:testhash ; 1"
+
+        payload = parse_add_command(command)
+        result = add_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            command,
+        )
+
+        self.assertEqual(payload["episodes_range"], "500-600")
+        self.assertTrue(payload["allow_missing_episodes"])
+        self.assertEqual(result["job"]["episodes_range"], "500-600")
+        self.assertTrue(result["job"]["processing"]["allow_missing_episodes"])
+
     def test_addmulti_command_stores_ordered_sources(self):
         command = "\n".join([
             "/addmulti Hunter x Hunter ; 001-148 ; 2 ; 3",
@@ -1726,6 +1740,7 @@ class TelegramBotTests(unittest.TestCase):
                 "episodes_anilibria_only": 18,
                 "episodes_anilibria_with_detector": 4,
                 "episodes_with_warnings": [{"episode": 8}],
+                "missing_source_episodes": [542, 590],
                 "episodes_audio_recovery": [141, 142],
             },
             "delivery_summary": {
@@ -1775,6 +1790,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("✂️ OP: `24/24` • ED: `22/24`", message)
         self.assertIn("⚠️ Warnings: `1`", message)
         self.assertIn("🛠 Manual review: `1`", message)
+        self.assertIn("⏭ Нет в источнике: `542,590`", message)
         self.assertIn("🎧 Audio recovery: `141,142`", message)
         self.assertIn("• anilibria\\_only: `18`", message)
         self.assertIn("• anilibria\\_with\\_detector: `4`", message)

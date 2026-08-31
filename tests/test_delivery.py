@@ -245,6 +245,8 @@ class DeliveryTests(unittest.TestCase):
 
         self.assertEqual(result["source_summary"], {
             "selected_episode_count": 2,
+            "missing_episode_count": 0,
+            "missing_episodes": [],
             "excluded_file_count": 1,
             "external_audio_episode_count": 0,
         })

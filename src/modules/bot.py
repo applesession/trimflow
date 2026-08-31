@@ -628,6 +628,12 @@ def format_job_details_message(payload):
         f"⚠️ Warnings: {format_markdown_code(warnings_count)}",
         f"🛠 Manual review: {format_markdown_code(manual_review_count)}",
     ])
+    missing_source_episodes = quality_summary.get("missing_source_episodes", []) or []
+    if missing_source_episodes:
+        lines.append(
+            "⏭ Нет в источнике: "
+            + format_markdown_code(",".join(map(str, missing_source_episodes)))
+        )
     recovered_episodes = quality_summary.get("episodes_audio_recovery", []) or []
     if recovered_episodes:
         lines.append(
@@ -2116,6 +2122,9 @@ def parse_add_command(text):
         raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; сезон ; privacy ; фильтр пути")
 
     title, episodes_range, magnet = parts[:3]
+    allow_missing_episodes = episodes_range.endswith("?")
+    if allow_missing_episodes:
+        episodes_range = episodes_range[:-1].strip()
     season = parts[3] if len(parts) >= 4 else "1"
     privacy_view = parts[4] if len(parts) >= 5 else "0"
     path_filter = parts[5] if len(parts) == 6 else None
@@ -2149,6 +2158,7 @@ def parse_add_command(text):
         "magnet": magnet,
         "privacy_view": privacy_value,
         "source_path_contains": path_filter,
+        "allow_missing_episodes": allow_missing_episodes,
     }
 
 
@@ -2337,8 +2347,13 @@ def build_manual_job(command_payload):
     privacy_view = command_payload.get("privacy_view", 0)
     if privacy_view != 0:
         job["delivery"] = {"vk_privacy_view": privacy_view}
+    processing = {}
     if command_payload.get("source_path_contains"):
-        job["processing"] = {"source_path_contains": command_payload["source_path_contains"]}
+        processing["source_path_contains"] = command_payload["source_path_contains"]
+    if command_payload.get("allow_missing_episodes"):
+        processing["allow_missing_episodes"] = True
+    if processing:
+        job["processing"] = processing
     return job
 
 
@@ -2521,6 +2536,7 @@ def build_help_message():
         "",
         "Пример:",
         "/add Название ; серии ; magnet ; сезон ; privacy ; необязательный фильтр пути",
+        "Добавь ? после диапазона, чтобы разрешить отсутствующие серии: 500-600?",
         "/addmulti Название ; серии ; сезон ; privacy",
         "magnet первой части ; необязательный фильтр пути",
         "magnet второй части ; необязательный фильтр пути",

@@ -188,7 +188,9 @@ def build_compact_manifest(
     manifest_episodes,
     processing_metadata=None,
     timing_sources_summary=None,
+    missing_source_episodes=None,
 ):
+    missing_source_episodes = sorted(int(value) for value in (missing_source_episodes or []))
     manifest = {
         "render_pipeline_version": RENDER_PIPELINE_VERSION,
         "title": job["title"],
@@ -200,6 +202,8 @@ def build_compact_manifest(
         "source": job["source"]["type"],
         "source_summary": {
             "selected_episode_count": len(episode_files),
+            "missing_episode_count": len(missing_source_episodes),
+            "missing_episodes": missing_source_episodes,
             "excluded_file_count": len(excluded_files),
             "external_audio_episode_count": sum(
                 1 for episode in manifest_episodes
@@ -870,6 +874,9 @@ def collect_episode_files(source, title_slug, allowed_episodes, processing=None,
                 allowed_episodes,
                 path_filter=(processing or {}).get("source_path_contains"),
                 timeout=download_timeout,
+                allow_missing_episodes=bool(
+                    (processing or {}).get("allow_missing_episodes", False)
+                ),
             )
         detected_episode_files, ignored_files = find_episode_files(download_dir)
         external_audio_files = find_external_audio_files(download_dir, allowed_episodes)
@@ -2301,6 +2308,10 @@ def process_job(job, runtime_status_path=None):
         )
         excluded_files = ignored_files + excluded_out_of_range
         log_episode_selection(episode_files, excluded_files)
+        selected_episode_numbers = {episode for episode, _path in episode_files}
+        missing_source_episodes = sorted(allowed_episodes - selected_episode_numbers)
+        if missing_source_episodes and processing.get("allow_missing_episodes"):
+            print(f"[SOURCE WARNING] Missing episodes allowed: {missing_source_episodes}")
 
         if processing_mode == "single_episode":
             if len(episode_files) != 1:
@@ -2697,6 +2708,12 @@ def process_job(job, runtime_status_path=None):
         }
 
         quality_summary = build_quality_summary(manifest_episodes, skip_types)
+        if missing_source_episodes:
+            quality_summary["missing_source_episodes"] = missing_source_episodes
+            quality_summary["episodes_with_warnings"] = sorted(set(
+                (quality_summary.get("episodes_with_warnings") or [])
+                + missing_source_episodes
+            ))
         manifest = build_compact_manifest(
             job=job,
             season=season,
@@ -2717,6 +2734,7 @@ def process_job(job, runtime_status_path=None):
                 "episode_checkpoints": True,
             },
             timing_sources_summary=timing_sources_summary,
+            missing_source_episodes=missing_source_episodes,
         )
         manifest["timestamps"] = timestamps
         manifest["support_banner"] = build_support_banner_render_signature(

@@ -138,7 +138,12 @@ def _is_bonus_path(path):
     return any(part.casefold() in BONUS_DIRECTORY_NAMES for part in directories)
 
 
-def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=None):
+def select_torrent_episode_files(
+    torrent_files,
+    allowed_episodes,
+    path_filter=None,
+    allow_missing_episodes=False,
+):
     requested = sorted(int(episode) for episode in allowed_episodes)
     filter_text = str(path_filter or "").strip().casefold()
     candidates = {episode: [] for episode in requested}
@@ -154,13 +159,18 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
             candidates[episode].append({"index": int(item["index"]), "path": relative_path})
 
     missing = [episode for episode, items in candidates.items() if not items]
-    if missing:
+    if missing and not allow_missing_episodes:
         suffix = f" after path filter {path_filter!r}" if filter_text else ""
         raise RuntimeError(f"Torrent files not found for episodes: {missing}{suffix}")
+
+    if missing:
+        print(f"[TORRENT MISSING] allowed missing episodes: {missing}")
 
     selected = []
     for episode in requested:
         items = candidates[episode]
+        if not items:
+            continue
         if len(items) > 1:
             episode_paths = [item for item in items if _is_episode_path(item["path"])]
             if episode_paths:
@@ -182,6 +192,8 @@ def select_torrent_episode_files(torrent_files, allowed_episodes, path_filter=No
                     details=details,
                 )
         selected.append({"episode": episode, **items[0]})
+    if not selected:
+        raise RuntimeError("Torrent contains none of the requested episodes")
     return selected
 
 
@@ -237,6 +249,7 @@ def prepare_torrent_episode_downloads(
     allowed_episodes,
     path_filter=None,
     timeout=None,
+    allow_missing_episodes=False,
 ):
     torrent_path, torrent_files = prepare_torrent_metadata(
         magnet,
@@ -248,6 +261,7 @@ def prepare_torrent_episode_downloads(
         torrent_files,
         allowed_episodes,
         path_filter=path_filter,
+        allow_missing_episodes=allow_missing_episodes,
     )
     return torrent_path, selected
 
@@ -265,17 +279,26 @@ def download_torrent_episode(torrent_path, slot_dir, selected, timeout=None):
     ], timeout=timeout)
 
 
-def download_selected_episodes(magnet, download_dir, allowed_episodes, path_filter=None, timeout=None):
+def download_selected_episodes(
+    magnet,
+    download_dir,
+    allowed_episodes,
+    path_filter=None,
+    timeout=None,
+    allow_missing_episodes=False,
+):
     torrent_path, selected = prepare_torrent_episode_downloads(
         magnet,
         download_dir,
         allowed_episodes,
         path_filter=path_filter,
         timeout=timeout,
+        allow_missing_episodes=allow_missing_episodes,
     )
+    selected_episode_numbers = {item["episode"] for item in selected}
     external_audio = select_torrent_external_audio_files(
         list_torrent_files(torrent_path),
-        allowed_episodes,
+        selected_episode_numbers,
     )
     downloads = selected + external_audio
     indices = ",".join(str(item["index"]) for item in downloads)
