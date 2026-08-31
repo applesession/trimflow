@@ -802,6 +802,11 @@ NVENC_FALLBACK_CODES = {1, 7, 220}
 AUDIO_PAD_DURATION_SECONDS = 15
 
 
+def _append_timestamp_normalization(filters, input_label, output_label, *, audio=False):
+    expression = "asetpts" if audio else "setpts"
+    filters.append(f"{input_label}{expression}=PTS-STARTPTS[{output_label}]")
+
+
 def _support_banner_is_shown(support_banner):
     return bool(support_banner and support_banner.get("shown"))
 
@@ -877,10 +882,13 @@ def _build_episode_render_cmd(
     audio_selector = f"[{audio_input_index}:a:{audio_stream_index}]"
     filters = []
     segment_count = len(keep_segments)
-    filters.append("[0:v:0]setpts=PTS-STARTPTS[vnormalized]")
+    _append_timestamp_normalization(filters, "[0:v:0]", "vnormalized")
     if audio_stream_index is not None:
-        filters.append(
-            f"{audio_selector}asetpts=PTS-STARTPTS[anormalized]"
+        _append_timestamp_normalization(
+            filters,
+            audio_selector,
+            "anormalized",
+            audio=True,
         )
     if segment_count > 1:
         filters.append(
@@ -1057,11 +1065,13 @@ def _build_final_cmd(
     cq = str(encoding.get("cq", 23))
     audio_codec = encoding.get("audio_codec", "aac")
 
-    filters = [
-        "[0:v]format=yuv420p[base]",
+    filters = []
+    _append_timestamp_normalization(filters, "[0:v]", "vnormalized")
+    filters.extend([
+        "[vnormalized]format=yuv420p[base]",
         "[1:v]scale=160:-1,format=rgba[wm]",
         "[base][wm]overlay=W-w-20:20[watermarked]",
-    ]
+    ])
     banner_shown = _support_banner_is_shown(support_banner)
     banner_input_index = 2 if banner_shown else None
     _append_support_banner_filters(
@@ -1072,18 +1082,25 @@ def _build_final_cmd(
         banner_input_index=banner_input_index,
     )
     audio_input_index = (3 if banner_shown else 2) if external_audio_path else 0
-    audio_selector = f"{audio_input_index}:a:{audio_stream_index}"
-    audio_output = audio_selector
+    audio_selector = f"[{audio_input_index}:a:{audio_stream_index}]"
+    audio_output = None
+    if audio_stream_index is not None:
+        _append_timestamp_normalization(
+            filters,
+            audio_selector,
+            "anormalized",
+            audio=True,
+        )
+        audio_output = "[anormalized]"
     if audio_stream_index is not None and audio_recovery:
         filters.append(
-            f"[{audio_selector}]aresample=async=1:first_pts=0,"
+            "[anormalized]aresample=async=1:first_pts=0,"
             f"apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[arecovered]"
         )
         audio_output = "[arecovered]"
     elif audio_stream_index is not None and external_audio_path:
         filters.append(
-            f"[{audio_selector}]asetpts=PTS-STARTPTS,"
-            f"apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[aexternal]"
+            f"[anormalized]apad=pad_dur={AUDIO_PAD_DURATION_SECONDS}[aexternal]"
         )
         audio_output = "[aexternal]"
 
@@ -1102,7 +1119,7 @@ def _build_final_cmd(
         "-map", "[v]",
     ]
     if audio_stream_index is not None:
-        cmd += ["-map", audio_output if audio_output.startswith("[") else f"{audio_output}?"]
+        cmd += ["-map", audio_output]
     cmd += [
         "-map", "0:s?",
         "-c:v", video_codec,

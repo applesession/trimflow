@@ -122,7 +122,11 @@ class MediaAudioSelectionTests(unittest.TestCase):
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
         self.assertIn(
-            "[2:a:0]asetpts=PTS-STARTPTS,apad=pad_dur=15[aexternal]",
+            "[2:a:0]asetpts=PTS-STARTPTS[anormalized]",
+            graph,
+        )
+        self.assertIn(
+            "[anormalized]apad=pad_dur=15[aexternal]",
             graph,
         )
         self.assertIn("[aexternal]", command)
@@ -143,6 +147,28 @@ class MediaAudioSelectionTests(unittest.TestCase):
         command = mock_run.call_args.args[0]
         self.assertEqual(command[command.index("-t") + 1], "1394.142000")
         self.assertNotIn("-shortest", command)
+
+    @patch("lib.media._probe_video_streams", return_value=[{}])
+    @patch("lib.media.run")
+    def test_single_episode_normalizes_negative_timestamps_before_duration_cap(
+        self,
+        mock_run,
+        _mock_probe,
+    ):
+        render_final(
+            "episode-with-negative-pts.mkv",
+            "watermark.png",
+            "rendered.mkv",
+            {"video_codec": "libx264", "audio_codec": "aac"},
+            audio_stream_index=0,
+            target_duration=1422.045,
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[0:v]setpts=PTS-STARTPTS[vnormalized]", graph)
+        self.assertIn("[0:a:0]asetpts=PTS-STARTPTS[anormalized]", graph)
+        self.assertEqual(command[command.index("-t") + 1], "1422.045000")
 
     @patch("lib.media.ffprobe_episode_timeline")
     def test_audio_recovery_detects_supported_gap_and_short_tail(self, mock_timeline):
@@ -298,7 +324,11 @@ class MediaAudioSelectionTests(unittest.TestCase):
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
         self.assertIn(
-            "[0:a:1]aresample=async=1:first_pts=0,apad=pad_dur=15[arecovered]",
+            "[0:a:1]asetpts=PTS-STARTPTS[anormalized]",
+            graph,
+        )
+        self.assertIn(
+            "[anormalized]aresample=async=1:first_pts=0,apad=pad_dur=15[arecovered]",
             graph,
         )
         self.assertIn("-shortest", command)
@@ -387,7 +417,8 @@ class MediaAudioSelectionTests(unittest.TestCase):
         graph = command[command.index("-filter_complex") + 1]
         self.assertIn("[2:v]scale=596:-1,format=rgba[support_banner]", graph)
         self.assertIn("enable='between(t,2.000000,8.000000)'", graph)
-        self.assertIn("0:a:0?", command)
+        self.assertIn("[0:a:0]asetpts=PTS-STARTPTS[anormalized]", graph)
+        self.assertIn("[anormalized]", command)
 
     @patch("lib.media.run")
     def test_copy_segment_normalizes_audio_without_reencoding_video(self, mock_run):
