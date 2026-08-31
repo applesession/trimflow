@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from shared.config import load_config  # noqa: E402
+from shared.db import init_db  # noqa: E402
 from shared.runtime import acquire_lock, ensure_runtime_paths, log_line, release_lock  # noqa: E402
 from modules.bot import fetch_updates, handle_update, load_telegram_state, update_telegram_state_progress  # noqa: E402
 
@@ -28,6 +29,7 @@ def main():
 
     log_line(log_path, "start telegram_bot")
     try:
+        init_db()
         config = load_config()
         state = load_telegram_state()
         failure_delay_seconds = 5

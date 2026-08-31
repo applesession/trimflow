@@ -27,6 +27,7 @@ from shared.constants import DEFAULT_TELEGRAM_STATE_PATH
 from shared.db import (
     get_discovery_blacklist,
     insert_one_job,
+    prioritize_job as _db_prioritize_job,
     remove_job as _db_cancel_job,
     remove_pending_job as _db_remove_job,
     request_job_stop as _db_request_job_stop,
@@ -1288,8 +1289,9 @@ def format_jobs_message(config, page=1, page_size=15, numbered=True, jobs=None):
             if (job.get("processing") or {}).get("audio_recovery_enabled")
             else ""
         )
+        priority_marker = " [priority]" if int(job.get("priority", 0) or 0) > 0 else ""
         lines.append(
-            f"{prefix}{get_display_title(job)}{ongoing_marker}{upscale_marker}{audiofix_marker}"
+            f"{prefix}{get_display_title(job)}{priority_marker}{ongoing_marker}{upscale_marker}{audiofix_marker}"
         )
         if str(job.get("processing_mode") or "").strip().lower() == "multi_season":
             lines.append(f"Сезоны: {(job.get('processing') or {}).get('season_range') or '?'}")
@@ -1313,6 +1315,7 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
     end = min(start + page_size, total)
     page_jobs = sorted_jobs[start:end]
 
+    priority = []
     donut = []
     ongoing = []
     manual = []
@@ -1320,7 +1323,9 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
         is_donut = (job.get("delivery") or {}).get("vk_privacy_view") == 5
         is_ongoing = (job.get("automation") or {}).get("is_ongoing")
         idx = start + i + 1
-        if is_donut:
+        if int(job.get("priority", 0) or 0) > 0:
+            priority.append((idx, job))
+        elif is_donut:
             donut.append((idx, job))
         elif is_ongoing:
             ongoing.append((idx, job))
@@ -1345,6 +1350,7 @@ def format_jobs_message_markdown(config, page=1, page_size=15, jobs=None):
     lines = [header, ""]
 
     for group_title, group_jobs in [
+        ("🔥 Приоритет", priority),
         ("🔄 Онгоинги", ongoing),
         ("💎 Доны", donut),
         ("✏️ Вручную", manual),
@@ -1589,6 +1595,18 @@ def stop_job(config, text):
 def _get_execution_order(config):
     jobs = load_jobs(config)
     return build_execution_order(jobs, defaults=config.get("defaults", {}))
+
+
+def prioritize_queue_job(config, text):
+    index = parse_index_command(text, "priority")
+    job, _ = get_job_by_index(config, index)
+    queue_id = job.get("_queue_id")
+    if queue_id is None or not _db_prioritize_job(queue_id):
+        raise RuntimeError("Приоритет можно повысить только для ожидающего аниме")
+    return (
+        f"🔥 Приоритет повышен: {get_display_title(job)}\n"
+        "Аниме станет первым в своей очереди после текущей обработки."
+    )
 
 
 def get_job_by_index(config, index):
@@ -2490,6 +2508,7 @@ def build_help_message():
         "/stop <номер> - остановить активную обработку без удаления данных",
         "/complete <номер> - завершить аниме (можно диапазон: 1-10, 1,5,8-10)",
         "/retry <номер> - повторно поставить аниме в очередь",
+        "/priority <номер> - выполнить раньше остальных ожидающих задач",
         "/label <номер> ; <метка|auto> - изменить навигационную метку",
         "/audiofix-on <номер> - включить расширенное восстановление аудио (поддерживает диапазоны)",
         "/audiofix-off <номер> - оставить только автокоррекцию хвоста до 3 секунд",
@@ -2497,7 +2516,8 @@ def build_help_message():
         "/blacklist <номер> - добавить тайтл из очереди в discovery blacklist",
         "/unblacklist <номер> - убрать тайтл из discovery blacklist",
         "",
-        "Порядок в /jobs — по приоритету выполнения (ongoing → manual).",
+        "Повторные /priority ставятся в порядке: последний поднятый → ранее поднятые → остальные.",
+        "Порядок в /jobs — по приоритету выполнения: ручной priority, ongoing, manual.",
         "",
         "Пример:",
         "/add Название ; серии ; magnet ; сезон ; privacy ; необязательный фильтр пути",
@@ -2558,6 +2578,8 @@ def handle_command(config, text):
         return update_job_audio_recovery(config, text, False)
     if text.startswith("/stop"):
         return stop_job(config, text)
+    if text.startswith("/priority"):
+        return prioritize_queue_job(config, text)
     if text.startswith("/remove"):
         indices = parse_index_range(text, "remove")
         jobs_list, _ = get_jobs_by_indices(config, indices)

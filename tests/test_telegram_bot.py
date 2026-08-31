@@ -11,6 +11,7 @@ from uuid import uuid4
 from lib import reset_test_db
 import shared.db as db
 from lib.config import load_completed_jobs, load_jobs, save_completed_jobs, save_jobs, save_state
+from lib.runner import build_execution_order
 from shared.db import (
     add_to_blacklist,
     claim_job,
@@ -224,7 +225,7 @@ class TelegramBotTests(unittest.TestCase):
                 "3 ; magnet:?xt=urn:btih:season3part2",
             ]))
 
-    def test_db_v2_migration_adds_source_parts_column(self):
+    def test_db_migration_adds_source_parts_and_priority_columns(self):
         db_path = self.make_workspace_temp_dir() / "data.db"
         connection = sqlite3.connect(db_path)
         connection.executescript("""
@@ -242,7 +243,8 @@ class TelegramBotTests(unittest.TestCase):
             connection.close()
 
         self.assertIn("source_parts", columns)
-        self.assertEqual(version, 2)
+        self.assertIn("priority", columns)
+        self.assertEqual(version, 3)
 
     def test_add4k_command_builds_direct_donut_job(self):
         payload = parse_add4k_command(
@@ -1125,6 +1127,44 @@ class TelegramBotTests(unittest.TestCase):
         config = self.make_config(tmp_dir)
 
         self.assertEqual(format_next_message(config), "Очередь пуста")
+
+    def test_priority_commands_put_latest_promoted_job_first_and_reset_on_claim(self):
+        config = self.make_config(self.make_workspace_temp_dir())
+        save_jobs(config, [
+            {
+                "title": "Первый",
+                "season": 1,
+                "episodes_range": "001",
+                "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:first"},
+            },
+            {
+                "title": "Второй",
+                "season": 1,
+                "episodes_range": "001",
+                "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:second"},
+            },
+            {
+                "title": "Третий",
+                "season": 1,
+                "episodes_range": "001",
+                "source": {"type": "magnet", "magnet": "magnet:?xt=urn:btih:third"},
+            },
+        ])
+
+        first_result = handle_command(config, "/priority 1")
+        second_result = handle_command(config, "/priority 2")
+        ordered = build_execution_order(load_jobs(config), defaults={})
+
+        self.assertIn("Первый", first_result)
+        self.assertIn("Второй", second_result)
+        self.assertEqual([job["title"] for job in ordered], ["Второй", "Первый", "Третий"])
+        self.assertGreater(ordered[0]["priority"], ordered[1]["priority"])
+        self.assertGreater(ordered[1]["priority"], 0)
+        self.assertIn("🔥 Приоритет", format_jobs_message_markdown(config))
+
+        self.assertTrue(claim_job(ordered[0]["_queue_id"]))
+        claimed = next(job for job in load_jobs(config) if job["title"] == "Второй")
+        self.assertEqual(claimed["priority"], 0)
 
     def test_log_message_reads_tail_and_handles_missing_file(self):
         tmp_dir = self.make_workspace_temp_dir()

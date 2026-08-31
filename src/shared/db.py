@@ -51,6 +51,7 @@ def init_db():
             watermark_path TEXT,
             output_dir TEXT,
             automation TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'pending'
         );
 
@@ -163,6 +164,15 @@ def init_db():
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version (version) VALUES (2)")
         conn.commit()
+        current_version = 2
+
+    if current_version < 3:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "priority" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+        conn.commit()
 
     conn.close()
 
@@ -188,8 +198,8 @@ def _migrate_from_json(conn):
                         source_input_dir, source_download_dir, source_variant_codec,
                         source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                         processing, timing_detection, timing_providers,
-                        preferred_audio_language, watermark_path, output_dir, automation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        preferred_audio_language, watermark_path, output_dir, automation, priority
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (now, now) + row,
                 )
             print(f"[DB] Migrated {len(jobs)} jobs from jobs.json")
@@ -287,6 +297,7 @@ def _job_from_row(row):
         "season": row["season"],
         "episodes_range": row["episodes_range"],
         "processing_mode": row["processing_mode"],
+        "priority": int(row["priority"] or 0),
         "source": {
             "type": row["source_type"],
             "magnet": row["source_magnet"],
@@ -351,6 +362,7 @@ def _job_to_row(job):
         job.get("watermark_path"),
         job.get("output_dir"),
         json.dumps(automation) if automation else None,
+        int(job.get("priority", 0) or 0),
     )
 
 
@@ -393,8 +405,8 @@ def save_jobs(jobs):
                     source_input_dir, source_download_dir, source_variant_codec,
                     source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                     processing, timing_detection, timing_providers,
-                    preferred_audio_language, watermark_path, output_dir, automation
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    preferred_audio_language, watermark_path, output_dir, automation, priority
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (now, now) + row,
             )
         conn.commit()
@@ -414,8 +426,8 @@ def insert_one_job(job):
                 source_input_dir, source_download_dir, source_variant_codec,
                 source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                 processing, timing_detection, timing_providers,
-                preferred_audio_language, watermark_path, output_dir, automation
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                preferred_audio_language, watermark_path, output_dir, automation, priority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, now) + row,
         )
         conn.commit()
@@ -460,7 +472,7 @@ def sync_discovered_jobs(jobs):
                         processing = ?, timing_detection = ?, timing_providers = ?,
                         preferred_audio_language = ?, watermark_path = ?, output_dir = ?, automation = ?
                        WHERE id = ? AND status = 'pending'""",
-                    (_utc_now_iso(),) + _job_to_row(job) + (int(queue_id),),
+                    (_utc_now_iso(),) + _job_to_row(job)[:-1] + (int(queue_id),),
                 )
                 if cursor.rowcount:
                     updated += 1
@@ -501,8 +513,8 @@ def sync_discovered_jobs(jobs):
                     source_input_dir, source_download_dir, source_variant_codec,
                     source_variant_label, source_parts, skip_types, encoding, delivery, cleanup,
                     processing, timing_detection, timing_providers,
-                    preferred_audio_language, watermark_path, output_dir, automation, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                    preferred_audio_language, watermark_path, output_dir, automation, priority, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
                 (now, now) + _job_to_row(job),
             )
             inserted += 1
@@ -514,13 +526,40 @@ def sync_discovered_jobs(jobs):
 def claim_job(queue_id):
     conn = _get_conn()
     cursor = conn.execute(
-        "UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'",
+        "UPDATE jobs SET status = 'running', priority = 0, updated_at = ? "
+        "WHERE id = ? AND status = 'pending'",
         (_utc_now_iso(), int(queue_id)),
     )
     conn.commit()
     claimed = cursor.rowcount == 1
     conn.close()
     return claimed
+
+
+def prioritize_job(queue_id):
+    conn = _get_conn()
+    with _write_lock:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id FROM jobs WHERE id = ? AND status = 'pending'",
+            (int(queue_id),),
+        ).fetchone()
+        if row is None:
+            conn.rollback()
+            conn.close()
+            return False
+        next_priority = int(
+            conn.execute(
+                "SELECT COALESCE(MAX(priority), 0) + 1 AS value FROM jobs WHERE status = 'pending'"
+            ).fetchone()["value"]
+        )
+        conn.execute(
+            "UPDATE jobs SET priority = ?, updated_at = ? WHERE id = ?",
+            (next_priority, _utc_now_iso(), int(queue_id)),
+        )
+        conn.commit()
+    conn.close()
+    return True
 
 
 def job_exists(queue_id):

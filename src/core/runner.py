@@ -111,13 +111,13 @@ def build_execution_order(jobs, defaults=None):
     defaults = defaults or {}
     merged_jobs = [deep_merge(defaults, job) for job in list(jobs or [])]
     return [
-        item[2]
+        item[3]
         for item in sorted(
             (
-                (build_execution_priority(job), index, job)
+                (-int(job.get("priority", 0) or 0), build_execution_priority(job), index, job)
                 for index, job in enumerate(merged_jobs)
             ),
-            key=lambda item: (item[0], item[1]),
+            key=lambda item: (item[0], item[1], item[2]),
         )
     ]
 

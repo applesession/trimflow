@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from lib import reset_test_db
-from lib.runner import build_job_identity, run_jobs
+from lib.runner import build_execution_order, build_job_identity, run_jobs
 from lib.runtime import (
     acquire_lock,
     append_runtime_error,
@@ -827,6 +827,25 @@ class CronRuntimeTests(unittest.TestCase):
 
         self.assertEqual(mock_process_job.call_args_list[0].args[0]["title"], "Manual A")
         self.assertEqual(mock_process_job.call_args_list[1].args[0]["title"], "Manual B")
+
+    def test_manual_priority_overrides_ongoing_and_uses_latest_first(self):
+        jobs = [
+            {
+                "title": "Ongoing",
+                "season": 1,
+                "episodes_range": "001",
+                "automation": {"is_ongoing": True},
+            },
+            {"title": "Earlier priority", "season": 1, "episodes_range": "001", "priority": 1},
+            {"title": "Latest priority", "season": 1, "episodes_range": "001", "priority": 2},
+        ]
+
+        ordered = build_execution_order(jobs)
+
+        self.assertEqual(
+            [job["title"] for job in ordered],
+            ["Latest priority", "Earlier priority", "Ongoing"],
+        )
 
     @patch("lib.runner.process_job")
     @patch("lib.runner.save_completed_jobs")

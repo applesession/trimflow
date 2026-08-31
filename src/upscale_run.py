@@ -9,7 +9,7 @@ SRC = Path(__file__).resolve().parent
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from core.runner import build_completed_job_entry  # noqa: E402
+from core.runner import build_completed_job_entry, build_execution_order  # noqa: E402
 from core.upscale import cleanup_cancelled_upscale_job, process_upscale_job  # noqa: E402
 from modules.bot import send_message_to_allowed_chats  # noqa: E402
 from shared.config import load_completed_jobs, load_config, load_jobs, save_completed_jobs  # noqa: E402
@@ -105,10 +105,13 @@ def main():
         )
 
         while True:
-            pending = [
-                job for job in load_jobs(config, status="pending", processing_mode="upscale_4k")
-                if job.get("_queue_id") not in attempted
-            ]
+            pending = build_execution_order(
+                [
+                    job for job in load_jobs(config, status="pending", processing_mode="upscale_4k")
+                    if job.get("_queue_id") not in attempted
+                ],
+                defaults=config.get("defaults", {}),
+            )
             if not pending:
                 break
             job = pending[0]
