@@ -2,6 +2,15 @@
   "defaults": {
     "output_dir": "./output",
     "watermark_path": "./assets/watermark.png",
+    "support_banner": {
+      "enabled": true,
+      "path": "./assets/support_banner.png",
+      "interval_episodes": 6,
+      "duration_seconds": 6,
+      "slide_seconds": 0.5,
+      "width_px": 596,
+      "bottom_margin_px": 40
+    },
     "skip_types": ["op", "ed"],
     "download": {
       "timeout_minutes_per_episode": 20,

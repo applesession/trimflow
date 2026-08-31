@@ -15,6 +15,8 @@ from lib.pipeline import (
     build_episode_fingerprint,
     build_output_artifacts,
     build_multi_season_timestamps,
+    build_support_banner_episode_spec,
+    build_support_banner_render_signature,
     build_timestamps_from_episodes,
     compact_manifest_episode,
     describe_media_signature_groups,
@@ -23,11 +25,13 @@ from lib.pipeline import (
     initialize_episode_checkpoints,
     load_episode_checkpoint,
     load_render_checkpoint,
+    normalize_support_banner_config,
     process_job,
     process_multi_season_job,
     save_episode_checkpoint,
     select_compilation_frame_rate,
     select_compilation_frame_size,
+    validate_support_banner_asset,
 )
 
 
@@ -124,6 +128,72 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         self.assertTrue(manual_gap["applied"])
         self.assertTrue(manual_gap["enabled"])
         self.assertFalse(manual_gap["automatic"])
+
+    def test_support_banner_public_private_and_schedule(self):
+        for privacy_view in (0, 1, 2, 3):
+            config = normalize_support_banner_config({
+                "support_banner": {"enabled": True},
+                "delivery": {"vk_privacy_view": privacy_view},
+            })
+            self.assertTrue(config["active"])
+
+        private = normalize_support_banner_config({
+            "support_banner": {"enabled": True},
+            "delivery": {"vk_privacy_view": 5},
+        })
+        self.assertFalse(private["active"])
+        self.assertEqual(build_support_banner_render_signature({}, private), {"enabled": False})
+
+        public = normalize_support_banner_config({
+            "support_banner": {"enabled": True, "path": "banner.png"},
+            "delivery": {"vk_privacy_view": 0},
+        })
+        for ordinal in range(1, 13):
+            spec = build_support_banner_episode_spec(public, 1200.0, episode_ordinal=ordinal)
+            self.assertEqual(spec["shown"], ordinal in {6, 12})
+        single = build_support_banner_episode_spec(
+            public,
+            1200.0,
+            episode_ordinal=1,
+            single_episode=True,
+        )
+        self.assertEqual(single["start"], 597.0)
+        self.assertEqual(single["duration"], 6.0)
+
+    def test_support_banner_offset_and_short_episode(self):
+        config = normalize_support_banner_config({
+            "support_banner": {"enabled": True, "path": "banner.png"},
+            "processing": {"_support_banner_episode_offset": 5},
+        })
+        spec = build_support_banner_episode_spec(
+            config,
+            0.4,
+            episode_ordinal=config["episode_ordinal_offset"] + 1,
+        )
+        self.assertTrue(spec["shown"])
+        self.assertEqual(spec["start"], 0.0)
+        self.assertEqual(spec["duration"], 0.4)
+        self.assertEqual(spec["slide_seconds"], 0.2)
+
+    def test_support_banner_validation_requires_asset_only_when_public(self):
+        missing = str(self.make_workspace_temp_dir() / "missing.png")
+        public = normalize_support_banner_config({
+            "support_banner": {"enabled": True, "path": missing},
+            "delivery": {"vk_privacy_view": 0},
+        })
+        with self.assertRaisesRegex(RuntimeError, "Support banner file not found"):
+            validate_support_banner_asset(public)
+
+        private = normalize_support_banner_config({
+            "support_banner": {"enabled": True, "path": missing},
+            "delivery": {"vk_privacy_view": 5},
+        })
+        validate_support_banner_asset(private)
+
+        with self.assertRaisesRegex(RuntimeError, "width_px must be > 0"):
+            normalize_support_banner_config({
+                "support_banner": {"enabled": True, "width_px": 0},
+            })
 
     def make_job(self, tmp_dir, episodes_range="001-002"):
         watermark_path = tmp_dir / "watermark.png"
@@ -257,6 +327,78 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             )
 
         self.assertNotEqual(current, future)
+
+    def test_episode_fingerprint_tracks_support_banner_asset_and_config(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        source = tmp_dir / "episode.mkv"
+        banner = tmp_dir / "support_banner.png"
+        source.write_bytes(b"source")
+        banner.write_bytes(b"banner-v1")
+        job = self.make_job(tmp_dir, "001")
+        job["support_banner"] = {
+            "enabled": True,
+            "path": str(banner),
+            "interval_episodes": 6,
+        }
+        episode_infos = [{
+            "episode": 1,
+            "path": str(source),
+            "duration": 10.0,
+            "frame_rate": "30/1",
+            "width": 1920,
+            "height": 1080,
+        }]
+
+        def fingerprint():
+            return build_episode_fingerprint(
+                job,
+                episode_infos,
+                watermark_path=job["watermark_path"],
+                timing_detection=job["timing_detection"],
+                preferred_language="rus",
+            )
+
+        original = fingerprint()
+        job["support_banner"]["width_px"] = 700
+        self.assertNotEqual(original, fingerprint())
+        job["support_banner"]["width_px"] = 596
+        restored = fingerprint()
+        banner.write_bytes(b"banner-v2-longer")
+        self.assertNotEqual(restored, fingerprint())
+
+    @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
+    def test_render_checkpoint_requires_public_banner_signature(self, _mock_duration):
+        tmp_dir = self.make_workspace_temp_dir()
+        banner = tmp_dir / "support_banner.png"
+        banner.write_bytes(b"banner")
+        job = self.make_job(tmp_dir, "001")
+        job["support_banner"] = {"enabled": True, "path": str(banner)}
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        artifacts["job_output_dir"].mkdir(parents=True)
+        artifacts["output_video"].write_bytes(b"video")
+        artifacts["output_txt"].write_text("00:00:00 - 1 серия\n", encoding="utf-8")
+        manifest = {
+            "render_pipeline_version": RENDER_PIPELINE_VERSION,
+            "render_complete": True,
+            "title": job["title"],
+            "season": "01",
+            "episodes_range": "001",
+            "output_video": artifacts["output_video"].name,
+            "output_timestamps": artifacts["output_txt"].name,
+            "episodes": [],
+        }
+        artifacts["output_manifest"].write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+        self.assertIsNone(load_render_checkpoint(job, artifacts))
+
+        manifest["support_banner"] = build_support_banner_render_signature(job)
+        artifacts["output_manifest"].write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+        self.assertIsNotNone(load_render_checkpoint(job, artifacts))
 
     @patch("lib.pipeline.detect_audio_streams", return_value=[])
     @patch("lib.pipeline.ffprobe_episode_timeline")
@@ -632,8 +774,16 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             },
             "timing_detection": {"enabled": True},
         })
+        support_banner_path = tmp_dir / "support_banner.png"
+        support_banner_path.write_bytes(b"banner")
+        job["support_banner"] = {
+            "enabled": True,
+            "path": str(support_banner_path),
+        }
+        captured_subjobs = []
 
         def fake_process_subjob(subjob, runtime_status_path=None):
+            captured_subjobs.append(subjob)
             output_dir = Path(subjob["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
             video = output_dir / "season.mkv"
@@ -695,6 +845,14 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             DETECTOR_RESULT_VERSION,
         )
         self.assertEqual(manifest["timing_detection"]["analysis_audio_language"], "jpn")
+        self.assertEqual(
+            [
+                subjob["processing"]["_support_banner_episode_offset"]
+                for subjob in captured_subjobs
+            ],
+            [0, 1],
+        )
+        self.assertTrue(manifest["support_banner"]["enabled"])
 
     def test_later_season_part_restarts_source_numbering(self):
         episodes = renumber_season_part_episodes(

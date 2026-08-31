@@ -305,6 +305,68 @@ class MediaAudioSelectionTests(unittest.TestCase):
         )
 
     @patch("lib.media.run")
+    def test_episode_render_adds_animated_support_banner_and_shifts_external_audio(self, mock_run):
+        support_banner = {
+            "shown": True,
+            "path": "support_banner.png",
+            "start": 7.0,
+            "duration": 6.0,
+            "slide_seconds": 0.5,
+            "width_px": 596,
+            "bottom_margin_px": 40,
+        }
+
+        render_episode(
+            "episode.mkv",
+            "rendered.mkv",
+            [(0.0, 20.0)],
+            "watermark.png",
+            {"video_codec": "libx264"},
+            audio_stream_index=1,
+            external_audio_path="episode.mka",
+            support_banner=support_banner,
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertEqual(
+            [command[index + 1] for index, value in enumerate(command) if value == "-i"],
+            ["episode.mkv", "watermark.png", "support_banner.png", "episode.mka"],
+        )
+        self.assertIn("[2:v]scale=596:-1,format=rgba[support_banner]", graph)
+        self.assertIn("x=(W-w)/2", graph)
+        self.assertIn("H-h-40", graph)
+        self.assertIn("H-(h+40)", graph)
+        self.assertIn("enable='between(t,7.000000,13.000000)'", graph)
+        self.assertIn("[3:a:1]", graph)
+
+    @patch("lib.media._probe_video_streams", return_value=[{}])
+    @patch("lib.media.run")
+    def test_single_episode_render_adds_support_banner(self, mock_run, _mock_probe):
+        render_final(
+            "episode.mkv",
+            "watermark.png",
+            "rendered.mkv",
+            {"video_codec": "libx264", "audio_codec": "aac"},
+            audio_stream_index=0,
+            support_banner={
+                "shown": True,
+                "path": "support_banner.png",
+                "start": 2.0,
+                "duration": 6.0,
+                "slide_seconds": 0.5,
+                "width_px": 596,
+                "bottom_margin_px": 40,
+            },
+        )
+
+        command = mock_run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[2:v]scale=596:-1,format=rgba[support_banner]", graph)
+        self.assertIn("enable='between(t,2.000000,8.000000)'", graph)
+        self.assertIn("0:a:0?", command)
+
+    @patch("lib.media.run")
     def test_copy_segment_normalizes_audio_without_reencoding_video(self, mock_run):
         render_segment_copy("episode.mkv", "segment.mkv", 10, 20)
 
@@ -324,6 +386,16 @@ class MediaAudioSelectionTests(unittest.TestCase):
         failure.__cause__ = subprocess.CalledProcessError(220, ["ffmpeg"])
         mock_run.side_effect = [failure, None]
 
+        support_banner = {
+            "shown": True,
+            "path": "support_banner.png",
+            "start": 2.0,
+            "duration": 6.0,
+            "slide_seconds": 0.5,
+            "width_px": 596,
+            "bottom_margin_px": 40,
+        }
+
         render_episode(
             "episode.mkv",
             "rendered.mkv",
@@ -332,12 +404,17 @@ class MediaAudioSelectionTests(unittest.TestCase):
             {"video_codec": "h264_nvenc", "preset": "fast", "cq": 23},
             audio_stream_index=0,
             audio_recovery=True,
+            support_banner=support_banner,
         )
 
         self.assertEqual(mock_run.call_count, 2)
         first_command, fallback_command = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(first_command[first_command.index("-c:v") + 1], "h264_nvenc")
         self.assertEqual(fallback_command[fallback_command.index("-c:v") + 1], "libx264")
+        self.assertEqual(
+            first_command[first_command.index("-filter_complex") + 1],
+            fallback_command[fallback_command.index("-filter_complex") + 1],
+        )
 
     @patch("lib.media.run")
     def test_episode_render_does_not_fallback_on_enospc(self, mock_run):
@@ -492,6 +569,77 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
 class MediaEpisodeIntegrationTests(unittest.TestCase):
+    def test_support_banner_appears_only_in_midpoint_window_and_keeps_audio(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp_dir = Path(raw_tmp)
+            source = tmp_dir / "source.mkv"
+            watermark = tmp_dir / "watermark.png"
+            banner = tmp_dir / "support_banner.png"
+            output = tmp_dir / "output.mkv"
+            try:
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=black:size=320x180:rate=24:duration=6",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=6",
+                    "-map", "0:v", "-map", "1:a",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    str(source),
+                ], check=True)
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=white:size=16x8",
+                    "-frames:v", "1", str(watermark),
+                ], check=True)
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "color=red@0.8:size=200x50,format=rgba",
+                    "-frames:v", "1", str(banner),
+                ], check=True)
+            except subprocess.CalledProcessError as exc:
+                self.skipTest(f"local ffmpeg cannot build banner fixture: {exc}")
+
+            render_final(
+                source,
+                watermark,
+                output,
+                {
+                    "video_codec": "libx264",
+                    "preset": "ultrafast",
+                    "cq": 28,
+                    "audio_codec": "aac",
+                },
+                audio_stream_index=0,
+                target_duration=6.0,
+                support_banner={
+                    "shown": True,
+                    "path": str(banner),
+                    "start": 2.0,
+                    "duration": 2.0,
+                    "slide_seconds": 0.25,
+                    "width_px": 200,
+                    "bottom_margin_px": 10,
+                },
+            )
+            validation = validate_episode_render(output)
+            self.assertIsNotNone(validation["media_signature"]["audio"])
+            self.assertAlmostEqual(validation["duration"], 6.0, delta=0.25)
+
+            def sample_rgb(timestamp):
+                result = subprocess.run([
+                    "ffmpeg", "-v", "error", "-ss", str(timestamp), "-i", str(output),
+                    "-vf", "crop=1:1:160:145,format=rgb24",
+                    "-frames:v", "1", "-f", "rawvideo", "-",
+                ], check=True, capture_output=True)
+                return tuple(result.stdout[:3])
+
+            before = sample_rgb(1.0)
+            middle = sample_rgb(3.0)
+            after = sample_rgb(5.0)
+            self.assertLess(max(before), 40)
+            self.assertGreater(middle[0], 100)
+            self.assertGreater(middle[0], middle[1] + 50)
+            self.assertLess(max(after), 40)
+
     def test_single_episode_caps_long_audio_without_hiding_short_audio(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp_dir = Path(raw_tmp)

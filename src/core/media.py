@@ -802,6 +802,46 @@ NVENC_FALLBACK_CODES = {1, 7, 220}
 AUDIO_PAD_DURATION_SECONDS = 15
 
 
+def _support_banner_is_shown(support_banner):
+    return bool(support_banner and support_banner.get("shown"))
+
+
+def _append_support_banner_filters(
+    filters,
+    *,
+    input_label,
+    output_label,
+    support_banner,
+    banner_input_index,
+):
+    if not _support_banner_is_shown(support_banner):
+        filters.append(f"[{input_label}]format=yuv420p[{output_label}]")
+        return
+
+    width = int(support_banner["width_px"])
+    margin = int(support_banner["bottom_margin_px"])
+    start = float(support_banner["start"])
+    duration = float(support_banner["duration"])
+    slide = float(support_banner["slide_seconds"])
+    end = start + duration
+    slide_in_end = start + slide
+    slide_out_start = end - slide
+    settled_y = f"H-h-{margin}"
+    y_expression = (
+        f"if(lt(t\\,{slide_in_end:.6f})\\,"
+        f"H-(h+{margin})*(t-{start:.6f})/{slide:.6f}\\,"
+        f"if(lt(t\\,{slide_out_start:.6f})\\,{settled_y}\\,"
+        f"H-(h+{margin})*({end:.6f}-t)/{slide:.6f}))"
+    )
+    filters.extend([
+        f"[{banner_input_index}:v]scale={width}:-1,format=rgba[support_banner]",
+        f"[{input_label}][support_banner]overlay="
+        f"x=(W-w)/2:y='{y_expression}':"
+        f"enable='between(t,{start:.6f},{end:.6f})',"
+        f"format=yuv420p[{output_label}]",
+    ])
+
+
 def get_nvenc_fallback_codec(video_codec):
     normalized = str(video_codec or "").lower()
     if "hevc" in normalized or "h265" in normalized:
@@ -818,6 +858,7 @@ def _build_episode_render_cmd(
     audio_stream_index,
     audio_recovery=False,
     external_audio_path=None,
+    support_banner=None,
 ):
     if not keep_segments:
         raise RuntimeError(f"Episode has no ranges to render: {ep_file}")
@@ -830,7 +871,9 @@ def _build_episode_render_cmd(
     if audio_codec == "copy":
         audio_codec = "aac"
 
-    audio_input_index = 2 if external_audio_path else 0
+    banner_shown = _support_banner_is_shown(support_banner)
+    banner_input_index = 2 if banner_shown else None
+    audio_input_index = (3 if banner_shown else 2) if external_audio_path else 0
     audio_selector = f"[{audio_input_index}:a:{audio_stream_index}]"
     filters = []
     segment_count = len(keep_segments)
@@ -897,13 +940,22 @@ def _build_episode_render_cmd(
         f"[vcat]{f'fps=fps={frame_rate},' if frame_rate else ''}"
         f"{frame_size_filter}format=yuv420p[base]",
         "[1:v]scale=160:-1,format=rgba[wm]",
-        "[base][wm]overlay=W-w-20:20,format=yuv420p[vout]",
+        "[base][wm]overlay=W-w-20:20[watermarked]",
     ])
+    _append_support_banner_filters(
+        filters,
+        input_label="watermarked",
+        output_label="vout",
+        support_banner=support_banner,
+        banner_input_index=banner_input_index,
+    )
     cmd = [
         "ffmpeg", "-y",
         "-i", str(ep_file),
         "-i", str(watermark_path),
     ]
+    if banner_shown:
+        cmd += ["-i", str(support_banner["path"])]
     if external_audio_path:
         cmd += ["-i", str(external_audio_path)]
     cmd += [
@@ -943,6 +995,7 @@ def render_episode(
     audio_stream_index=None,
     audio_recovery=False,
     external_audio_path=None,
+    support_banner=None,
 ):
     cmd = _build_episode_render_cmd(
         ep_file,
@@ -953,6 +1006,7 @@ def render_episode(
         audio_stream_index,
         audio_recovery,
         external_audio_path,
+        support_banner,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
     try:
@@ -978,6 +1032,7 @@ def render_episode(
         audio_stream_index,
         audio_recovery,
         external_audio_path,
+        support_banner,
     ))
 
 
@@ -990,6 +1045,7 @@ def _build_final_cmd(
     audio_recovery=False,
     external_audio_path=None,
     target_duration=None,
+    support_banner=None,
 ):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
@@ -997,11 +1053,20 @@ def _build_final_cmd(
     audio_codec = encoding.get("audio_codec", "aac")
 
     filters = [
-        "[0:v]format=yuv420p[base];"
-        "[1:v]scale=160:-1,format=rgba[wm];"
-        "[base][wm]overlay=W-w-20:20,format=yuv420p[v]"
+        "[0:v]format=yuv420p[base]",
+        "[1:v]scale=160:-1,format=rgba[wm]",
+        "[base][wm]overlay=W-w-20:20[watermarked]",
     ]
-    audio_input_index = 2 if external_audio_path else 0
+    banner_shown = _support_banner_is_shown(support_banner)
+    banner_input_index = 2 if banner_shown else None
+    _append_support_banner_filters(
+        filters,
+        input_label="watermarked",
+        output_label="v",
+        support_banner=support_banner,
+        banner_input_index=banner_input_index,
+    )
+    audio_input_index = (3 if banner_shown else 2) if external_audio_path else 0
     audio_selector = f"{audio_input_index}:a:{audio_stream_index}"
     audio_output = audio_selector
     if audio_stream_index is not None and audio_recovery:
@@ -1023,6 +1088,8 @@ def _build_final_cmd(
         "-i", concat_output,
         "-i", watermark_path,
     ]
+    if banner_shown:
+        cmd += ["-i", str(support_banner["path"])]
     if external_audio_path:
         cmd += ["-i", external_audio_path]
     cmd += [
@@ -1062,6 +1129,7 @@ def render_final(
     audio_recovery=False,
     external_audio_path=None,
     target_duration=None,
+    support_banner=None,
 ):
     if not _probe_video_streams(concat_output):
         raise RuntimeError(
@@ -1077,6 +1145,7 @@ def render_final(
         audio_recovery,
         external_audio_path,
         target_duration,
+        support_banner,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
 
@@ -1101,5 +1170,6 @@ def render_final(
         concat_output, watermark_path, output_video,
         fallback_encoding, audio_stream_index, audio_recovery, external_audio_path,
         target_duration,
+        support_banner,
     )
     run(fallback_cmd)

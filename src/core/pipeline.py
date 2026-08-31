@@ -164,6 +164,8 @@ def compact_manifest_episode(manifest_episode, skip_types):
         compact["audio"] = manifest_episode["audio"]
     if manifest_episode.get("analysis_audio"):
         compact["analysis_audio"] = manifest_episode["analysis_audio"]
+    if manifest_episode.get("support_banner") is not None:
+        compact["support_banner"] = manifest_episode["support_banner"]
     return compact
 
 
@@ -299,6 +301,61 @@ def validate_expected_episode_duration(validation, expected_duration, path):
 
 RENDER_PIPELINE_VERSION = 3
 
+DEFAULT_SUPPORT_BANNER = {
+    "enabled": True,
+    "path": "./assets/support_banner.png",
+    "interval_episodes": 6,
+    "duration_seconds": 6.0,
+    "slide_seconds": 0.5,
+    "width_px": 596,
+    "bottom_margin_px": 40,
+}
+
+
+def normalize_support_banner_config(job, privacy_view=None):
+    raw = job.get("support_banner")
+    config = dict(DEFAULT_SUPPORT_BANNER)
+    if raw is None:
+        config["enabled"] = False
+    elif not isinstance(raw, dict):
+        raise RuntimeError("support_banner must be a JSON object")
+    else:
+        config.update(raw)
+
+    config["enabled"] = bool(config.get("enabled", True))
+    numeric_fields = {
+        "interval_episodes": int,
+        "duration_seconds": float,
+        "slide_seconds": float,
+        "width_px": int,
+        "bottom_margin_px": int,
+    }
+    for field, converter in numeric_fields.items():
+        try:
+            config[field] = converter(config[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"support_banner.{field} must be numeric") from exc
+        if field == "bottom_margin_px":
+            if config[field] < 0:
+                raise RuntimeError("support_banner.bottom_margin_px must be >= 0")
+        elif config[field] <= 0:
+            raise RuntimeError(f"support_banner.{field} must be > 0")
+
+    if privacy_view is None:
+        try:
+            privacy_view = int((job.get("delivery") or {}).get("vk_privacy_view", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("delivery.vk_privacy_view must be an integer") from exc
+    config["path"] = str(config.get("path") or "")
+    config["privacy_view"] = int(privacy_view)
+    config["active"] = config["enabled"] and config["privacy_view"] != 5
+    config["episode_ordinal_offset"] = int(
+        (job.get("processing") or {}).get("_support_banner_episode_offset", 0)
+    )
+    if config["episode_ordinal_offset"] < 0:
+        raise RuntimeError("support banner episode offset must be >= 0")
+    return config
+
 
 def _file_identity(path):
     path = Path(path)
@@ -311,6 +368,61 @@ def _file_identity(path):
         }
     except OSError:
         return {"path": str(path.resolve()), "size": None, "mtime_ns": None}
+
+
+def build_support_banner_render_signature(job, support_banner=None):
+    config = support_banner or normalize_support_banner_config(job)
+    if not config["active"]:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "asset": _file_identity(config["path"]),
+        "interval_episodes": config["interval_episodes"],
+        "duration_seconds": config["duration_seconds"],
+        "slide_seconds": config["slide_seconds"],
+        "width_px": config["width_px"],
+        "bottom_margin_px": config["bottom_margin_px"],
+        "episode_ordinal_offset": config["episode_ordinal_offset"],
+    }
+
+
+def validate_support_banner_asset(support_banner):
+    if support_banner["active"] and not Path(support_banner["path"]).is_file():
+        raise RuntimeError(
+            f"Support banner file not found: {support_banner['path']}"
+        )
+
+
+def build_support_banner_episode_spec(
+    support_banner,
+    cleaned_duration,
+    *,
+    episode_ordinal=1,
+    single_episode=False,
+):
+    shown = bool(
+        support_banner["active"]
+        and (
+            single_episode
+            or int(episode_ordinal) % support_banner["interval_episodes"] == 0
+        )
+    )
+    cleaned_duration = max(0.0, float(cleaned_duration))
+    if not shown or cleaned_duration <= 0:
+        return {"shown": False}
+
+    duration = min(support_banner["duration_seconds"], cleaned_duration)
+    slide = min(support_banner["slide_seconds"], duration / 2.0)
+    start = max(0.0, (cleaned_duration - duration) / 2.0)
+    return {
+        "shown": True,
+        "path": support_banner["path"],
+        "start": round(start, 6),
+        "duration": round(duration, 6),
+        "slide_seconds": round(slide, 6),
+        "width_px": support_banner["width_px"],
+        "bottom_margin_px": support_banner["bottom_margin_px"],
+    }
 
 
 def _source_fingerprint(path):
@@ -355,6 +467,7 @@ def build_episode_fingerprint(
     timing_detection,
     preferred_language,
 ):
+    support_banner = normalize_support_banner_config(job)
     payload = {
         "version": RENDER_PIPELINE_VERSION,
         "title": job.get("title"),
@@ -370,6 +483,7 @@ def build_episode_fingerprint(
         "encoding": _effective_episode_encoding(job.get("encoding")),
         "preferred_audio_language": preferred_language,
         "watermark": _file_identity(watermark_path),
+        "support_banner": build_support_banner_render_signature(job, support_banner),
         "episodes": [
             {
                 "episode": item["episode"],
@@ -1752,6 +1866,13 @@ def load_render_checkpoint(job, artifacts):
         return None
     if manifest.get("output_video") != output_video.name or manifest.get("output_timestamps") != output_txt.name:
         return None
+    expected_support_banner = build_support_banner_render_signature(job)
+    actual_support_banner = manifest.get("support_banner")
+    if expected_support_banner["enabled"]:
+        if actual_support_banner != expected_support_banner:
+            return None
+    elif isinstance(actual_support_banner, dict) and actual_support_banner.get("enabled"):
+        return None
     audio_recovery_enabled = bool(
         (job.get("processing") or {}).get("audio_recovery_enabled", False)
     )
@@ -1856,6 +1977,11 @@ def process_multi_season_job(job, runtime_status_path=None):
     )
     cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
     delivery = build_delivery_config(job)
+    support_banner = normalize_support_banner_config(
+        job,
+        privacy_view=delivery["vk_privacy_view"],
+    )
+    validate_support_banner_asset(support_banner)
     download_cfg = job.get("download") or {}
     download_timeout = int(download_cfg.get("timeout_minutes_maximum", 1440)) * 60
     render_completed = False
@@ -1936,6 +2062,7 @@ def process_multi_season_job(job, runtime_status_path=None):
         timing_summaries = []
         set_runtime_stage(runtime_status_path, "season_render", total_episodes=len(all_episode_infos))
         episode_offsets = {}
+        support_banner_episode_offset = 0
         for season, part_index, part_dir, episodes in season_inputs:
             subjob = deepcopy(job)
             subjob["season"] = season
@@ -1958,8 +2085,13 @@ def process_multi_season_job(job, runtime_status_path=None):
                 "target_frame_rate": target_frame_rate,
                 "target_frame_width": target_frame_width,
                 "target_frame_height": target_frame_height,
+                "_support_banner_episode_offset": support_banner_episode_offset,
             })
-            subjob["delivery"] = {"s3_enabled": False, "vk_enabled": False}
+            subjob["delivery"] = {
+                "s3_enabled": False,
+                "vk_enabled": False,
+                "vk_privacy_view": delivery["vk_privacy_view"],
+            }
             subjob["cleanup"] = {"downloads": False, "temp": True, "output": False}
             result = process_job(subjob, runtime_status_path=runtime_status_path)
             season_output = Path(result["output_video"])
@@ -1974,6 +2106,7 @@ def process_multi_season_job(job, runtime_status_path=None):
                 source_episode_start=episodes[0],
             ))
             episode_offsets[season] = episode_offset + len(episodes)
+            support_banner_episode_offset += len(episodes)
 
         signatures = [ffprobe_media_signature(path) for path in season_outputs]
         if any(signature != signatures[0] for signature in signatures[1:]):
@@ -2034,6 +2167,7 @@ def process_multi_season_job(job, runtime_status_path=None):
             "episodes": manifest_episodes,
             "timestamps": timestamps,
             "processing": {"mode": "multi_season", "season_range": season_range},
+            "support_banner": build_support_banner_render_signature(job, support_banner),
             "render_complete": True,
         }
         write_outputs(artifacts["output_txt"], artifacts["output_manifest"], timestamps, manifest)
@@ -2089,6 +2223,11 @@ def process_job(job, runtime_status_path=None):
     audio_recovery_enabled = bool(processing.get("audio_recovery_enabled", False))
     timing_detection = normalize_timing_detection_config(job)
     delivery = build_delivery_config(job)
+    support_banner = normalize_support_banner_config(
+        job,
+        privacy_view=delivery["vk_privacy_view"],
+    )
+    validate_support_banner_asset(support_banner)
     timing_providers = job.get("timing_providers") or {}
     anilibria_enabled = timing_providers.get("anilibria_enabled", True)
     aniskip_enabled = timing_providers.get("aniskip_enabled", False)
@@ -2232,6 +2371,11 @@ def process_job(job, runtime_status_path=None):
                     if not external_audio and episode_audio_index == 0 else None
                 ),
             )
+            support_banner_episode = build_support_banner_episode_spec(
+                support_banner,
+                expected_duration,
+                single_episode=True,
+            )
             render_final(
                 concat_output=Path(episode_path),
                 watermark_path=watermark_path,
@@ -2241,6 +2385,7 @@ def process_job(job, runtime_status_path=None):
                 audio_recovery=audio_recovery["applied"],
                 external_audio_path=external_audio["path"] if external_audio else None,
                 target_duration=expected_duration,
+                support_banner=support_banner_episode,
             )
             validation = validate_episode_render(output_video)
             validate_expected_episode_duration(validation, expected_duration, output_video)
@@ -2262,6 +2407,11 @@ def process_job(job, runtime_status_path=None):
                     "duration_delta": _round_or_none(external_audio["duration_delta"]),
                 } if external_audio else {}),
             }
+            manifest_episode["support_banner"] = {
+                key: value
+                for key, value in support_banner_episode.items()
+                if key != "path"
+            }
             manifest["source_summary"]["external_audio_episode_count"] = int(bool(external_audio))
             manifest["quality_summary"] = {
                 "episodes_count": 1,
@@ -2269,6 +2419,10 @@ def process_job(job, runtime_status_path=None):
                     [episode_number] if audio_recovery["applied"] else []
                 ),
             }
+            manifest["support_banner"] = build_support_banner_render_signature(
+                job,
+                support_banner,
+            )
             manifest["render_complete"] = True
             write_outputs(output_txt, output_manifest, timestamps, manifest)
             render_completed = True
@@ -2435,6 +2589,24 @@ def process_job(job, runtime_status_path=None):
                         preferred_language=preferred_language,
                         audio_recovery_enabled=audio_recovery_enabled,
                     )
+                    cleaned_duration = sum(
+                        float(end) - float(start)
+                        for start, end in render_plan["keep_segments"]
+                    )
+                    support_banner_episode = build_support_banner_episode_spec(
+                        support_banner,
+                        cleaned_duration,
+                        episode_ordinal=(
+                            support_banner["episode_ordinal_offset"]
+                            + episode_index
+                            + 1
+                        ),
+                    )
+                    render_plan["manifest_episode"]["support_banner"] = {
+                        key: value
+                        for key, value in support_banner_episode.items()
+                        if key != "path"
+                    }
                     render_episode(
                         episode_info["path"],
                         rendered_work,
@@ -2446,6 +2618,7 @@ def process_job(job, runtime_status_path=None):
                             (render_plan.get("audio_recovery") or {}).get("applied")
                         ),
                         external_audio_path=render_plan.get("external_audio_path"),
+                        support_banner=support_banner_episode,
                     )
                     episode_result = save_episode_checkpoint(
                         episode_dir,
@@ -2546,6 +2719,10 @@ def process_job(job, runtime_status_path=None):
             timing_sources_summary=timing_sources_summary,
         )
         manifest["timestamps"] = timestamps
+        manifest["support_banner"] = build_support_banner_render_signature(
+            job,
+            support_banner,
+        )
 
         print("\n[QUALITY SUMMARY]")
         print(json.dumps(quality_summary, indent=2, ensure_ascii=False))
