@@ -251,6 +251,23 @@ class TorrentSelectionTests(unittest.TestCase):
 
         self.assertEqual(selected[0]["episode"], 1156)
 
+    def test_selects_episode_from_numeric_hyphen_prefix(self):
+        selected = select_torrent_episode_files([
+            {
+                "index": 1,
+                "path": "One Piece [1280x720]/638-One_Piece_TV_[Persona99](1280x720).rus.jap.mkv",
+            },
+            {
+                "index": 2,
+                "path": "One Piece [1280x720]/679-One_Piece_TV_[Persona99](1280x720).rus.jap.mkv",
+            },
+        ], {638, 679})
+
+        self.assertEqual(
+            [(item["episode"], item["index"]) for item in selected],
+            [(638, 1), (679, 2)],
+        )
+
     def test_title_season_number_does_not_override_episode_number(self):
         selected = select_torrent_episode_files([
             {"index": 1, "path": "Kuroko no Basuke 3 - 01 [DiWilliam].mkv"},

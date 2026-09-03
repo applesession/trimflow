@@ -7,6 +7,7 @@ from shared.constants import SUPPORTED_EXTERNAL_AUDIO_EXTENSIONS, SUPPORTED_VIDE
 def extract_episode_number(filename: str):
     patterns = [
         r"^(\d{1,4})\.",
+        r"^(\d{1,4})\s*[-–—]\s*",
         r"\[(\d{1,4})[\s_]+of[\s_]+(?:\d{1,4}|[Xx]{1,4})\]",
         r"\[(\d{1,4})\]",
         r"[Ss]\d{1,2}[Ee](\d{1,4})",
