@@ -42,6 +42,20 @@ class UpscaleTests(unittest.TestCase):
             "cleanup": {"downloads": True, "output": True},
         }
 
+    @patch("core.upscale.prepare_torrent_episode_downloads", return_value=(Path("release.torrent"), []))
+    @patch("core.upscale.validate_upscale_environment")
+    def test_upscale_passes_allow_missing_episodes_to_torrent_selection(
+        self,
+        _mock_environment,
+        mock_prepare,
+    ):
+        job = self.make_job()
+        job["processing"] = {"allow_missing_episodes": True}
+
+        process_upscale_job({}, job)
+
+        self.assertTrue(mock_prepare.call_args.kwargs["allow_missing_episodes"])
+
     def test_normal_recovery_does_not_touch_running_upscale_job(self):
         insert_one_job({
             "title": "Normal", "season": 1, "episodes_range": "001",

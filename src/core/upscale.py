@@ -259,6 +259,9 @@ def process_upscale_job(config, job, runtime_status_path=None, on_episode_succes
         download_dir,
         requested_episodes,
         path_filter=(job.get("processing") or {}).get("source_path_contains"),
+        allow_missing_episodes=bool(
+            (job.get("processing") or {}).get("allow_missing_episodes", False)
+        ),
     )
     cleanup = job.get("cleanup") or {}
     total = len(selected_episodes)

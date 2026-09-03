@@ -197,7 +197,13 @@ def select_torrent_episode_files(
     return selected
 
 
-def discover_torrent_episode_numbers(magnet, download_dir, path_filter=None, timeout=None):
+def discover_torrent_episode_numbers(
+    magnet,
+    download_dir,
+    path_filter=None,
+    timeout=None,
+    allow_missing_episodes=False,
+):
     _, torrent_files = prepare_torrent_metadata(
         magnet,
         download_dir,
@@ -220,10 +226,13 @@ def discover_torrent_episode_numbers(magnet, download_dir, path_filter=None, tim
 
     expected = set(range(min(episodes), max(episodes) + 1))
     missing = sorted(expected - episodes)
-    if missing:
+    if missing and not allow_missing_episodes:
         raise RuntimeError(f"Torrent season has missing episodes: {missing}")
-    select_torrent_episode_files(torrent_files, expected, path_filter=path_filter)
-    return sorted(expected)
+    if missing:
+        print(f"[TORRENT MISSING] allowed missing season episodes: {missing}")
+    selected_episodes = episodes if allow_missing_episodes else expected
+    select_torrent_episode_files(torrent_files, selected_episodes, path_filter=path_filter)
+    return sorted(selected_episodes)
 
 
 def select_torrent_external_audio_files(torrent_files, allowed_episodes):
@@ -313,7 +322,13 @@ def download_selected_episodes(
     return selected
 
 
-def download_selected_episodes_from_sources(sources, download_dir, allowed_episodes, timeout=None):
+def download_selected_episodes_from_sources(
+    sources,
+    download_dir,
+    allowed_episodes,
+    timeout=None,
+    allow_missing_episodes=False,
+):
     sources = list(sources or [])
     if len(sources) < 2:
         raise RuntimeError("Multi-source download requires at least two magnet sources")
@@ -366,8 +381,10 @@ def download_selected_episodes_from_sources(sources, download_dir, allowed_episo
                 "candidate_sources": [index + 1 for index in candidates],
             })
 
-    if missing:
+    if missing and not allow_missing_episodes:
         raise RuntimeError(f"Torrent files not found for episodes across sources: {missing}")
+    if missing:
+        print(f"[TORRENT MISSING] allowed missing episodes across sources: {missing}")
     if overlaps:
         print("[TORRENT SOURCE OVERLAP] " + json.dumps(overlaps, ensure_ascii=False))
 

@@ -2112,6 +2112,14 @@ def normalize_command_text(text):
 VALID_PRIVACY_VALUES = {0, 1, 2, 3, 5}
 
 
+def _parse_optional_missing_episode_suffix(episodes_range):
+    episodes_range = str(episodes_range).strip()
+    allow_missing_episodes = episodes_range.endswith("?")
+    if allow_missing_episodes:
+        episodes_range = episodes_range[:-1].strip()
+    return episodes_range, allow_missing_episodes
+
+
 def parse_add_command(text):
     if not text.startswith("/add "):
         raise RuntimeError("Команда должна начинаться с /add")
@@ -2122,9 +2130,7 @@ def parse_add_command(text):
         raise RuntimeError("Формат: /add Название ; 001-003 ; magnet:?xt=... ; сезон ; privacy ; фильтр пути")
 
     title, episodes_range, magnet = parts[:3]
-    allow_missing_episodes = episodes_range.endswith("?")
-    if allow_missing_episodes:
-        episodes_range = episodes_range[:-1].strip()
+    episodes_range, allow_missing_episodes = _parse_optional_missing_episode_suffix(episodes_range)
     season = parts[3] if len(parts) >= 4 else "1"
     privacy_view = parts[4] if len(parts) >= 5 else "0"
     path_filter = parts[5] if len(parts) == 6 else None
@@ -2174,6 +2180,7 @@ def parse_addmulti_command(text):
         raise RuntimeError("Формат: /addmulti Название ; 001-148 ; сезон ; privacy")
 
     title, episodes_range = header[:2]
+    episodes_range, allow_missing_episodes = _parse_optional_missing_episode_suffix(episodes_range)
     season = header[2] if len(header) >= 3 else "1"
     privacy_view = header[3] if len(header) >= 4 else "0"
     if not title:
@@ -2211,6 +2218,7 @@ def parse_addmulti_command(text):
         "episodes_range": format_episodes_range(validated_episodes),
         "privacy_view": privacy_value,
         "sources": sources,
+        "allow_missing_episodes": allow_missing_episodes,
     }
 
 
@@ -2223,6 +2231,7 @@ def parse_addseasons_command(text):
     if len(header) not in {2, 3}:
         raise RuntimeError("Формат: /addseasons Название ; 1-5 ; privacy")
     title, season_range = header[:2]
+    season_range, allow_missing_episodes = _parse_optional_missing_episode_suffix(season_range)
     privacy_view = header[2] if len(header) == 3 else "0"
     if not title:
         raise RuntimeError("Нужно указать название тайтла")
@@ -2287,6 +2296,7 @@ def parse_addseasons_command(text):
         "last_season": last_season,
         "privacy_view": privacy_value,
         "sources": sources,
+        "allow_missing_episodes": allow_missing_episodes,
     }
 
 
@@ -2299,6 +2309,9 @@ def parse_add4k_command(text):
         raise RuntimeError("Формат: /add4k Название ; количество серий ; magnet:?xt=... ; сезон ; фильтр пути")
 
     title, episode_count_or_range, magnet = parts[:3]
+    episode_count_or_range, allow_missing_episodes = _parse_optional_missing_episode_suffix(
+        episode_count_or_range
+    )
     season = parts[3] if len(parts) >= 4 else "1"
     path_filter = parts[4] if len(parts) == 5 else None
     if not title:
@@ -2329,6 +2342,7 @@ def parse_add4k_command(text):
         "episodes_range": episodes_range,
         "magnet": magnet,
         "source_path_contains": path_filter,
+        "allow_missing_episodes": allow_missing_episodes,
     }
 
 
@@ -2391,6 +2405,8 @@ def add_multi_job_from_command(config, text):
     job["source"]["download_dir"] = f"downloads/{build_job_workspace_name(job)}"
     if payload["privacy_view"] != 0:
         job["delivery"] = {"vk_privacy_view": payload["privacy_view"]}
+    if payload.get("allow_missing_episodes"):
+        job["processing"] = {"allow_missing_episodes": True}
     if has_manual_queue_duplicate(load_jobs(config), job):
         return {"added": False, "job": job, "reason": "duplicate_job"}
     insert_one_job(job)
@@ -2404,7 +2420,14 @@ def add_seasons_job_from_command(config, text):
         "season": payload["first_season"],
         "episodes_range": "001",
         "processing_mode": "multi_season",
-        "processing": {"season_range": payload["season_range"]},
+        "processing": {
+            "season_range": payload["season_range"],
+            **(
+                {"allow_missing_episodes": True}
+                if payload.get("allow_missing_episodes")
+                else {}
+            ),
+        },
         "source": {
             "type": "magnet",
             "parts": payload["sources"],
@@ -2446,8 +2469,13 @@ def build_upscale_job(command_payload):
         },
     }
     job["source"]["download_dir"] = f"upscale_downloads/{build_job_workspace_name(job)}"
+    processing = {}
     if command_payload.get("source_path_contains"):
-        job["processing"] = {"source_path_contains": command_payload["source_path_contains"]}
+        processing["source_path_contains"] = command_payload["source_path_contains"]
+    if command_payload.get("allow_missing_episodes"):
+        processing["allow_missing_episodes"] = True
+    if processing:
+        job["processing"] = processing
     return job
 
 
@@ -2537,12 +2565,12 @@ def build_help_message():
         "Пример:",
         "/add Название ; серии ; magnet ; сезон ; privacy ; необязательный фильтр пути",
         "Добавь ? после диапазона, чтобы разрешить отсутствующие серии: 500-600?",
-        "/addmulti Название ; серии ; сезон ; privacy",
+        "/addmulti Название ; серии[?] ; сезон ; privacy",
         "magnet первой части ; необязательный фильтр пути",
         "magnet второй части ; необязательный фильтр пути",
-        "/addseasons Название ; 1-5 ; privacy",
+        "/addseasons Название ; 1-5[?] ; privacy",
         "magnet-ссылки по порядку; лишние части относятся к последнему сезону",
-        "/add4k Название ; серии ; magnet ; сезон ; необязательный фильтр пути",
+        "/add4k Название ; количество или серии[?] ; magnet ; сезон ; необязательный фильтр пути",
     ])
 
 

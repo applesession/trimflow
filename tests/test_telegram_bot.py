@@ -175,6 +175,23 @@ class TelegramBotTests(unittest.TestCase):
                 "magnet:?xt=urn:btih:first",
             ]))
 
+    def test_addmulti_question_mark_allows_episodes_missing_across_sources(self):
+        command = "\n".join([
+            "/addmulti One Piece ; 431-600? ; 1 ; 0",
+            "magnet:?xt=urn:btih:first",
+            "magnet:?xt=urn:btih:second",
+        ])
+
+        payload = parse_addmulti_command(command)
+        result = add_multi_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            command,
+        )
+
+        self.assertEqual(payload["episodes_range"], "431-600")
+        self.assertTrue(payload["allow_missing_episodes"])
+        self.assertTrue(result["job"]["processing"]["allow_missing_episodes"])
+
     def test_addseasons_command_maps_one_source_per_season(self):
         command = "\n".join([
             "/addseasons Hunter x Hunter ; 1-3 ; 3",
@@ -205,6 +222,23 @@ class TelegramBotTests(unittest.TestCase):
                 "magnet:?xt=urn:btih:first",
                 "magnet:?xt=urn:btih:second",
             ]))
+
+    def test_addseasons_question_mark_allows_missing_episodes_in_seasons(self):
+        command = "\n".join([
+            "/addseasons Hunter x Hunter ; 1-2? ; 0",
+            "magnet:?xt=urn:btih:first",
+            "magnet:?xt=urn:btih:second",
+        ])
+
+        payload = parse_addseasons_command(command)
+        result = add_seasons_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            command,
+        )
+
+        self.assertEqual(payload["season_range"], "1-2")
+        self.assertTrue(payload["allow_missing_episodes"])
+        self.assertTrue(result["job"]["processing"]["allow_missing_episodes"])
 
     def test_addseasons_extra_positional_sources_belong_to_last_season(self):
         payload = parse_addseasons_command("\n".join([
@@ -282,6 +316,19 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(payload["source_path_contains"], "HEVC/TV")
         self.assertEqual(result["job"]["processing"]["source_path_contains"], "HEVC/TV")
+
+    def test_add4k_question_mark_allows_missing_torrent_episodes(self):
+        command = "/add4k Test Title ; 25? ; magnet:?xt=urn:btih:testhash ; 2"
+
+        payload = parse_add4k_command(command)
+        result = add_upscale_job_from_command(
+            self.make_config(self.make_workspace_temp_dir()),
+            command,
+        )
+
+        self.assertEqual(payload["episodes_range"], "001-025")
+        self.assertTrue(payload["allow_missing_episodes"])
+        self.assertTrue(result["job"]["processing"]["allow_missing_episodes"])
 
     def test_allowed_chat_filter_uses_whitelist(self):
         allowed = {"123", "456"}

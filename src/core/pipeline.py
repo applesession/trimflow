@@ -866,6 +866,9 @@ def collect_episode_files(source, title_slug, allowed_episodes, processing=None,
                 download_dir,
                 allowed_episodes,
                 timeout=download_timeout,
+                allow_missing_episodes=bool(
+                    (processing or {}).get("allow_missing_episodes", False)
+                ),
             )
         else:
             download_selected_episodes(
@@ -2028,6 +2031,7 @@ def process_multi_season_job(job, runtime_status_path=None):
                 part_dir,
                 path_filter=part.get("path_filter"),
                 timeout=download_timeout,
+                allow_missing_episodes=bool(processing.get("allow_missing_episodes", False)),
             )
             print(
                 f"[SEASON] {season}: found {len(episodes)} episodes, "
@@ -2112,7 +2116,7 @@ def process_multi_season_job(job, runtime_status_path=None):
                 episode_offset,
                 source_episode_start=episodes[0],
             ))
-            episode_offsets[season] = episode_offset + len(episodes)
+            episode_offsets[season] = episode_offset + episodes[-1] - episodes[0] + 1
             support_banner_episode_offset += len(episodes)
 
         signatures = [ffprobe_media_signature(path) for path in season_outputs]

@@ -83,7 +83,27 @@ class TorrentSelectionTests(unittest.TestCase):
             Path("downloads/test"),
             {1, 2, 3},
             timeout=60,
+            allow_missing_episodes=False,
         )
+
+    @patch("core.pipeline.find_episode_files", return_value=([(1, Path("episode-001.mkv"))], []))
+    @patch("core.pipeline.download_selected_episodes_from_sources")
+    def test_flexible_multi_source_pipeline_allows_missing_episodes(self, mock_download, _mock_find):
+        from core.pipeline import collect_episode_files
+
+        sources = [
+            {"magnet": "magnet:?xt=urn:btih:first"},
+            {"magnet": "magnet:?xt=urn:btih:second"},
+        ]
+        collect_episode_files(
+            {"type": "magnet", "parts": sources, "download_dir": "downloads/test"},
+            "test",
+            {1, 2, 3},
+            processing={"allow_missing_episodes": True},
+            download_timeout=60,
+        )
+
+        self.assertTrue(mock_download.call_args.kwargs["allow_missing_episodes"])
 
     def test_selects_only_requested_indices(self):
         files = [
@@ -137,6 +157,21 @@ class TorrentSelectionTests(unittest.TestCase):
                 "magnet:?xt=urn:btih:test",
                 self.make_temp_dir(),
             )
+
+    @patch("core.torrent.prepare_torrent_metadata")
+    def test_flexible_discovery_allows_internal_gap(self, mock_prepare):
+        mock_prepare.return_value = (Path("release.torrent"), [
+            {"index": 1, "path": "Show [001].mkv"},
+            {"index": 3, "path": "Show [003].mkv"},
+        ])
+
+        episodes = discover_torrent_episode_numbers(
+            "magnet:?xt=urn:btih:test",
+            self.make_temp_dir(),
+            allow_missing_episodes=True,
+        )
+
+        self.assertEqual(episodes, [1, 3])
 
     @patch("core.torrent.download_selected_episodes")
     @patch("core.torrent.prepare_torrent_metadata")
@@ -192,6 +227,34 @@ class TorrentSelectionTests(unittest.TestCase):
             ], self.make_temp_dir() / "downloads", {1, 2, 3})
 
         mock_download.assert_not_called()
+
+    @patch("core.torrent.download_selected_episodes")
+    @patch("core.torrent.prepare_torrent_metadata")
+    def test_flexible_multi_source_skips_episodes_missing_across_sources(
+        self,
+        mock_prepare,
+        mock_download,
+    ):
+        mock_prepare.side_effect = [
+            (Path("first.torrent"), [{"index": 1, "path": "Show [001].mkv"}]),
+            (Path("second.torrent"), [{"index": 3, "path": "Show [003].mkv"}]),
+        ]
+        mock_download.side_effect = lambda _magnet, _download_dir, episodes, **_kwargs: [
+            {"episode": episode, "index": episode, "path": f"Show [{episode:03d}].mkv"}
+            for episode in episodes
+        ]
+
+        selected = download_selected_episodes_from_sources(
+            [
+                {"magnet": "magnet:?xt=urn:btih:first"},
+                {"magnet": "magnet:?xt=urn:btih:second"},
+            ],
+            self.make_temp_dir() / "downloads",
+            {1, 2, 3},
+            allow_missing_episodes=True,
+        )
+
+        self.assertEqual([item["episode"] for item in selected], [1, 3])
 
     def test_external_audio_selection_uses_episode_number_and_supported_extensions(self):
         selected = select_torrent_external_audio_files([

@@ -764,7 +764,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         job = self.make_job(tmp_dir)
         job.update({
             "processing_mode": "multi_season",
-            "processing": {"season_range": "1-2"},
+            "processing": {"season_range": "1-2", "allow_missing_episodes": True},
             "source": {
                 "type": "magnet",
                 "parts": [
@@ -817,7 +817,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
         with patch("lib.pipeline.prepare_temp_dir", return_value=temp_dir), patch(
             "lib.pipeline.discover_torrent_episode_numbers", return_value=[1]
-        ), patch("lib.pipeline.download_selected_episodes"), patch(
+        ) as mock_discover, patch("lib.pipeline.download_selected_episodes"), patch(
             "lib.pipeline.find_episode_files", side_effect=fake_find_episode_files
         ), patch(
             "lib.pipeline.filter_episode_files", side_effect=lambda detected, _episodes: (detected, [])
@@ -838,6 +838,14 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             }
             process_multi_season_job(job)
 
+        self.assertTrue(all(
+            call.kwargs["allow_missing_episodes"]
+            for call in mock_discover.call_args_list
+        ))
+        self.assertTrue(all(
+            subjob["processing"]["allow_missing_episodes"]
+            for subjob in captured_subjobs
+        ))
         manifest = mock_deliver.call_args.kwargs["manifest"]
         self.assertTrue(manifest["timing_detection"]["enabled"])
         self.assertEqual(
