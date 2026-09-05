@@ -186,6 +186,33 @@ def ffprobe_duration(path):
     return float(result.decode().strip())
 
 
+def ffprobe_first_decoded_video_timestamp(path):
+    try:
+        result = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-read_intervals", "%+30",
+            "-show_frames",
+            "-show_entries", "frame=best_effort_timestamp_time",
+            "-of", "json",
+            str(path),
+        ], encoding="utf-8", errors="replace")
+        frames = json.loads(result).get("frames", [])
+        for frame in frames:
+            timestamp = frame.get("best_effort_timestamp_time")
+            if timestamp is not None:
+                return float(timestamp)
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise RuntimeError(f"Unable to probe first decoded video frame: {path}") from exc
+    raise RuntimeError(f"No decodable video frame found in first 30 seconds: {path}")
+
+
 def ffprobe_media_signature(path):
     try:
         result = subprocess.check_output([
@@ -864,6 +891,7 @@ def _build_episode_render_cmd(
     audio_recovery=False,
     external_audio_path=None,
     support_banner=None,
+    source_start_offset=0.0,
 ):
     if not keep_segments:
         raise RuntimeError(f"Episode has no ranges to render: {ep_file}")
@@ -962,14 +990,19 @@ def _build_episode_render_cmd(
         support_banner=support_banner,
         banner_input_index=banner_input_index,
     )
-    cmd = [
-        "ffmpeg", "-y",
+    source_start_offset = max(0.0, float(source_start_offset or 0.0))
+    cmd = ["ffmpeg", "-y"]
+    if source_start_offset:
+        cmd += ["-ss", f"{source_start_offset:.6f}"]
+    cmd += [
         "-i", str(ep_file),
         "-i", str(watermark_path),
     ]
     if banner_shown:
         cmd += ["-i", str(support_banner["path"])]
     if external_audio_path:
+        if source_start_offset:
+            cmd += ["-ss", f"{source_start_offset:.6f}"]
         cmd += ["-i", str(external_audio_path)]
     cmd += [
         "-filter_complex", ";".join(filters),
@@ -1009,6 +1042,7 @@ def render_episode(
     audio_recovery=False,
     external_audio_path=None,
     support_banner=None,
+    source_start_offset=0.0,
 ):
     cmd = _build_episode_render_cmd(
         ep_file,
@@ -1020,6 +1054,7 @@ def render_episode(
         audio_recovery,
         external_audio_path,
         support_banner,
+        source_start_offset,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
     try:
@@ -1046,6 +1081,7 @@ def render_episode(
         audio_recovery,
         external_audio_path,
         support_banner,
+        source_start_offset,
     ))
 
 
@@ -1059,6 +1095,7 @@ def _build_final_cmd(
     external_audio_path=None,
     target_duration=None,
     support_banner=None,
+    source_start_offset=0.0,
 ):
     video_codec = encoding.get("video_codec", "h264_nvenc")
     preset = encoding.get("preset", "fast")
@@ -1104,15 +1141,19 @@ def _build_final_cmd(
         )
         audio_output = "[aexternal]"
 
-    cmd = [
-        "ffmpeg",
-        "-y",
+    source_start_offset = max(0.0, float(source_start_offset or 0.0))
+    cmd = ["ffmpeg", "-y"]
+    if source_start_offset:
+        cmd += ["-ss", f"{source_start_offset:.6f}"]
+    cmd += [
         "-i", concat_output,
         "-i", watermark_path,
     ]
     if banner_shown:
         cmd += ["-i", str(support_banner["path"])]
     if external_audio_path:
+        if source_start_offset:
+            cmd += ["-ss", f"{source_start_offset:.6f}"]
         cmd += ["-i", external_audio_path]
     cmd += [
         "-filter_complex", ";".join(filters),
@@ -1152,6 +1193,7 @@ def render_final(
     external_audio_path=None,
     target_duration=None,
     support_banner=None,
+    source_start_offset=0.0,
 ):
     if not _probe_video_streams(concat_output):
         raise RuntimeError(
@@ -1168,6 +1210,7 @@ def render_final(
         external_audio_path,
         target_duration,
         support_banner,
+        source_start_offset,
     )
     video_codec = encoding.get("video_codec", "h264_nvenc")
 
@@ -1193,5 +1236,6 @@ def render_final(
         fallback_encoding, audio_stream_index, audio_recovery, external_audio_path,
         target_duration,
         support_banner,
+        source_start_offset,
     )
     run(fallback_cmd)

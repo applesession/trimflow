@@ -56,6 +56,7 @@ from core.media import (
     build_keep_segments,
     ffprobe_duration,
     ffprobe_episode_timeline,
+    ffprobe_first_decoded_video_timestamp,
     ffprobe_media_signature,
     render_concat,
     render_episode,
@@ -166,6 +167,8 @@ def compact_manifest_episode(manifest_episode, skip_types):
         compact["analysis_audio"] = manifest_episode["analysis_audio"]
     if manifest_episode.get("support_banner") is not None:
         compact["support_banner"] = manifest_episode["support_banner"]
+    if manifest_episode.get("leading_source_trim", {}).get("applied"):
+        compact["leading_source_trim"] = manifest_episode["leading_source_trim"]
     return compact
 
 
@@ -304,7 +307,44 @@ def validate_expected_episode_duration(validation, expected_duration, path):
         )
 
 
-RENDER_PIPELINE_VERSION = 3
+RENDER_PIPELINE_VERSION = 4
+
+LEADING_SOURCE_TRIM_THRESHOLD_SECONDS = 0.25
+MAX_LEADING_SOURCE_TRIM_SECONDS = 15.0
+
+
+def build_leading_source_trim(episode_info):
+    video = (episode_info.get("source_timeline") or {}).get("video") or {}
+    packet_start = float(video.get("start", 0.0))
+    decoded_start = float(
+        episode_info.get("first_decoded_video_timestamp", packet_start)
+    )
+    delay = max(0.0, decoded_start - packet_start)
+    if delay <= LEADING_SOURCE_TRIM_THRESHOLD_SECONDS:
+        delay = 0.0
+    if delay > MAX_LEADING_SOURCE_TRIM_SECONDS:
+        raise RuntimeError(
+            f"Leading undecodable video {delay:.3f}s exceeds "
+            f"{MAX_LEADING_SOURCE_TRIM_SECONDS:.3f}s: {episode_info['path']}"
+        )
+    return {
+        "applied": bool(delay),
+        "seconds": delay,
+        "reason": "late_first_decoded_video_frame" if delay else None,
+        "first_video_packet_timestamp": packet_start,
+        "first_decoded_video_timestamp": decoded_start,
+    }
+
+
+def trim_keep_segments_for_source_start(keep_segments, source_start_offset):
+    source_start_offset = max(0.0, float(source_start_offset or 0.0))
+    trimmed = []
+    for start, end in keep_segments:
+        clipped_start = max(float(start), source_start_offset)
+        end = float(end)
+        if end > clipped_start:
+            trimmed.append((clipped_start - source_start_offset, end - source_start_offset))
+    return trimmed
 
 DEFAULT_SUPPORT_BANNER = {
     "enabled": True,
@@ -496,6 +536,9 @@ def build_episode_fingerprint(
                 "frame_rate": item.get("frame_rate"),
                 "width": item.get("width"),
                 "height": item.get("height"),
+                "first_decoded_video_timestamp": _round_or_none(
+                    item.get("first_decoded_video_timestamp")
+                ),
                 "file": _file_identity(item["path"]),
                 **({
                     "external_audio": {
@@ -694,6 +737,7 @@ def build_episode_infos(
         video = (signature or {}).get("video") or {}
         container_duration = ffprobe_duration(path)
         source_timeline = ffprobe_episode_timeline(path)
+        first_decoded_video_timestamp = ffprobe_first_decoded_video_timestamp(path)
         video_timeline = source_timeline.get("video")
         if video_timeline is None:
             raise RuntimeError(f"Episode has no video packets: {path}")
@@ -747,6 +791,7 @@ def build_episode_infos(
             "duration": duration,
             "container_duration": container_duration,
             "source_timeline": source_timeline,
+            "first_decoded_video_timestamp": first_decoded_video_timestamp,
             "frame_rate": video.get("r_frame_rate"),
             "width": video.get("width"),
             "height": video.get("height"),
@@ -1152,11 +1197,21 @@ def build_episode_render_plan(
         review_required=timing_info["review_required"],
     )
 
-    keep_segments = [
+    source_keep_segments = [
         (start, end)
         for start, end in build_keep_segments(duration, remove_segments)
         if end > start
     ]
+    leading_source_trim = build_leading_source_trim(episode_info)
+    if leading_source_trim["applied"]:
+        print(
+            f"[SOURCE REPAIR] Episode {detected_ep}: trimming leading "
+            f"{leading_source_trim['seconds']:.3f}s before first decoded video frame"
+        )
+    keep_segments = trim_keep_segments_for_source_start(
+        source_keep_segments,
+        leading_source_trim["seconds"],
+    )
     expected_duration = sum(end - start for start, end in keep_segments)
     if expected_duration <= 0:
         raise RuntimeError(f"Episode {detected_ep} has no video left after OP/ED cuts")
@@ -1218,6 +1273,7 @@ def build_episode_render_plan(
         "audio_recovery": audio_recovery,
         "audio": audio_manifest,
         "analysis_audio": episode_info.get("analysis_audio"),
+        "leading_source_trim": leading_source_trim,
     }
     return {
         "keep_segments": keep_segments,
@@ -1225,6 +1281,7 @@ def build_episode_render_plan(
         "audio_stream_index": audio_stream_index,
         "external_audio_path": external_audio["path"] if external_audio else None,
         "audio_recovery": audio_recovery,
+        "source_start_offset": leading_source_trim["seconds"],
         "manifest_episode": manifest_episode,
     }
 
@@ -2375,7 +2432,15 @@ def process_job(job, runtime_status_path=None):
                 else get_preferred_audio_stream(Path(episode_path), preferred_language)
                 if embedded_audio_streams else None
             )
-            expected_duration = episode_info["duration"]
+            leading_source_trim = build_leading_source_trim(episode_info)
+            if leading_source_trim["applied"]:
+                print(
+                    f"[SOURCE REPAIR] Episode {episode_number}: trimming leading "
+                    f"{leading_source_trim['seconds']:.3f}s before first decoded video frame"
+                )
+            expected_duration = (
+                episode_info["duration"] - leading_source_trim["seconds"]
+            )
             audio_path = Path(external_audio["path"]) if external_audio else Path(episode_path)
             audio_recovery = build_audio_recovery_info(
                 audio_recovery_enabled,
@@ -2402,14 +2467,16 @@ def process_job(job, runtime_status_path=None):
                 external_audio_path=external_audio["path"] if external_audio else None,
                 target_duration=expected_duration,
                 support_banner=support_banner_episode,
+                source_start_offset=leading_source_trim["seconds"],
             )
             validation = validate_episode_render(output_video)
             validate_expected_episode_duration(validation, expected_duration, output_video)
             manifest_episode = manifest["episodes"][0]
-            manifest_episode["original_duration"] = expected_duration
+            manifest_episode["original_duration"] = episode_info["duration"]
             manifest_episode["expected_cleaned_duration"] = expected_duration
             manifest_episode["cleaned_duration"] = validation["duration"]
             manifest_episode["audio_recovery"] = audio_recovery
+            manifest_episode["leading_source_trim"] = leading_source_trim
             manifest_episode["audio"] = {
                 "source": "external" if external_audio else "embedded" if embedded_audio_streams else "none",
                 "stream_index": (
@@ -2635,6 +2702,7 @@ def process_job(job, runtime_status_path=None):
                         ),
                         external_audio_path=render_plan.get("external_audio_path"),
                         support_banner=support_banner_episode,
+                        source_start_offset=render_plan.get("source_start_offset", 0.0),
                     )
                     episode_result = save_episode_checkpoint(
                         episode_dir,

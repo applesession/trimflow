@@ -9,6 +9,7 @@ from unittest.mock import patch
 from lib.media import (
     analyze_audio_recovery,
     ffprobe_episode_timeline,
+    ffprobe_first_decoded_video_timestamp,
     get_nvenc_fallback_codec,
     get_preferred_audio_stream,
     render_episode,
@@ -21,6 +22,19 @@ from lib.media import (
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    @patch("lib.media.subprocess.check_output")
+    def test_probes_first_decoded_video_timestamp(self, mock_check_output):
+        mock_check_output.return_value = json.dumps({
+            "frames": [{"best_effort_timestamp_time": "4.922000"}],
+        })
+
+        timestamp = ffprobe_first_decoded_video_timestamp("episode.mkv")
+
+        self.assertEqual(timestamp, 4.922)
+        command = mock_check_output.call_args.args[0]
+        self.assertIn("-show_frames", command)
+        self.assertIn("%+30", command)
+
     def test_selects_japanese_embedded_audio_for_analysis(self):
         streams = [
             {"audio_index": 0, "language": "rus", "title": "Russian", "is_default": True},
@@ -150,6 +164,28 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
     @patch("lib.media.run")
+    def test_single_episode_render_seeks_past_undecodable_leading_video(
+        self,
+        mock_run,
+        _mock_probe,
+    ):
+        render_final(
+            "episode.mkv",
+            "watermark.png",
+            "rendered.mkv",
+            {"video_codec": "libx264", "audio_codec": "aac"},
+            audio_stream_index=0,
+            target_duration=1414.912,
+            source_start_offset=4.922,
+        )
+
+        command = mock_run.call_args.args[0]
+        input_index = command.index("episode.mkv")
+        self.assertEqual(command[input_index - 3:input_index], ["-ss", "4.922000", "-i"])
+        self.assertEqual(command[command.index("-t") + 1], "1414.912000")
+
+    @patch("lib.media._probe_video_streams", return_value=[{}])
+    @patch("lib.media.run")
     def test_single_episode_normalizes_negative_timestamps_before_duration_cap(
         self,
         mock_run,
@@ -252,6 +288,23 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertEqual(command[command.index("-t") + 1], "110.000000")
         self.assertIn("overlay=W-w-20:20", graph)
         self.assertNotIn("0:s", command)
+
+    @patch("lib.media.run")
+    def test_episode_render_seeks_past_undecodable_leading_video(self, mock_run):
+        render_episode(
+            "episode.mkv",
+            "rendered.mkv",
+            [(0.0, 1414.912)],
+            "watermark.png",
+            {"video_codec": "libx264"},
+            audio_stream_index=0,
+            source_start_offset=4.922,
+        )
+
+        command = mock_run.call_args.args[0]
+        input_index = command.index("episode.mkv")
+        self.assertEqual(command[input_index - 3:input_index], ["-ss", "4.922000", "-i"])
+        self.assertEqual(command[command.index("-t") + 1], "1414.912000")
 
     @patch("lib.media.run")
     def test_episode_render_normalizes_negative_input_timestamps_before_trim(self, mock_run):

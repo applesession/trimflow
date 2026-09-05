@@ -12,6 +12,7 @@ from lib.pipeline import (
     build_audio_recovery_info,
     build_delivery_config,
     build_episode_infos,
+    build_leading_source_trim,
     build_episode_fingerprint,
     build_output_artifacts,
     build_multi_season_timestamps,
@@ -31,6 +32,7 @@ from lib.pipeline import (
     save_episode_checkpoint,
     select_compilation_frame_rate,
     select_compilation_frame_size,
+    trim_keep_segments_for_source_start,
     validate_support_banner_asset,
 )
 
@@ -60,6 +62,45 @@ VALIDATION = {
 
 
 class PipelineEpisodeCheckpointTests(unittest.TestCase):
+    def test_leading_source_trim_clips_and_shifts_keep_segments(self):
+        repair = build_leading_source_trim({
+            "source_timeline": {
+                "video": {"start": 0.0, "duration": 1419.834},
+            },
+            "first_decoded_video_timestamp": 4.922,
+        })
+
+        self.assertTrue(repair["applied"])
+        self.assertEqual(repair["seconds"], 4.922)
+        self.assertEqual(
+            trim_keep_segments_for_source_start(
+                [(0.0, 90.0), (150.0, 1419.834)],
+                repair["seconds"],
+            ),
+            [(0.0, 85.078), (145.078, 1414.912)],
+        )
+
+    def test_leading_source_trim_ignores_normal_frame_rounding(self):
+        repair = build_leading_source_trim({
+            "source_timeline": {
+                "video": {"start": 0.0, "duration": 10.0},
+            },
+            "first_decoded_video_timestamp": 0.042,
+        })
+
+        self.assertFalse(repair["applied"])
+        self.assertEqual(repair["seconds"], 0.0)
+
+    def test_leading_source_trim_rejects_large_content_loss(self):
+        with self.assertRaisesRegex(RuntimeError, "exceeds 15.000s"):
+            build_leading_source_trim({
+                "path": "episode.mkv",
+                "source_timeline": {
+                    "video": {"start": 0.0, "duration": 100.0},
+                },
+                "first_decoded_video_timestamp": 20.0,
+            })
+
     def make_workspace_temp_dir(self):
         root = Path(".test_tmp")
         root.mkdir(exist_ok=True)
@@ -401,6 +442,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         self.assertIsNotNone(load_render_checkpoint(job, artifacts))
 
     @patch("lib.pipeline.detect_audio_streams", return_value=[])
+    @patch("lib.pipeline.ffprobe_first_decoded_video_timestamp", return_value=0.0)
     @patch("lib.pipeline.ffprobe_episode_timeline")
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
@@ -409,6 +451,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         mock_signature,
         mock_duration,
         mock_timeline,
+        _mock_first_frame,
         _mock_audio_streams,
     ):
         mock_signature.return_value = {
@@ -433,6 +476,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
     @patch("lib.pipeline.select_external_audio", return_value=None)
     @patch("lib.pipeline.detect_audio_streams")
+    @patch("lib.pipeline.ffprobe_first_decoded_video_timestamp", return_value=0.0)
     @patch("lib.pipeline.ffprobe_episode_timeline")
     @patch("lib.pipeline.ffprobe_duration", return_value=10.0)
     @patch("lib.pipeline.ffprobe_media_signature")
@@ -441,6 +485,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         mock_signature,
         _mock_duration,
         mock_timeline,
+        _mock_first_frame,
         mock_audio_streams,
         _mock_external_audio,
     ):
