@@ -291,7 +291,8 @@ def build_audio_recovery_info(
 
 
 def validate_expected_episode_duration(validation, expected_duration, path):
-    actual_duration = float(validation["duration"])
+    video_timeline = (validation.get("timeline") or {}).get("video") or {}
+    actual_duration = float(video_timeline.get("duration", validation["duration"]))
     expected_duration = float(expected_duration)
     delta = actual_duration - expected_duration
     difference = abs(delta)

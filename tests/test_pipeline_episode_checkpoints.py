@@ -701,7 +701,16 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
     @patch("lib.pipeline.validate_episode_render")
     def test_episode_checkpoint_rejects_expected_duration_drift(self, mock_validate):
-        validation = dict(VALIDATION)
+        validation = {
+            **VALIDATION,
+            "timeline": {
+                **VALIDATION["timeline"],
+                "video": {
+                    **VALIDATION["timeline"]["video"],
+                    "duration": 9.6,
+                },
+            },
+        }
         validation["duration"] = 9.6
         mock_validate.return_value = validation
         tmp_dir = self.make_workspace_temp_dir()
@@ -722,6 +731,32 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             })
 
         self.assertTrue(work.exists())
+
+    @patch("lib.pipeline.validate_episode_render")
+    def test_episode_checkpoint_allows_container_duration_from_subtitle_overhang(self, mock_validate):
+        validation = {
+            **VALIDATION,
+            "duration": 10.283,
+        }
+        mock_validate.return_value = validation
+        tmp_dir = self.make_workspace_temp_dir()
+        source = tmp_dir / "source.mkv"
+        source.write_bytes(b"source")
+        episode_info = {"episode": 1, "path": str(source), "duration": 10.0}
+        episode_dir = tmp_dir / "episode_001"
+        episode_dir.mkdir()
+        work = episode_dir / "rendered.work.mkv"
+        work.write_bytes(b"video")
+
+        checkpoint = save_episode_checkpoint(episode_dir, episode_info, work, {
+            "episode": 1,
+            "source_file": str(source),
+            "expected_cleaned_duration": 10.0,
+            "cleaned_duration": 10.0,
+        })
+
+        self.assertEqual(checkpoint["duration"], 10.283)
+        self.assertTrue((episode_dir / "rendered.mkv").is_file())
 
     def test_one_hundred_actual_durations_build_exact_cumulative_timeline(self):
         episodes = [
