@@ -63,9 +63,12 @@ def validate_required_tools(config, jobs):
 
 
 def validate_required_files(config):
-    watermark_path = Path(config.get("defaults", {}).get("watermark_path", ""))
-    if not watermark_path.is_file():
-        raise RuntimeError(f"Watermark file not found: {watermark_path}")
+    branding_banner = config.get("defaults", {}).get("branding_banner") or {}
+    branding_banner_path = Path(branding_banner.get("path", ""))
+    if not branding_banner_path.is_file():
+        raise RuntimeError(
+            f"Branding banner file not found: {branding_banner_path}"
+        )
 
 
 def prepare_temp_dir(title_slug: str):

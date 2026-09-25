@@ -10,6 +10,7 @@ from lib.pipeline import (
     AUTO_AUDIO_TAIL_RECOVERY_SECONDS,
     RENDER_PIPELINE_VERSION,
     build_audio_recovery_info,
+    build_branding_banner_render_signature,
     build_delivery_config,
     build_episode_infos,
     build_leading_source_trim,
@@ -27,6 +28,7 @@ from lib.pipeline import (
     initialize_episode_checkpoints,
     load_episode_checkpoint,
     load_render_checkpoint,
+    normalize_branding_banner_config,
     normalize_support_banner_config,
     process_job,
     process_multi_season_job,
@@ -34,6 +36,7 @@ from lib.pipeline import (
     select_compilation_frame_rate,
     select_compilation_frame_size,
     trim_keep_segments_for_source_start,
+    validate_branding_banner_asset,
     validate_support_banner_asset,
 )
 
@@ -248,9 +251,49 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
                 "support_banner": {"enabled": True, "width_px": 0},
             })
 
+    def test_branding_banner_defaults_validation_and_signature(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        asset = tmp_dir / "branding.mp4"
+        asset.write_bytes(b"branding-v1")
+        job = {
+            "branding_banner": {
+                "path": str(asset),
+                "width_px": 160,
+                "right_margin_px": 20,
+                "top_margin_px": 20,
+            }
+        }
+
+        config = normalize_branding_banner_config(job)
+        validate_branding_banner_asset(config)
+        original = build_branding_banner_render_signature(job, config)
+
+        job["branding_banner"]["width_px"] = 180
+        self.assertNotEqual(original, build_branding_banner_render_signature(job))
+        job["branding_banner"]["width_px"] = 160
+        asset.write_bytes(b"branding-v2-longer")
+        self.assertNotEqual(original, build_branding_banner_render_signature(job))
+
+        asset.write_bytes(b"branding-v1")
+        job["branding_banner"]["corner_radius_px"] = 16
+        self.assertNotEqual(original, build_branding_banner_render_signature(job))
+
+        with self.assertRaisesRegex(RuntimeError, "width_px must be > 0"):
+            normalize_branding_banner_config({"branding_banner": {"width_px": 0}})
+        with self.assertRaisesRegex(RuntimeError, "right_margin_px must be >= 0"):
+            normalize_branding_banner_config({
+                "branding_banner": {"right_margin_px": -1},
+            })
+        with self.assertRaisesRegex(RuntimeError, "corner_radius_px must be > 0"):
+            normalize_branding_banner_config({
+                "branding_banner": {"corner_radius_px": 0},
+            })
+        with self.assertRaisesRegex(RuntimeError, "Branding banner file not found"):
+            validate_branding_banner_asset({**config, "path": str(tmp_dir / "missing.mp4")})
+
     def make_job(self, tmp_dir, episodes_range="001-002"):
-        watermark_path = tmp_dir / "watermark.png"
-        watermark_path.write_bytes(b"png")
+        branding_path = tmp_dir / "branding.mp4"
+        branding_path.write_bytes(b"mp4")
         return {
             "title": "Episode Test",
             "title_ru": "Тест серий",
@@ -258,7 +301,13 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             "episodes_range": episodes_range,
             "source": {"type": "local", "input_dir": str(tmp_dir / "input")},
             "output_dir": str(tmp_dir / "output"),
-            "watermark_path": str(watermark_path),
+            "branding_banner": {
+                "path": str(branding_path),
+                "width_px": 160,
+                "right_margin_px": 20,
+                "top_margin_px": 20,
+                "corner_radius_px": 12,
+            },
             "skip_types": ["op", "ed"],
             "cleanup": {"downloads": False, "temp": False, "output": False},
             "processing": {
@@ -298,7 +347,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             return build_episode_fingerprint(
                 job,
                 episode_infos,
-                watermark_path=job["watermark_path"],
+                branding_banner=normalize_branding_banner_config(job),
                 timing_detection=job["timing_detection"],
                 preferred_language="rus",
             )
@@ -348,7 +397,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         current = build_episode_fingerprint(
             job,
             episode_infos,
-            watermark_path=job["watermark_path"],
+            branding_banner=normalize_branding_banner_config(job),
             timing_detection=job["timing_detection"],
             preferred_language="rus",
         )
@@ -356,7 +405,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             disabled_future = build_episode_fingerprint(
                 job,
                 episode_infos,
-                watermark_path=job["watermark_path"],
+                branding_banner=normalize_branding_banner_config(job),
                 timing_detection=job["timing_detection"],
                 preferred_language="rus",
             )
@@ -366,7 +415,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         current = build_episode_fingerprint(
             job,
             episode_infos,
-            watermark_path=job["watermark_path"],
+            branding_banner=normalize_branding_banner_config(job),
             timing_detection=job["timing_detection"],
             preferred_language="rus",
         )
@@ -374,7 +423,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             future = build_episode_fingerprint(
                 job,
                 episode_infos,
-                watermark_path=job["watermark_path"],
+                branding_banner=normalize_branding_banner_config(job),
                 timing_detection=job["timing_detection"],
                 preferred_language="rus",
             )
@@ -406,7 +455,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             return build_episode_fingerprint(
                 job,
                 episode_infos,
-                watermark_path=job["watermark_path"],
+                branding_banner=normalize_branding_banner_config(job),
                 timing_detection=job["timing_detection"],
                 preferred_language="rus",
             )
@@ -432,6 +481,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         artifacts["output_txt"].write_text("00:00:00 - 1 серия\n", encoding="utf-8")
         manifest = {
             "render_pipeline_version": RENDER_PIPELINE_VERSION,
+            "branding_banner": build_branding_banner_render_signature(job),
             "render_complete": True,
             "title": job["title"],
             "season": "01",
@@ -638,6 +688,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         with patch("lib.pipeline.ffprobe_duration", return_value=10.0):
             self.assertIsNone(load_render_checkpoint(job, artifacts))
             manifest["render_pipeline_version"] = RENDER_PIPELINE_VERSION
+            manifest["branding_banner"] = build_branding_banner_render_signature(job)
             artifacts["output_manifest"].write_text(json.dumps(manifest), encoding="utf-8")
             self.assertIsNotNone(load_render_checkpoint(job, artifacts))
 
@@ -688,6 +739,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         manifest = {
             "render_complete": True,
             "render_pipeline_version": RENDER_PIPELINE_VERSION,
+            "branding_banner": build_branding_banner_render_signature(job),
             "title": job["title"],
             "season": "01",
             "episodes_range": job["episodes_range"],
@@ -1173,6 +1225,7 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
         artifacts["output_video"].write_bytes(b"video")
         manifest = {
             "render_pipeline_version": RENDER_PIPELINE_VERSION,
+            "branding_banner": build_branding_banner_render_signature(job),
             "render_complete": True,
             "title": job["title"],
             "season": "01",

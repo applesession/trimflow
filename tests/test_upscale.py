@@ -105,7 +105,7 @@ class UpscaleTests(unittest.TestCase):
         self.assertEqual(command[command.index("--pix-fmt") + 1], "yuv420p")
         self.assertIn("preset=fast", command)
         self.assertIn("cq=23", command)
-        self.assertNotIn("watermark", " ".join(command).lower())
+        self.assertNotIn("branding", " ".join(command).lower())
 
     def test_cancellation_stops_render_and_prefetch_subprocesses_and_cleans_slots(self):
         job = self.make_job()

@@ -834,6 +834,40 @@ def _append_timestamp_normalization(filters, input_label, output_label, *, audio
     filters.append(f"{input_label}{expression}=PTS-STARTPTS[{output_label}]")
 
 
+def _append_branding_banner_filters(
+    filters,
+    *,
+    input_label,
+    output_label,
+    branding_banner,
+    banner_input_index=1,
+):
+    width = int(branding_banner["width_px"])
+    right_margin = int(branding_banner["right_margin_px"])
+    top_margin = int(branding_banner["top_margin_px"])
+    radius = int(branding_banner.get("corner_radius_px", 12))
+    height = round(width * 9 / 16)
+    if height % 2:
+        height += 1
+    alpha_expression = (
+        f"clip(({radius + 0.5:.1f}-hypot("
+        f"max(abs(X-W/2)-(W/2-{radius}),0),"
+        f"max(abs(Y-H/2)-(H/2-{radius}),0)))"
+        "*255,0,255)"
+    )
+    filters.extend([
+        f"[{banner_input_index}:v]setpts=PTS-STARTPTS,"
+        f"scale={width}:{height}:flags=lanczos,format=rgb24[branding_rgb]",
+        f"color=c=black:s={width}x{height}:r=60:d=0.016667,format=gray,"
+        f"geq=lum='{alpha_expression}',loop=loop=-1:size=1:start=0,"
+        f"setpts=N/(60*TB)[branding_mask]",
+        "[branding_rgb][branding_mask]alphamerge[branding_banner]",
+        f"[{input_label}][branding_banner]overlay="
+        f"x=W-w-{right_margin}:y={top_margin}:shortest=1,"
+        f"format=yuv420p[{output_label}]",
+    ])
+
+
 def _support_banner_is_shown(support_banner):
     return bool(support_banner and support_banner.get("shown"))
 
@@ -885,7 +919,7 @@ def _build_episode_render_cmd(
     ep_file,
     output,
     keep_segments,
-    watermark_path,
+    branding_banner,
     encoding,
     audio_stream_index,
     audio_recovery=False,
@@ -980,12 +1014,16 @@ def _build_episode_render_cmd(
     filters.extend([
         f"[vcat]{f'fps=fps={frame_rate},' if frame_rate else ''}"
         f"{frame_size_filter}format=yuv420p[base]",
-        "[1:v]scale=160:-1,format=rgba[wm]",
-        "[base][wm]overlay=W-w-20:20[watermarked]",
     ])
+    _append_branding_banner_filters(
+        filters,
+        input_label="base",
+        output_label="branded",
+        branding_banner=branding_banner,
+    )
     _append_support_banner_filters(
         filters,
-        input_label="watermarked",
+        input_label="branded",
         output_label="vout",
         support_banner=support_banner,
         banner_input_index=banner_input_index,
@@ -996,7 +1034,8 @@ def _build_episode_render_cmd(
         cmd += ["-ss", f"{source_start_offset:.6f}"]
     cmd += [
         "-i", str(ep_file),
-        "-i", str(watermark_path),
+        "-stream_loop", "-1",
+        "-i", str(branding_banner["path"]),
     ]
     if banner_shown:
         cmd += ["-i", str(support_banner["path"])]
@@ -1036,7 +1075,7 @@ def render_episode(
     ep_file,
     output,
     keep_segments,
-    watermark_path,
+    branding_banner,
     encoding,
     audio_stream_index=None,
     audio_recovery=False,
@@ -1048,7 +1087,7 @@ def render_episode(
         ep_file,
         output,
         keep_segments,
-        watermark_path,
+        branding_banner,
         encoding,
         audio_stream_index,
         audio_recovery,
@@ -1075,7 +1114,7 @@ def render_episode(
         ep_file,
         output,
         keep_segments,
-        watermark_path,
+        branding_banner,
         fallback_encoding,
         audio_stream_index,
         audio_recovery,
@@ -1087,7 +1126,7 @@ def render_episode(
 
 def _build_final_cmd(
     concat_output,
-    watermark_path,
+    branding_banner,
     output_video,
     encoding,
     audio_stream_index,
@@ -1104,16 +1143,18 @@ def _build_final_cmd(
 
     filters = []
     _append_timestamp_normalization(filters, "[0:v]", "vnormalized")
-    filters.extend([
-        "[vnormalized]format=yuv420p[base]",
-        "[1:v]scale=160:-1,format=rgba[wm]",
-        "[base][wm]overlay=W-w-20:20[watermarked]",
-    ])
+    filters.append("[vnormalized]format=yuv420p[base]")
+    _append_branding_banner_filters(
+        filters,
+        input_label="base",
+        output_label="branded",
+        branding_banner=branding_banner,
+    )
     banner_shown = _support_banner_is_shown(support_banner)
     banner_input_index = 2 if banner_shown else None
     _append_support_banner_filters(
         filters,
-        input_label="watermarked",
+        input_label="branded",
         output_label="v",
         support_banner=support_banner,
         banner_input_index=banner_input_index,
@@ -1147,7 +1188,8 @@ def _build_final_cmd(
         cmd += ["-ss", f"{source_start_offset:.6f}"]
     cmd += [
         "-i", concat_output,
-        "-i", watermark_path,
+        "-stream_loop", "-1",
+        "-i", str(branding_banner["path"]),
     ]
     if banner_shown:
         cmd += ["-i", str(support_banner["path"])]
@@ -1185,7 +1227,7 @@ def _build_final_cmd(
 
 def render_final(
     concat_output,
-    watermark_path,
+    branding_banner,
     output_video,
     encoding,
     audio_stream_index=0,
@@ -1202,7 +1244,7 @@ def render_final(
 
     cmd = _build_final_cmd(
         concat_output,
-        watermark_path,
+        branding_banner,
         output_video,
         encoding,
         audio_stream_index,
@@ -1232,7 +1274,7 @@ def render_final(
     fallback_encoding["video_codec"] = fallback_codec
     fallback_encoding["preset"] = "fast"
     fallback_cmd = _build_final_cmd(
-        concat_output, watermark_path, output_video,
+        concat_output, branding_banner, output_video,
         fallback_encoding, audio_stream_index, audio_recovery, external_audio_path,
         target_duration,
         support_banner,

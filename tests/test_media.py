@@ -20,6 +20,28 @@ from lib.media import (
     validate_episode_render,
 )
 
+BRANDING_BANNER = {
+    "path": "branding.mp4",
+    "width_px": 160,
+    "right_margin_px": 20,
+    "top_margin_px": 20,
+    "corner_radius_px": 12,
+}
+
+
+def create_branding_banner(path):
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y",
+        "-f", "lavfi", "-i", "color=white:size=160x90:rate=24:duration=1",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+    ], check=True)
+    return {
+        "path": str(path),
+        "width_px": 160,
+        "right_margin_px": 20,
+        "top_margin_px": 20,
+    }
+
 
 class MediaAudioSelectionTests(unittest.TestCase):
     @patch("lib.media.subprocess.check_output")
@@ -108,7 +130,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264"},
             audio_stream_index=1,
             external_audio_path="RUS Sound/episode.mka",
@@ -120,13 +142,19 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("[2:a:1]asetpts=PTS-STARTPTS[anormalized]", graph)
         self.assertIn("[anormalized]atrim", graph)
         self.assertIn("[acat]apad=pad_dur=15[aexternal]", graph)
+        mapped_streams = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == "-map"
+        ]
+        self.assertNotIn("1:a", mapped_streams)
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
     @patch("lib.media.run")
     def test_single_episode_render_uses_external_audio(self, mock_run, _mock_probe):
         render_final(
             "episode.mkv",
-            "watermark.png",
+            BRANDING_BANNER,
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=0,
@@ -151,7 +179,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
     def test_single_episode_render_caps_output_at_video_duration(self, mock_run, _mock_probe):
         render_final(
             "episode.mkv",
-            "watermark.png",
+            BRANDING_BANNER,
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=0,
@@ -171,7 +199,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
     ):
         render_final(
             "episode.mkv",
-            "watermark.png",
+            BRANDING_BANNER,
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=0,
@@ -193,7 +221,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
     ):
         render_final(
             "episode-with-negative-pts.mkv",
-            "watermark.png",
+            BRANDING_BANNER,
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=0,
@@ -272,7 +300,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0), (100.0, 200.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264", "preset": "fast", "cq": 23},
             audio_stream_index=1,
         )
@@ -286,7 +314,26 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("concat=n=2:v=1:a=1", graph)
         self.assertNotIn("-shortest", command)
         self.assertEqual(command[command.index("-t") + 1], "110.000000")
-        self.assertIn("overlay=W-w-20:20", graph)
+        self.assertIn(
+            "[1:v]setpts=PTS-STARTPTS,scale=160:90:flags=lanczos,"
+            "format=rgb24[branding_rgb]",
+            graph,
+        )
+        self.assertIn(
+            "color=c=black:s=160x90:r=60:d=0.016667,format=gray,"
+            "geq=lum='clip((12.5-hypot(",
+            graph,
+        )
+        self.assertIn("[branding_rgb][branding_mask]alphamerge[branding_banner]", graph)
+        self.assertIn(
+            "overlay=x=W-w-20:y=20:shortest=1,format=yuv420p",
+            graph,
+        )
+        branding_index = command.index("branding.mp4")
+        self.assertEqual(
+            command[branding_index - 3:branding_index],
+            ["-stream_loop", "-1", "-i"],
+        )
         self.assertNotIn("0:s", command)
 
     @patch("lib.media.run")
@@ -295,7 +342,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 1414.912)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264"},
             audio_stream_index=0,
             source_start_offset=4.922,
@@ -312,7 +359,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 1422.045)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264"},
             audio_stream_index=0,
         )
@@ -334,7 +381,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264"},
             audio_stream_index=None,
         )
@@ -351,7 +398,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264"},
             audio_stream_index=0,
             audio_recovery=True,
@@ -367,7 +414,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
     def test_single_episode_render_supports_audio_recovery(self, mock_run, _mock_probe):
         render_final(
             "episode.mkv",
-            "watermark.png",
+            BRANDING_BANNER,
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=1,
@@ -387,12 +434,12 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("-shortest", command)
 
     @patch("lib.media.run")
-    def test_episode_render_normalizes_frame_rate_and_canvas_before_watermark(self, mock_run):
+    def test_episode_render_normalizes_frame_rate_and_canvas_before_branding_banner(self, mock_run):
         render_episode(
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {
                 "video_codec": "libx264",
                 "frame_rate": "30000/1001",
@@ -426,7 +473,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 20.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "libx264"},
             audio_stream_index=1,
             external_audio_path="episode.mka",
@@ -437,7 +484,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         graph = command[command.index("-filter_complex") + 1]
         self.assertEqual(
             [command[index + 1] for index, value in enumerate(command) if value == "-i"],
-            ["episode.mkv", "watermark.png", "support_banner.png", "episode.mka"],
+            ["episode.mkv", "branding.mp4", "support_banner.png", "episode.mka"],
         )
         self.assertIn("[2:v]scale=596:-1,format=rgba[support_banner]", graph)
         self.assertIn("x=(W-w)/2", graph)
@@ -451,7 +498,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
     def test_single_episode_render_adds_support_banner(self, mock_run, _mock_probe):
         render_final(
             "episode.mkv",
-            "watermark.png",
+            BRANDING_BANNER,
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=0,
@@ -507,7 +554,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "episode.mkv",
             "rendered.mkv",
             [(0.0, 10.0)],
-            "watermark.png",
+            BRANDING_BANNER,
             {"video_codec": "h264_nvenc", "preset": "fast", "cq": 23},
             audio_stream_index=0,
             audio_recovery=True,
@@ -534,7 +581,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
                 "episode.mkv",
                 "rendered.mkv",
                 [(0.0, 10.0)],
-                "watermark.png",
+                BRANDING_BANNER,
                 {"video_codec": "h264_nvenc", "preset": "fast", "cq": 23},
                 audio_stream_index=0,
                 audio_recovery=True,
@@ -680,7 +727,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp_dir = Path(raw_tmp)
             source = tmp_dir / "source.mkv"
-            watermark = tmp_dir / "watermark.png"
+            branding_path = tmp_dir / "branding.mp4"
             banner = tmp_dir / "support_banner.png"
             output = tmp_dir / "output.mkv"
             try:
@@ -692,11 +739,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
                     str(source),
                 ], check=True)
-                subprocess.run([
-                    "ffmpeg", "-v", "error", "-y",
-                    "-f", "lavfi", "-i", "color=white:size=16x8",
-                    "-frames:v", "1", str(watermark),
-                ], check=True)
+                branding_banner = create_branding_banner(branding_path)
                 subprocess.run([
                     "ffmpeg", "-v", "error", "-y",
                     "-f", "lavfi", "-i", "color=red@0.8:size=200x50,format=rgba",
@@ -707,7 +750,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
 
             render_final(
                 source,
-                watermark,
+                branding_banner,
                 output,
                 {
                     "video_codec": "libx264",
@@ -750,17 +793,13 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
     def test_single_episode_caps_long_audio_without_hiding_short_audio(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp_dir = Path(raw_tmp)
-            watermark = tmp_dir / "watermark.png"
+            branding_path = tmp_dir / "branding.mp4"
             long_source = tmp_dir / "long-audio.mkv"
             short_source = tmp_dir / "short-audio.mkv"
             long_output = tmp_dir / "long-output.mkv"
             short_output = tmp_dir / "short-output.mkv"
             try:
-                subprocess.run([
-                    "ffmpeg", "-v", "error", "-y",
-                    "-f", "lavfi", "-i", "color=white:size=32x16",
-                    "-frames:v", "1", str(watermark),
-                ], check=True)
+                branding_banner = create_branding_banner(branding_path)
                 for source, audio_duration in ((long_source, 5.0), (short_source, 2.9)):
                     subprocess.run([
                         "ffmpeg", "-v", "error", "-y",
@@ -782,7 +821,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
             }
             render_final(
                 long_source,
-                watermark,
+                branding_banner,
                 long_output,
                 encoding,
                 target_duration=4.0,
@@ -791,7 +830,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
 
             render_final(
                 short_source,
-                watermark,
+                branding_banner,
                 short_output,
                 encoding,
                 target_duration=4.0,
@@ -805,7 +844,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 short_source,
                 strict_compilation_output,
                 [(0.0, 4.0)],
-                watermark,
+                branding_banner,
                 encoding,
                 audio_stream_index=0,
             )
@@ -816,7 +855,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 short_source,
                 recovered_compilation_output,
                 [(0.0, 4.0)],
-                watermark,
+                branding_banner,
                 encoding,
                 audio_stream_index=0,
                 audio_recovery=True,
@@ -827,7 +866,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp_dir = Path(raw_tmp)
             source = tmp_dir / "source-gap.mkv"
-            watermark = tmp_dir / "watermark.png"
+            branding_path = tmp_dir / "branding.mp4"
             output = tmp_dir / "recovered.mkv"
             try:
                 subprocess.run([
@@ -839,11 +878,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", str(source),
                 ], check=True)
-                subprocess.run([
-                    "ffmpeg", "-v", "error", "-y",
-                    "-f", "lavfi", "-i", "color=white:size=32x16",
-                    "-frames:v", "1", str(watermark),
-                ], check=True)
+                branding_banner = create_branding_banner(branding_path)
             except subprocess.CalledProcessError as exc:
                 self.skipTest(f"local ffmpeg cannot build recovery fixture: {exc}")
 
@@ -855,7 +890,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 source,
                 output,
                 [(0.0, 4.0)],
-                watermark,
+                branding_banner,
                 {
                     "video_codec": "libx264",
                     "preset": "ultrafast",
@@ -886,7 +921,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             source = tmp_dir / "source.mkv"
-            watermark = tmp_dir / "watermark.png"
+            branding_path = tmp_dir / "branding.mp4"
             output = tmp_dir / "rendered.mkv"
             try:
                 subprocess.run([
@@ -899,11 +934,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                     "-c:a", "aac", "-c:s", "srt",
                     str(source),
                 ], check=True)
-                subprocess.run([
-                    "ffmpeg", "-v", "error", "-y",
-                    "-f", "lavfi", "-i", "color=white:size=32x16",
-                    "-frames:v", "1", str(watermark),
-                ], check=True)
+                branding_banner = create_branding_banner(branding_path)
             except subprocess.CalledProcessError as exc:
                 self.skipTest(f"local ffmpeg cannot build fixture: {exc}")
 
@@ -911,7 +942,7 @@ class MediaEpisodeIntegrationTests(unittest.TestCase):
                 source,
                 output,
                 [(0.0, 1.0), (2.0, 4.0)],
-                watermark,
+                branding_banner,
                 {
                     "video_codec": "libx264",
                     "preset": "ultrafast",

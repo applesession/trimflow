@@ -6,7 +6,7 @@
 - запрашивает у AniSkip интервалы `op/ed`;
 - вырезает пропуски через `ffmpeg`;
 - склеивает итоговый файл;
-- накладывает watermark;
+- накладывает зацикленный анимированный branding banner;
 - сохраняет артефакты в `output/` и загружает их в S3.
 
 ## Структура
@@ -30,7 +30,7 @@ main.py              # Точка входа: ручной запуск
 - `telegram_state.json` — offset и runtime-state Telegram-бота
 - `.env` — S3-переменные окружения
 - `requirements.txt` — Python-зависимости
-- `assets/watermark.png` — watermark для итогового видео
+- `assets/animonster_branding_200.mp4` — анимированный branding banner для итогового видео
 - `assets/support_banner.png` — прозрачный баннер поддержки для публичных видео
 - `input/` — локальные исходники, если источник `local`
 - `downloads/` — временные загрузки из magnet
@@ -80,13 +80,23 @@ pip install -r requirements.txt
 
 В `defaults` лежат общие настройки:
 - `output_dir`
-- `watermark_path`
+- `branding_banner.path`
+- `branding_banner.width_px`
+- `branding_banner.right_margin_px`
+- `branding_banner.top_margin_px`
+- `branding_banner.corner_radius_px`
 - `skip_types`
 - `cleanup`
 - `encoding`
 - `timing_detection`
 - `timing_providers`
 - `delivery`
+
+`branding_banner` — обязательный MP4-ассет поверх обычного 1080p-render. Видео
+зацикливается на всю длительность, масштабируется до `width_px`, ставится справа
+сверху с заданными отступами и получает скругление углов; его audio stream
+игнорируется. `support_banner`
+остаётся отдельным временным баннером снизу. 4K job branding banner не добавляет.
 
 В `automation` лежат настройки discovery:
 - `enabled`
@@ -307,7 +317,7 @@ VK-доставка теперь поддерживает два сценари�
 - публичные релизы — видео + пост в основном паблике;
 - приватные/donut-релизы (`vk_privacy_view = 5`) — видео в приватном паблике, donut-пост со ссылкой в основном паблике.
 
-4K job не использует OP/ED detector и watermark. Video2X обрабатывает исходные серии по одной через `realesr-animevideov3`, сохраняет FPS/audio/subtitles и загружает видео напрямую в основной паблик с Donut-доступом. Пока текущая серия обрабатывается, aria2 скачивает одну следующую серию в отдельный episode-каталог. `upscale_manifest.json` позволяет после ошибки повторить только незавершённый render или VK delivery.
+4K job не использует OP/ED detector и branding banner. Video2X обрабатывает исходные серии по одной через `realesr-animevideov3`, сохраняет FPS/audio/subtitles и загружает видео напрямую в основной паблик с Donut-доступом. Пока текущая серия обрабатывается, aria2 скачивает одну следующую серию в отдельный episode-каталог. `upscale_manifest.json` позволяет после ошибки повторить только незавершённый render или VK delivery.
 
 ## Примечания
 
@@ -318,7 +328,7 @@ VK-доставка теперь поддерживает два сценари�
 - По умолчанию `AniSkip` сейчас выключен через `timing_providers.aniskip_enabled = false`, и pipeline опирается на `AniLiberty + local detector`.
 - Если включён `timing_detection`, скрипт пытается достроить отсутствующие `OP/ED` локальным audio-detector'ом; разные повторяющиеся заставки внутри длинного диапазона получают независимый локальный consensus.
 - Detector режет автоматически только интервалы не ниже `timing_detection.auto_cut_min_confidence` (`high` по умолчанию); всё остальное помечается как `manual_review` в `timing_info`. Значение `disabled` полностью запрещает автоматические вырезы detector'а.
-- Каждая серия за один encode получает точные OP/ED-вырезы, обнулённые PTS и watermark; soft subtitles в VK-компиляцию не переносятся.
+- Каждая серия за один encode получает точные OP/ED-вырезы, обнулённые PTS и зацикленный branding banner; soft subtitles в VK-компиляцию не переносятся.
 - После успешной обработки временные папки могут очищаться автоматически, если это включено в `cleanup`.
 - При ошибке compilation render готовые episode-checkpoints остаются в `temp/`; retry повторяет только повреждённую/неготовую серию, а итоговая сборка выполняется через `ffmpeg -c copy`.
 - Тайминги VK считаются по фактической `ffprobe`-длительности episode-checkpoints.

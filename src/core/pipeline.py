@@ -307,7 +307,7 @@ def validate_expected_episode_duration(validation, expected_duration, path):
         )
 
 
-RENDER_PIPELINE_VERSION = 5
+RENDER_PIPELINE_VERSION = 6
 
 LEADING_SOURCE_TRIM_THRESHOLD_SECONDS = 0.05
 MAX_LEADING_SOURCE_TRIM_SECONDS = 15.0
@@ -355,6 +355,61 @@ DEFAULT_SUPPORT_BANNER = {
     "width_px": 596,
     "bottom_margin_px": 40,
 }
+
+DEFAULT_BRANDING_BANNER = {
+    "path": "./assets/animonster_branding_200.mp4",
+    "width_px": 200,
+    "right_margin_px": 20,
+    "top_margin_px": 20,
+    "corner_radius_px": 12,
+}
+
+
+def normalize_branding_banner_config(job):
+    raw = job.get("branding_banner")
+    config = dict(DEFAULT_BRANDING_BANNER)
+    if raw is not None:
+        if not isinstance(raw, dict):
+            raise RuntimeError("branding_banner must be a JSON object")
+        config.update(raw)
+
+    config["path"] = str(config.get("path") or "").strip()
+    if not config["path"]:
+        raise RuntimeError("branding_banner.path must not be empty")
+
+    for field in (
+        "width_px",
+        "right_margin_px",
+        "top_margin_px",
+        "corner_radius_px",
+    ):
+        try:
+            config[field] = int(config[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"branding_banner.{field} must be an integer") from exc
+        if field in ("width_px", "corner_radius_px") and config[field] <= 0:
+            raise RuntimeError(f"branding_banner.{field} must be > 0")
+        if field not in ("width_px", "corner_radius_px") and config[field] < 0:
+            raise RuntimeError(f"branding_banner.{field} must be >= 0")
+    return config
+
+
+def build_branding_banner_render_signature(job, branding_banner=None):
+    config = branding_banner or normalize_branding_banner_config(job)
+    return {
+        "asset": _file_identity(config["path"]),
+        "width_px": config["width_px"],
+        "right_margin_px": config["right_margin_px"],
+        "top_margin_px": config["top_margin_px"],
+        "corner_radius_px": config["corner_radius_px"],
+    }
+
+
+def validate_branding_banner_asset(branding_banner):
+    if not Path(branding_banner["path"]).is_file():
+        raise RuntimeError(
+            f"Branding banner file not found: {branding_banner['path']}"
+        )
 
 
 def normalize_support_banner_config(job, privacy_view=None):
@@ -508,7 +563,7 @@ def build_episode_fingerprint(
     job,
     episode_infos,
     *,
-    watermark_path,
+    branding_banner,
     timing_detection,
     preferred_language,
 ):
@@ -527,7 +582,10 @@ def build_episode_fingerprint(
         "timing_providers": job.get("timing_providers") or {},
         "encoding": _effective_episode_encoding(job.get("encoding")),
         "preferred_audio_language": preferred_language,
-        "watermark": _file_identity(watermark_path),
+        "branding_banner": build_branding_banner_render_signature(
+            job,
+            branding_banner,
+        ),
         "support_banner": build_support_banner_render_signature(job, support_banner),
         "episodes": [
             {
@@ -1307,6 +1365,7 @@ def build_single_episode_manifest(
 ):
     return {
         "render_pipeline_version": RENDER_PIPELINE_VERSION,
+        "branding_banner": build_branding_banner_render_signature(job),
         "title": job["title"],
         "title_ru": job.get("title_ru"),
         "mal_id": job.get("mal_id"),
@@ -1915,6 +1974,8 @@ def load_render_checkpoint(job, artifacts):
         return None
     if manifest.get("render_pipeline_version") != RENDER_PIPELINE_VERSION:
         return None
+    if manifest.get("branding_banner") != build_branding_banner_render_signature(job):
+        return None
     if (
         bool((job.get("timing_detection") or {}).get("enabled", False))
         and (manifest.get("timing_detection") or {}).get("algorithm_version")
@@ -2040,6 +2101,8 @@ def process_multi_season_job(job, runtime_status_path=None):
     )
     cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
     delivery = build_delivery_config(job)
+    branding_banner = normalize_branding_banner_config(job)
+    validate_branding_banner_asset(branding_banner)
     support_banner = normalize_support_banner_config(
         job,
         privacy_view=delivery["vk_privacy_view"],
@@ -2231,6 +2294,10 @@ def process_multi_season_job(job, runtime_status_path=None):
             "episodes": manifest_episodes,
             "timestamps": timestamps,
             "processing": {"mode": "multi_season", "season_range": season_range},
+            "branding_banner": build_branding_banner_render_signature(
+                job,
+                branding_banner,
+            ),
             "support_banner": build_support_banner_render_signature(job, support_banner),
             "render_complete": True,
         }
@@ -2279,7 +2346,6 @@ def process_job(job, runtime_status_path=None):
         return process_multi_season_job(job, runtime_status_path=runtime_status_path)
     source = job["source"]
     output_root = Path(job["output_dir"])
-    watermark_path = Path(job["watermark_path"])
     skip_types = job.get("skip_types", ["op", "ed"])
     encoding = dict(job.get("encoding") or {})
     cleanup = job.get("cleanup") or {"downloads": True, "temp": True}
@@ -2287,6 +2353,8 @@ def process_job(job, runtime_status_path=None):
     audio_recovery_enabled = bool(processing.get("audio_recovery_enabled", False))
     timing_detection = normalize_timing_detection_config(job)
     delivery = build_delivery_config(job)
+    branding_banner = normalize_branding_banner_config(job)
+    validate_branding_banner_asset(branding_banner)
     support_banner = normalize_support_banner_config(
         job,
         privacy_view=delivery["vk_privacy_view"],
@@ -2454,7 +2522,7 @@ def process_job(job, runtime_status_path=None):
             )
             render_final(
                 concat_output=Path(episode_path),
-                watermark_path=watermark_path,
+                branding_banner=branding_banner,
                 output_video=output_video,
                 encoding={**encoding, "audio_codec": "aac"},
                 audio_stream_index=episode_audio_index,
@@ -2546,7 +2614,7 @@ def process_job(job, runtime_status_path=None):
         fingerprint = build_episode_fingerprint(
             job,
             episode_infos,
-            watermark_path=watermark_path,
+            branding_banner=branding_banner,
             timing_detection=timing_detection,
             preferred_language=preferred_language,
         )
@@ -2689,7 +2757,7 @@ def process_job(job, runtime_status_path=None):
                         episode_info["path"],
                         rendered_work,
                         render_plan["keep_segments"],
-                        watermark_path,
+                        branding_banner,
                         {**encoding, "audio_codec": "aac"},
                         audio_stream_index=render_plan["audio_stream_index"],
                         audio_recovery=bool(
@@ -2808,6 +2876,10 @@ def process_job(job, runtime_status_path=None):
         manifest["support_banner"] = build_support_banner_render_signature(
             job,
             support_banner,
+        )
+        manifest["branding_banner"] = build_branding_banner_render_signature(
+            job,
+            branding_banner,
         )
 
         print("\n[QUALITY SUMMARY]")

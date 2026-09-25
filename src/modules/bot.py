@@ -2502,7 +2502,7 @@ def format_add4k_result(result):
         f"Тайтл: {get_display_title(job)}",
         *_navigation_lines(job),
         f"Эпизоды: {job['episodes_range']}",
-        "Режим: 1080p → 4K, без вырезов и watermark",
+        "Режим: 1080p → 4K, без вырезов и branding banner",
         "VK доступ: только Donut",
     ])
 
