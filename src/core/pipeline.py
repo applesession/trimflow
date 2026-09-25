@@ -307,9 +307,9 @@ def validate_expected_episode_duration(validation, expected_duration, path):
         )
 
 
-RENDER_PIPELINE_VERSION = 4
+RENDER_PIPELINE_VERSION = 5
 
-LEADING_SOURCE_TRIM_THRESHOLD_SECONDS = 0.25
+LEADING_SOURCE_TRIM_THRESHOLD_SECONDS = 0.05
 MAX_LEADING_SOURCE_TRIM_SECONDS = 15.0
 
 
@@ -1306,6 +1306,7 @@ def build_single_episode_manifest(
     delivery_summary,
 ):
     return {
+        "render_pipeline_version": RENDER_PIPELINE_VERSION,
         "title": job["title"],
         "title_ru": job.get("title_ru"),
         "mal_id": job.get("mal_id"),
@@ -1912,13 +1913,7 @@ def load_render_checkpoint(job, artifacts):
 
     if not isinstance(manifest, dict) or not manifest.get("render_complete") or duration <= 0:
         return None
-    processing_mode = str(
-        job.get("processing_mode", "compilation") or "compilation"
-    ).strip().lower()
-    if (
-        processing_mode in {"compilation", "multi_season"}
-        and manifest.get("render_pipeline_version") != RENDER_PIPELINE_VERSION
-    ):
+    if manifest.get("render_pipeline_version") != RENDER_PIPELINE_VERSION:
         return None
     if (
         bool((job.get("timing_detection") or {}).get("enabled", False))

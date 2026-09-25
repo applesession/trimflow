@@ -16,6 +16,7 @@ from lib.pipeline import (
     build_episode_fingerprint,
     build_output_artifacts,
     build_multi_season_timestamps,
+    build_single_episode_manifest,
     build_support_banner_episode_spec,
     build_support_banner_render_signature,
     build_timestamps_from_episodes,
@@ -90,6 +91,17 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
 
         self.assertFalse(repair["applied"])
         self.assertEqual(repair["seconds"], 0.0)
+
+    def test_leading_source_trim_repairs_delay_above_frame_rounding(self):
+        repair = build_leading_source_trim({
+            "source_timeline": {
+                "video": {"start": 0.0, "duration": 10.0},
+            },
+            "first_decoded_video_timestamp": 0.1,
+        })
+
+        self.assertTrue(repair["applied"])
+        self.assertEqual(repair["seconds"], 0.1)
 
     def test_leading_source_trim_rejects_large_content_loss(self):
         with self.assertRaisesRegex(RuntimeError, "exceeds 15.000s"):
@@ -627,6 +639,42 @@ class PipelineEpisodeCheckpointTests(unittest.TestCase):
             self.assertIsNone(load_render_checkpoint(job, artifacts))
             manifest["render_pipeline_version"] = RENDER_PIPELINE_VERSION
             artifacts["output_manifest"].write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertIsNotNone(load_render_checkpoint(job, artifacts))
+
+    def test_single_episode_manifest_versions_and_invalidates_render_checkpoint(self):
+        tmp_dir = self.make_workspace_temp_dir()
+        job = self.make_job(tmp_dir, episodes_range="001")
+        job["processing_mode"] = "single_episode"
+        artifacts = build_output_artifacts(job, job["output_dir"])
+        artifacts["job_output_dir"].mkdir(parents=True)
+        artifacts["output_video"].write_bytes(b"video")
+        artifacts["output_txt"].write_text("00:00:00 - 1 серия\n", encoding="utf-8")
+        manifest = build_single_episode_manifest(
+            job=job,
+            season="01",
+            episode_number=1,
+            source_file="episode.mkv",
+            pretty_base_name=artifacts["pretty_base_name"],
+            output_video=artifacts["output_video"],
+            output_txt=artifacts["output_txt"],
+            delivery_summary={},
+        )
+        manifest["render_complete"] = True
+        self.assertEqual(manifest["render_pipeline_version"], RENDER_PIPELINE_VERSION)
+
+        stale_manifest = dict(manifest)
+        stale_manifest.pop("render_pipeline_version")
+        artifacts["output_manifest"].write_text(
+            json.dumps(stale_manifest),
+            encoding="utf-8",
+        )
+        with patch("lib.pipeline.ffprobe_duration", return_value=10.0):
+            self.assertIsNone(load_render_checkpoint(job, artifacts))
+
+            artifacts["output_manifest"].write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
             self.assertIsNotNone(load_render_checkpoint(job, artifacts))
 
     def test_old_detector_output_checkpoint_is_invalid(self):
