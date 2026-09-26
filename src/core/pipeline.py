@@ -357,10 +357,10 @@ DEFAULT_SUPPORT_BANNER = {
 }
 
 DEFAULT_BRANDING_BANNER = {
-    "path": "./assets/animonster_branding_200.mp4",
-    "width_px": 200,
-    "right_margin_px": 20,
-    "top_margin_px": 20,
+    "path": "./assets/animonster_branding_240.mp4",
+    "width_px": 240,
+    "right_margin_px": 15,
+    "top_margin_px": 15,
     "corner_radius_px": 12,
 }
 

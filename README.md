@@ -30,7 +30,7 @@ main.py              # Точка входа: ручной запуск
 - `telegram_state.json` — offset и runtime-state Telegram-бота
 - `.env` — S3-переменные окружения
 - `requirements.txt` — Python-зависимости
-- `assets/animonster_branding_200.mp4` — анимированный branding banner для итогового видео
+- `assets/animonster_branding_240.mp4` — анимированный branding banner для итогового видео
 - `assets/support_banner.png` — прозрачный баннер поддержки для публичных видео
 - `input/` — локальные исходники, если источник `local`
 - `downloads/` — временные загрузки из magnet
