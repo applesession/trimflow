@@ -840,6 +840,7 @@ def _append_branding_banner_filters(
     input_label,
     output_label,
     branding_banner,
+    target_duration=None,
     banner_input_index=1,
 ):
     width = int(branding_banner["width_px"])
@@ -855,15 +856,20 @@ def _append_branding_banner_filters(
         f"max(abs(Y-H/2)-(H/2-{radius}),0)))"
         "*255,0,255)"
     )
+    mask_duration_filter = (
+        f"trim=duration={float(target_duration):.6f},"
+        if target_duration is not None else ""
+    )
     filters.extend([
         f"[{banner_input_index}:v]setpts=PTS-STARTPTS,"
         f"scale={width}:{height}:flags=lanczos,format=rgb24[branding_rgb]",
         f"color=c=black:s={width}x{height}:r=60:d=0.016667,format=gray,"
         f"geq=lum='{alpha_expression}',loop=loop=-1:size=1:start=0,"
-        f"setpts=N/(60*TB)[branding_mask]",
-        "[branding_rgb][branding_mask]alphamerge[branding_banner]",
+        f"setpts=N/(60*TB),{mask_duration_filter}format=gray[branding_mask]",
+        "[branding_rgb][branding_mask]alphamerge=shortest=1[branding_banner]",
         f"[{input_label}][branding_banner]overlay="
-        f"x=W-w-{right_margin}:y={top_margin}:shortest=1,"
+        f"x=W-w-{right_margin}:y={top_margin}:"
+        f"eof_action=pass:repeatlast=0,"
         f"format=yuv420p[{output_label}]",
     ])
 
@@ -1020,6 +1026,7 @@ def _build_episode_render_cmd(
         input_label="base",
         output_label="branded",
         branding_banner=branding_banner,
+        target_duration=target_duration,
     )
     _append_support_banner_filters(
         filters,
@@ -1035,6 +1042,7 @@ def _build_episode_render_cmd(
     cmd += [
         "-i", str(ep_file),
         "-stream_loop", "-1",
+        "-t", f"{target_duration:.6f}",
         "-i", str(branding_banner["path"]),
     ]
     if banner_shown:
@@ -1149,6 +1157,7 @@ def _build_final_cmd(
         input_label="base",
         output_label="branded",
         branding_banner=branding_banner,
+        target_duration=target_duration,
     )
     banner_shown = _support_banner_is_shown(support_banner)
     banner_input_index = 2 if banner_shown else None
@@ -1186,11 +1195,10 @@ def _build_final_cmd(
     cmd = ["ffmpeg", "-y"]
     if source_start_offset:
         cmd += ["-ss", f"{source_start_offset:.6f}"]
-    cmd += [
-        "-i", concat_output,
-        "-stream_loop", "-1",
-        "-i", str(branding_banner["path"]),
-    ]
+    cmd += ["-i", concat_output, "-stream_loop", "-1"]
+    if target_duration is not None:
+        cmd += ["-t", f"{float(target_duration):.6f}"]
+    cmd += ["-i", str(branding_banner["path"])]
     if banner_shown:
         cmd += ["-i", str(support_banner["path"])]
     if external_audio_path:

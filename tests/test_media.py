@@ -187,7 +187,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         )
 
         command = mock_run.call_args.args[0]
-        self.assertEqual(command[command.index("-t") + 1], "1394.142000")
+        self.assertEqual(command[-3:-1], ["-t", "1394.142000"])
         self.assertNotIn("-shortest", command)
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
@@ -210,7 +210,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         command = mock_run.call_args.args[0]
         input_index = command.index("episode.mkv")
         self.assertEqual(command[input_index - 3:input_index], ["-ss", "4.922000", "-i"])
-        self.assertEqual(command[command.index("-t") + 1], "1414.912000")
+        self.assertEqual(command[-3:-1], ["-t", "1414.912000"])
 
     @patch("lib.media._probe_video_streams", return_value=[{}])
     @patch("lib.media.run")
@@ -232,7 +232,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         graph = command[command.index("-filter_complex") + 1]
         self.assertIn("[0:v]setpts=PTS-STARTPTS[vnormalized]", graph)
         self.assertIn("[0:a:0]asetpts=PTS-STARTPTS[anormalized]", graph)
-        self.assertEqual(command[command.index("-t") + 1], "1422.045000")
+        self.assertEqual(command[-3:-1], ["-t", "1422.045000"])
 
     @patch("lib.media.ffprobe_episode_timeline")
     def test_audio_recovery_detects_supported_gap_and_short_tail(self, mock_timeline):
@@ -313,7 +313,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         self.assertIn("asetpts=PTS-STARTPTS", graph)
         self.assertIn("concat=n=2:v=1:a=1", graph)
         self.assertNotIn("-shortest", command)
-        self.assertEqual(command[command.index("-t") + 1], "110.000000")
+        self.assertEqual(command[-3:-1], ["-t", "110.000000"])
         self.assertIn(
             "[1:v]setpts=PTS-STARTPTS,scale=160:90:flags=lanczos,"
             "format=rgb24[branding_rgb]",
@@ -324,15 +324,22 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "geq=lum='clip((12.5-hypot(",
             graph,
         )
-        self.assertIn("[branding_rgb][branding_mask]alphamerge[branding_banner]", graph)
         self.assertIn(
-            "overlay=x=W-w-20:y=20:shortest=1,format=yuv420p",
+            "trim=duration=110.000000,format=gray[branding_mask]",
+            graph,
+        )
+        self.assertIn(
+            "[branding_rgb][branding_mask]alphamerge=shortest=1[branding_banner]",
+            graph,
+        )
+        self.assertIn(
+            "overlay=x=W-w-20:y=20:eof_action=pass:repeatlast=0,format=yuv420p",
             graph,
         )
         branding_index = command.index("branding.mp4")
         self.assertEqual(
-            command[branding_index - 3:branding_index],
-            ["-stream_loop", "-1", "-i"],
+            command[branding_index - 5:branding_index],
+            ["-stream_loop", "-1", "-t", "110.000000", "-i"],
         )
         self.assertNotIn("0:s", command)
 
@@ -351,7 +358,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
         command = mock_run.call_args.args[0]
         input_index = command.index("episode.mkv")
         self.assertEqual(command[input_index - 3:input_index], ["-ss", "4.922000", "-i"])
-        self.assertEqual(command[command.index("-t") + 1], "1414.912000")
+        self.assertEqual(command[-3:-1], ["-t", "1414.912000"])
 
     @patch("lib.media.run")
     def test_episode_render_normalizes_negative_input_timestamps_before_trim(self, mock_run):
@@ -373,7 +380,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
         self.assertLess(graph.index(video_normalization), graph.index(video_trim))
         self.assertLess(graph.index(audio_normalization), graph.index(audio_trim))
-        self.assertEqual(command[command.index("-t") + 1], "1422.045000")
+        self.assertEqual(command[-3:-1], ["-t", "1422.045000"])
 
     @patch("lib.media.run")
     def test_episode_render_supports_video_without_audio(self, mock_run):
