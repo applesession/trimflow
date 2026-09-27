@@ -30,7 +30,7 @@ main.py              # Точка входа: ручной запуск
 - `telegram_state.json` — offset и runtime-state Telegram-бота
 - `.env` — S3-переменные окружения
 - `requirements.txt` — Python-зависимости
-- `assets/animonster_branding_240.mp4` — анимированный branding banner для итогового видео
+- `assets/IMG_3445.MOV` — анимированный branding banner для итогового видео
 - `assets/support_banner.png` — прозрачный баннер поддержки для публичных видео
 - `input/` — локальные исходники, если источник `local`
 - `downloads/` — временные загрузки из magnet
@@ -92,7 +92,7 @@ pip install -r requirements.txt
 - `timing_providers`
 - `delivery`
 
-`branding_banner` — обязательный MP4-ассет поверх обычного 1080p-render. Видео
+`branding_banner` — обязательный видеоассет поверх обычного 1080p-render. Видео
 зацикливается на всю длительность, масштабируется до `width_px`, ставится справа
 сверху с заданными отступами и получает скругление углов; его audio stream
 игнорируется. `support_banner`

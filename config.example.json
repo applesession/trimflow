@@ -2,7 +2,7 @@
   "defaults": {
     "output_dir": "./output",
     "branding_banner": {
-      "path": "./assets/animonster_branding_240.mp4",
+      "path": "./assets/branding.MOV",
       "width_px": 240,
       "right_margin_px": 15,
       "top_margin_px": 15,
