@@ -52,6 +52,7 @@ from core.media import (
     analyze_audio_recovery,
     analyze_external_audio_recovery,
     detect_audio_streams,
+    drop_subframe_keep_segments,
     get_preferred_audio_stream,
     build_keep_segments,
     ffprobe_duration,
@@ -1270,6 +1271,20 @@ def build_episode_render_plan(
         source_keep_segments,
         leading_source_trim["seconds"],
     )
+    frame_aligned_keep_segments = drop_subframe_keep_segments(
+        keep_segments,
+        episode_info.get("frame_rate"),
+    )
+    dropped_segments = [
+        segment for segment in keep_segments
+        if segment not in frame_aligned_keep_segments
+    ]
+    if dropped_segments:
+        print(
+            f"[TIMELINE] Episode {detected_ep}: dropping sub-frame keep segments "
+            f"{dropped_segments} at {episode_info.get('frame_rate') or 'unknown'} fps"
+        )
+    keep_segments = frame_aligned_keep_segments
     expected_duration = sum(end - start for start, end in keep_segments)
     if expected_duration <= 0:
         raise RuntimeError(f"Episode {detected_ep} has no video left after OP/ED cuts")

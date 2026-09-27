@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 from shared.helpers import run
@@ -486,6 +487,23 @@ def build_keep_segments(duration, remove_segments):
         keep.append((current, duration))
 
     return keep
+
+
+def drop_subframe_keep_segments(keep_segments, frame_rate):
+    """Drop timeline fragments too short to contain one source video frame."""
+    try:
+        rate = Fraction(str(frame_rate))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return list(keep_segments)
+    if rate <= 0:
+        return list(keep_segments)
+
+    frame_duration = float(1 / rate)
+    return [
+        (start, end)
+        for start, end in keep_segments
+        if float(end) - float(start) + 1e-9 >= frame_duration
+    ]
 
 
 def build_hybrid_subsegments(keep_segment, remove_segments, boundary_window):

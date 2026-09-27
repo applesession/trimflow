@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from lib.media import (
     analyze_audio_recovery,
+    drop_subframe_keep_segments,
     ffprobe_episode_timeline,
     ffprobe_first_decoded_video_timestamp,
     get_nvenc_fallback_codec,
@@ -44,6 +45,27 @@ def create_branding_banner(path):
 
 
 class MediaAudioSelectionTests(unittest.TestCase):
+    def test_drops_keep_segment_shorter_than_one_video_frame(self):
+        keep_segments = [
+            (0.0, 65.0),
+            (158.0, 1331.0),
+            (1420.0, 1420.003),
+        ]
+
+        filtered = drop_subframe_keep_segments(keep_segments, "24000/1001")
+
+        self.assertEqual(filtered, [(0.0, 65.0), (158.0, 1331.0)])
+
+    def test_keeps_segment_at_least_one_video_frame_long(self):
+        frame_duration = 1001 / 24000
+
+        filtered = drop_subframe_keep_segments(
+            [(10.0, 10.0 + frame_duration)],
+            "24000/1001",
+        )
+
+        self.assertEqual(len(filtered), 1)
+
     @patch("lib.media.subprocess.check_output")
     def test_probes_first_decoded_video_timestamp(self, mock_check_output):
         mock_check_output.return_value = json.dumps({
