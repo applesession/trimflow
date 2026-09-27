@@ -17,6 +17,11 @@
       "width_px": 596,
       "bottom_margin_px": 40
     },
+    "interstitial_promos": {
+      "enabled": true,
+      "directory": "./assets/promos",
+      "interval_episodes": 4
+    },
     "skip_types": ["op", "ed"],
     "download": {
       "timeout_minutes_per_episode": 20,

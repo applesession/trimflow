@@ -258,6 +258,104 @@ def ffprobe_media_signature(path):
     }
 
 
+def validate_interstitial_promo(path):
+    path = Path(path).resolve()
+    signature = ffprobe_media_signature(path)
+    if not signature or not signature.get("video"):
+        raise RuntimeError(
+            f"Interstitial promo is corrupt or has no video stream: {path}"
+        )
+    try:
+        duration = float(ffprobe_duration(path))
+    except Exception as exc:
+        raise RuntimeError(f"Unable to probe interstitial promo: {path}") from exc
+    if duration <= 0:
+        raise RuntimeError(f"Interstitial promo has invalid duration: {path}")
+    return {
+        "path": path,
+        "duration": duration,
+        "media_signature": signature,
+        "has_audio": bool(signature.get("audio")),
+    }
+
+
+def normalize_interstitial_promo(source_path, output_path, target_signature):
+    source_path = Path(source_path).resolve()
+    output_path = Path(output_path)
+    source = validate_interstitial_promo(source_path)
+    video = (target_signature or {}).get("video") or {}
+    audio = (target_signature or {}).get("audio") or {}
+    if not audio:
+        raise RuntimeError(
+            f"Compilation target has no audio stream for interstitial promo: {source_path}"
+        )
+
+    try:
+        width = int(video["width"])
+        height = int(video["height"])
+        frame_rate = str(video["r_frame_rate"])
+        pixel_format = str(video["pix_fmt"])
+        sample_rate = int(audio["sample_rate"])
+        channels = int(audio["channels"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Incomplete compilation media signature for interstitial promo: {source_path}"
+        ) from exc
+    channel_layout = str(audio.get("channel_layout") or ("mono" if channels == 1 else "stereo"))
+    duration = float(source["duration"])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.unlink(missing_ok=True)
+
+    video_filter = (
+        "setpts=PTS-STARTPTS,"
+        f"fps={frame_rate},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"setsar=1,format={pixel_format}"
+    )
+    cmd = ["ffmpeg", "-y", "-i", str(source_path)]
+    if source["has_audio"]:
+        audio_input = "[0:a:0]"
+    else:
+        cmd += [
+            "-f", "lavfi", "-t", f"{duration:.6f}",
+            "-i", f"anullsrc=r={sample_rate}:cl={channel_layout}",
+        ]
+        audio_input = "[1:a:0]"
+    audio_filter = (
+        f"{audio_input}asetpts=PTS-STARTPTS,aresample={sample_rate},"
+        f"aformat=sample_rates={sample_rate}:channel_layouts={channel_layout},apad[a]"
+    )
+    cmd += [
+        "-filter_complex", f"[0:v:0]{video_filter}[v];{audio_filter}",
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", pixel_format,
+        "-c:a", "aac", "-ar", str(sample_rate), "-ac", str(channels),
+        "-shortest",
+        "-t", f"{duration:.6f}",
+        str(output_path),
+    ]
+    try:
+        run(cmd)
+    except Exception as exc:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to normalize interstitial promo: {source_path}") from exc
+
+    normalized = validate_interstitial_promo(output_path)
+    if not normalized["has_audio"]:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Normalized interstitial promo has no audio stream: {source_path}"
+        )
+    if normalized["media_signature"] != target_signature:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Normalized interstitial promo has incompatible media signature: {source_path}"
+        )
+    return normalized
+
+
 def ffprobe_episode_timeline(path, audio_stream_index=0):
     result = subprocess.check_output([
         "ffprobe", "-v", "error",

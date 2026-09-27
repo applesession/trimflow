@@ -1,5 +1,6 @@
 import json
 import hashlib
+import random
 import shutil
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -59,12 +60,14 @@ from core.media import (
     ffprobe_episode_timeline,
     ffprobe_first_decoded_video_timestamp,
     ffprobe_media_signature,
+    normalize_interstitial_promo,
     render_concat,
     render_episode,
     render_final,
     select_audio_stream_by_language,
     select_external_audio,
     validate_episode_render,
+    validate_interstitial_promo,
 )
 from shared.runtime import update_runtime_status
 from api.storage import upload_file_to_s3
@@ -308,7 +311,7 @@ def validate_expected_episode_duration(validation, expected_duration, path):
         )
 
 
-RENDER_PIPELINE_VERSION = 6
+RENDER_PIPELINE_VERSION = 7
 
 LEADING_SOURCE_TRIM_THRESHOLD_SECONDS = 0.05
 MAX_LEADING_SOURCE_TRIM_SECONDS = 15.0
@@ -364,6 +367,13 @@ DEFAULT_BRANDING_BANNER = {
     "top_margin_px": 15,
     "corner_radius_px": 12,
 }
+
+DEFAULT_INTERSTITIAL_PROMOS = {
+    "enabled": False,
+    "directory": "./assets/promos",
+    "interval_episodes": 4,
+}
+INTERSTITIAL_PROMO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 
 
 def normalize_branding_banner_config(job):
@@ -492,6 +502,223 @@ def validate_support_banner_asset(support_banner):
         raise RuntimeError(
             f"Support banner file not found: {support_banner['path']}"
         )
+
+
+def normalize_interstitial_promos_config(job):
+    processing_mode = str(
+        job.get("processing_mode", "compilation") or "compilation"
+    ).strip().lower()
+    raw = job.get("interstitial_promos")
+    config = dict(DEFAULT_INTERSTITIAL_PROMOS)
+    if raw is not None:
+        if not isinstance(raw, dict):
+            raise RuntimeError("interstitial_promos must be a JSON object")
+        config.update(raw)
+    config["enabled"] = bool(config.get("enabled", False))
+    config["active"] = config["enabled"] and processing_mode in {
+        "compilation",
+        "multi_season",
+    }
+    config["directory"] = str(config.get("directory") or "").strip()
+    if config["active"] and not config["directory"]:
+        raise RuntimeError("interstitial_promos.directory must not be empty")
+    try:
+        config["interval_episodes"] = int(config.get("interval_episodes", 4))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "interstitial_promos.interval_episodes must be an integer"
+        ) from exc
+    if config["interval_episodes"] <= 0:
+        raise RuntimeError("interstitial_promos.interval_episodes must be > 0")
+    return config
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _promo_file_identity(path):
+    path = Path(path).resolve()
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": _sha256_file(path),
+    }
+
+
+def discover_interstitial_promo_pool(config):
+    if not config["active"]:
+        return []
+    directory = Path(config["directory"]).resolve()
+    if not directory.is_dir():
+        raise RuntimeError(f"Interstitial promo directory not found: {directory}")
+    files = sorted(
+        (
+            path
+            for path in directory.iterdir()
+            if path.is_file()
+            and not path.name.startswith(".")
+            and path.suffix.lower() in INTERSTITIAL_PROMO_EXTENSIONS
+        ),
+        key=lambda path: (path.name.casefold(), str(path.resolve())),
+    )
+    if not files:
+        raise RuntimeError(
+            f"Interstitial promo directory contains no supported files: {directory}"
+        )
+    pool = []
+    for path in files:
+        validate_interstitial_promo(path)
+        pool.append({
+            "name": path.name,
+            "path": str(path.resolve()),
+            "identity": _promo_file_identity(path),
+        })
+    return pool
+
+
+def build_interstitial_pool_signature(config, pool):
+    payload = {
+        "enabled": bool(config["active"]),
+        "directory": str(Path(config["directory"]).resolve()) if config["active"] else None,
+        "interval_episodes": config["interval_episodes"],
+        "pool": [item["identity"] for item in pool],
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_interstitial_positions(total_episodes, interval_episodes):
+    return list(range(interval_episodes, int(total_episodes), interval_episodes))
+
+
+def slice_interstitial_plan(selections, episode_position_offset, episode_count):
+    start = int(episode_position_offset)
+    end = start + int(episode_count)
+    return [
+        selection
+        for selection in selections
+        if start < int(selection["after_episode_position"]) <= end
+    ]
+
+
+def build_interstitial_plan(config, pool, total_episodes, *, chooser=None):
+    if not config["active"]:
+        return []
+    chooser = chooser or random.SystemRandom()
+    selections = []
+    previous_path = None
+    for position in build_interstitial_positions(
+        total_episodes,
+        config["interval_episodes"],
+    ):
+        candidates = pool
+        if len(pool) > 1 and previous_path is not None:
+            candidates = [item for item in pool if item["path"] != previous_path]
+        selected = chooser.choice(candidates)
+        selections.append({
+            "after_episode_position": position,
+            "source_file": selected["name"],
+            "source_path": selected["path"],
+            "identity": selected["identity"],
+        })
+        previous_path = selected["path"]
+    return selections
+
+
+def load_or_create_interstitial_plan(
+    checkpoint_path,
+    config,
+    pool,
+    total_episodes,
+):
+    if not config["active"]:
+        return []
+    checkpoint_path = Path(checkpoint_path)
+    pool_signature = build_interstitial_pool_signature(config, pool)
+    positions = build_interstitial_positions(
+        total_episodes,
+        config["interval_episodes"],
+    )
+    try:
+        saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        saved = None
+    if (
+        isinstance(saved, dict)
+        and saved.get("render_pipeline_version") == RENDER_PIPELINE_VERSION
+        and saved.get("pool_signature") == pool_signature
+        and saved.get("total_episodes") == int(total_episodes)
+        and [item.get("after_episode_position") for item in saved.get("selections", [])]
+        == positions
+        and all(
+            any(
+                candidate["path"] == item.get("source_path")
+                and candidate["identity"] == item.get("identity")
+                for candidate in pool
+            )
+            for item in saved.get("selections", [])
+        )
+    ):
+        return saved["selections"]
+    selections = build_interstitial_plan(config, pool, total_episodes)
+    _write_json_atomic(checkpoint_path, {
+        "render_pipeline_version": RENDER_PIPELINE_VERSION,
+        "pool_signature": pool_signature,
+        "total_episodes": int(total_episodes),
+        "selections": selections,
+    })
+    return selections
+
+
+def build_interstitial_manifest(config, pool, selections, insertions=None):
+    if not config["active"]:
+        return {"enabled": False}
+    public_insertions = []
+    for insertion in insertions or selections:
+        public_insertions.append({
+            key: insertion[key]
+            for key in (
+                "after_episode_position",
+                "after_season",
+                "after_episode",
+                "source_file",
+                "duration_seconds",
+            )
+            if key in insertion
+        })
+    signature_payload = {
+        "pool_signature": build_interstitial_pool_signature(config, pool),
+        "interval_episodes": config["interval_episodes"],
+        "selections": [
+            {
+                "after_episode_position": item["after_episode_position"],
+                "identity": item["identity"],
+            }
+            for item in selections
+        ],
+    }
+    assembly_signature = hashlib.sha256(
+        json.dumps(signature_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {
+        "enabled": True,
+        "directory": str(Path(config["directory"]).resolve()),
+        "interval_episodes": config["interval_episodes"],
+        "pool_signature": signature_payload["pool_signature"],
+        "assembly_signature": assembly_signature,
+        "pool": [
+            {"name": item["name"], "identity": item["identity"]}
+            for item in pool
+        ],
+        "insertions": public_insertions,
+    }
 
 
 def build_support_banner_episode_spec(
@@ -730,25 +957,119 @@ def save_episode_checkpoint(
     }
 
 
-def build_timestamps_from_episodes(manifest_episodes):
+def _interstitial_durations_by_position(insertions):
+    return {
+        int(item["after_episode_position"]): float(item["duration_seconds"])
+        for item in (insertions or [])
+    }
+
+
+def build_timestamps_from_episodes(manifest_episodes, interstitial_insertions=None):
     cumulative_time = 0.0
     timestamps = []
-    for episode in manifest_episodes:
+    promo_durations = _interstitial_durations_by_position(interstitial_insertions)
+    for position, episode in enumerate(manifest_episodes, start=1):
         timestamps.append(f"{seconds_to_timestamp(cumulative_time)} - {episode['episode']} серия")
         cumulative_time += float(episode.get("cleaned_duration", 0.0))
+        cumulative_time += promo_durations.get(position, 0.0)
     return timestamps
 
 
-def build_multi_season_timestamps(manifest_episodes):
+def build_multi_season_timestamps(manifest_episodes, interstitial_insertions=None):
     cumulative_time = 0.0
     timestamps = []
-    for episode in manifest_episodes:
+    promo_durations = _interstitial_durations_by_position(interstitial_insertions)
+    for position, episode in enumerate(manifest_episodes, start=1):
         timestamps.append(
             f"{seconds_to_timestamp(cumulative_time)} - "
             f"{episode['season']} сезон, {episode['episode']} серия"
         )
         cumulative_time += float(episode.get("cleaned_duration", 0.0))
+        cumulative_time += promo_durations.get(position, 0.0)
     return timestamps
+
+
+def prepare_interstitial_concat_items(
+    *,
+    config,
+    selections,
+    episode_outputs,
+    episode_durations,
+    manifest_episodes,
+    target_signature,
+    normalized_dir,
+    episode_position_offset=0,
+    season=None,
+):
+    if not config["active"] or not selections:
+        return list(episode_outputs), list(episode_durations), []
+
+    normalized_dir = Path(normalized_dir)
+    normalized_by_path = {}
+    for selection in selections:
+        source_path = selection["source_path"]
+        if source_path in normalized_by_path:
+            continue
+        cache_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "identity": selection["identity"],
+                    "target_signature": target_signature,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        output = normalized_dir / f"{cache_key}.mkv"
+        normalized = None
+        if output.is_file():
+            try:
+                candidate = validate_interstitial_promo(output)
+                if candidate["media_signature"] == target_signature and candidate["has_audio"]:
+                    normalized = candidate
+            except RuntimeError:
+                normalized = None
+        if normalized is None:
+            normalized = normalize_interstitial_promo(
+                source_path,
+                output,
+                target_signature,
+            )
+        normalized_by_path[source_path] = {
+            "output": output,
+            "duration": float(normalized["duration"]),
+        }
+
+    selections_by_position = {
+        int(item["after_episode_position"]): item for item in selections
+    }
+    concat_items = []
+    concat_durations = []
+    insertions = []
+    for local_index, (episode_output, episode_duration, manifest_episode) in enumerate(
+        zip(episode_outputs, episode_durations, manifest_episodes),
+        start=1,
+    ):
+        global_position = int(episode_position_offset) + local_index
+        concat_items.append(episode_output)
+        concat_durations.append(float(episode_duration))
+        selection = selections_by_position.get(global_position)
+        if selection is None:
+            continue
+        normalized = normalized_by_path[selection["source_path"]]
+        concat_items.append(normalized["output"])
+        concat_durations.append(normalized["duration"])
+        insertion = {
+            "after_episode_position": global_position,
+            "after_season": int(
+                manifest_episode.get("season", season)
+            ),
+            "after_episode": int(manifest_episode["episode"]),
+            "source_file": selection["source_file"],
+            "duration_seconds": round(normalized["duration"], 6),
+        }
+        insertions.append(insertion)
+    return concat_items, concat_durations, insertions
 
 
 def renumber_season_part_episodes(
@@ -1971,7 +2292,7 @@ def build_output_artifacts(job, output_root):
     }
 
 
-def load_render_checkpoint(job, artifacts):
+def load_render_checkpoint(job, artifacts, interstitial_context=None):
     output_video = artifacts["output_video"]
     output_txt = artifacts["output_txt"]
     output_manifest = artifacts["output_manifest"]
@@ -2004,6 +2325,37 @@ def load_render_checkpoint(job, artifacts):
     if manifest.get("episodes_range") != job.get("episodes_range"):
         return None
     if manifest.get("output_video") != output_video.name or manifest.get("output_timestamps") != output_txt.name:
+        return None
+    if interstitial_context is None:
+        interstitial_config = normalize_interstitial_promos_config(job)
+        interstitial_pool = discover_interstitial_promo_pool(interstitial_config)
+    else:
+        interstitial_config = interstitial_context["config"]
+        interstitial_pool = interstitial_context["pool"]
+    actual_interstitial = manifest.get("interstitial_promos")
+    if interstitial_config["active"]:
+        if not isinstance(actual_interstitial, dict) or not actual_interstitial.get("enabled"):
+            return None
+        if actual_interstitial.get("pool_signature") != build_interstitial_pool_signature(
+            interstitial_config,
+            interstitial_pool,
+        ):
+            return None
+        if actual_interstitial.get("interval_episodes") != interstitial_config["interval_episodes"]:
+            return None
+        expected_plan = (job.get("processing") or {}).get("_interstitial_promos_plan")
+        if expected_plan is not None:
+            expected_pairs = [
+                (int(item["after_episode_position"]), item["source_file"])
+                for item in expected_plan
+            ]
+            actual_pairs = [
+                (int(item["after_episode_position"]), item["source_file"])
+                for item in actual_interstitial.get("insertions", [])
+            ]
+            if actual_pairs != expected_pairs:
+                return None
+    elif isinstance(actual_interstitial, dict) and actual_interstitial.get("enabled"):
         return None
     expected_support_banner = build_support_banner_render_signature(job)
     actual_support_banner = manifest.get("support_banner")
@@ -2123,14 +2475,25 @@ def process_multi_season_job(job, runtime_status_path=None):
         privacy_view=delivery["vk_privacy_view"],
     )
     validate_support_banner_asset(support_banner)
+    interstitial_config = normalize_interstitial_promos_config(job)
+    interstitial_pool = discover_interstitial_promo_pool(interstitial_config)
+    interstitial_context = {
+        "config": interstitial_config,
+        "pool": interstitial_pool,
+    }
     download_cfg = job.get("download") or {}
     download_timeout = int(download_cfg.get("timeout_minutes_maximum", 1440)) * 60
     render_completed = False
     job_completed = False
     cancellation_requested = False
+    subjob_temp_dirs = []
 
     try:
-        checkpoint = load_render_checkpoint(job, artifacts)
+        checkpoint = load_render_checkpoint(
+            job,
+            artifacts,
+            interstitial_context=interstitial_context,
+        )
         if checkpoint:
             render_completed = True
             result = deliver_rendered_output(
@@ -2199,12 +2562,21 @@ def process_multi_season_job(job, runtime_status_path=None):
 
         target_frame_rate = select_compilation_frame_rate(all_episode_infos)
         target_frame_width, target_frame_height = select_compilation_frame_size(all_episode_infos)
+        interstitial_selections = load_or_create_interstitial_plan(
+            temp_dir / "interstitial_promos.json",
+            interstitial_config,
+            interstitial_pool,
+            len(all_episode_infos),
+        )
+        normalized_promos_dir = temp_dir / "interstitial_promos_normalized"
         season_outputs = []
         manifest_episodes = []
+        interstitial_insertions = []
         timing_summaries = []
         set_runtime_stage(runtime_status_path, "season_render", total_episodes=len(all_episode_infos))
         episode_offsets = {}
         support_banner_episode_offset = 0
+        global_episode_position_offset = 0
         for season, part_index, part_dir, episodes in season_inputs:
             subjob = deepcopy(job)
             subjob["season"] = season
@@ -2228,18 +2600,31 @@ def process_multi_season_job(job, runtime_status_path=None):
                 "target_frame_width": target_frame_width,
                 "target_frame_height": target_frame_height,
                 "_support_banner_episode_offset": support_banner_episode_offset,
+                "_interstitial_episode_position_offset": global_episode_position_offset,
+                "_interstitial_promos_normalized_dir": str(normalized_promos_dir),
+                "_interstitial_promos_plan": slice_interstitial_plan(
+                    interstitial_selections,
+                    global_episode_position_offset,
+                    len(episodes),
+                ),
             })
             subjob["delivery"] = {
                 "s3_enabled": False,
                 "vk_enabled": False,
                 "vk_privacy_view": delivery["vk_privacy_view"],
             }
-            subjob["cleanup"] = {"downloads": False, "temp": True, "output": False}
+            subjob["cleanup"] = {"downloads": False, "temp": False, "output": False}
+            subjob_temp_dirs.append(
+                TEMP_ROOT / build_job_workspace_name(subjob)
+            )
             result = process_job(subjob, runtime_status_path=runtime_status_path)
             season_output = Path(result["output_video"])
             season_manifest = json.loads(Path(result["output_manifest"]).read_text(encoding="utf-8"))
             season_outputs.append(season_output)
             timing_summaries.append(season_manifest.get("timing_sources_summary") or {})
+            interstitial_insertions.extend(
+                (season_manifest.get("interstitial_promos") or {}).get("insertions", [])
+            )
             episode_offset = episode_offsets.get(season, 0)
             manifest_episodes.extend(renumber_season_part_episodes(
                 season_manifest.get("episodes", []),
@@ -2249,6 +2634,7 @@ def process_multi_season_job(job, runtime_status_path=None):
             ))
             episode_offsets[season] = episode_offset + episodes[-1] - episodes[0] + 1
             support_banner_episode_offset += len(episodes)
+            global_episode_position_offset += len(episodes)
 
         signatures = [ffprobe_media_signature(path) for path in season_outputs]
         if any(signature != signatures[0] for signature in signatures[1:]):
@@ -2273,7 +2659,24 @@ def process_multi_season_job(job, runtime_status_path=None):
             partial_output.unlink(missing_ok=True)
             raise
 
-        timestamps = build_multi_season_timestamps(manifest_episodes)
+        insertion_details = []
+        for insertion in sorted(
+            interstitial_insertions,
+            key=lambda item: int(item["after_episode_position"]),
+        ):
+            position = int(insertion["after_episode_position"])
+            preceding_episode = manifest_episodes[position - 1]
+            insertion_details.append({
+                "after_episode_position": position,
+                "after_season": int(preceding_episode["season"]),
+                "after_episode": int(preceding_episode["episode"]),
+                "source_file": insertion["source_file"],
+                "duration_seconds": float(insertion["duration_seconds"]),
+            })
+        timestamps = build_multi_season_timestamps(
+            manifest_episodes,
+            insertion_details,
+        )
         quality_summary = build_quality_summary(manifest_episodes, job.get("skip_types", ["op", "ed"]))
         delivery_summary = {
             "s3": build_s3_summary(delivery["s3_enabled"], uploaded=False),
@@ -2314,6 +2717,12 @@ def process_multi_season_job(job, runtime_status_path=None):
                 branding_banner,
             ),
             "support_banner": build_support_banner_render_signature(job, support_banner),
+            "interstitial_promos": build_interstitial_manifest(
+                interstitial_config,
+                interstitial_pool,
+                interstitial_selections,
+                insertion_details,
+            ),
             "render_complete": True,
         }
         write_outputs(artifacts["output_txt"], artifacts["output_manifest"], timestamps, manifest)
@@ -2338,6 +2747,14 @@ def process_multi_season_job(job, runtime_status_path=None):
         cancellation_requested = True
         raise
     finally:
+        if (
+            cleanup.get("temp", True)
+            and render_completed
+            and job_completed
+            and not cancellation_requested
+        ):
+            for subjob_temp_dir in subjob_temp_dirs:
+                shutil.rmtree(subjob_temp_dir, ignore_errors=True)
         cleanup_job_artifacts(
             cleanup,
             download_dir=download_dir,
@@ -2375,6 +2792,12 @@ def process_job(job, runtime_status_path=None):
         privacy_view=delivery["vk_privacy_view"],
     )
     validate_support_banner_asset(support_banner)
+    interstitial_config = normalize_interstitial_promos_config(job)
+    interstitial_pool = discover_interstitial_promo_pool(interstitial_config)
+    interstitial_context = {
+        "config": interstitial_config,
+        "pool": interstitial_pool,
+    }
     timing_providers = job.get("timing_providers") or {}
     anilibria_enabled = timing_providers.get("anilibria_enabled", True)
     aniskip_enabled = timing_providers.get("aniskip_enabled", False)
@@ -2410,7 +2833,11 @@ def process_job(job, runtime_status_path=None):
     cancellation_requested = False
 
     try:
-        checkpoint = load_render_checkpoint(job, artifacts)
+        checkpoint = load_render_checkpoint(
+            job,
+            artifacts,
+            interstitial_context=interstitial_context,
+        )
         if checkpoint:
             print(f"[CHECKPOINT] Reusing rendered output: {artifacts['output_video']}")
             set_runtime_stage(runtime_status_path, "delivery_resume")
@@ -2584,6 +3011,7 @@ def process_job(job, runtime_status_path=None):
                 job,
                 support_banner,
             )
+            manifest["interstitial_promos"] = {"enabled": False}
             manifest["render_complete"] = True
             write_outputs(output_txt, output_manifest, timestamps, manifest)
             render_completed = True
@@ -2813,6 +3241,37 @@ def process_job(job, runtime_status_path=None):
                 f"Rendered episodes have incompatible media signatures: {details}"
             )
 
+        provided_interstitial_plan = processing.get("_interstitial_promos_plan")
+        if provided_interstitial_plan is None:
+            interstitial_selections = load_or_create_interstitial_plan(
+                temp_dir / "interstitial_promos.json",
+                interstitial_config,
+                interstitial_pool,
+                len(episode_outputs),
+            )
+        else:
+            interstitial_selections = list(provided_interstitial_plan)
+        episode_position_offset = int(
+            processing.get("_interstitial_episode_position_offset", 0)
+        )
+        normalized_promos_dir = Path(
+            processing.get("_interstitial_promos_normalized_dir")
+            or temp_dir / "interstitial_promos_normalized"
+        )
+        concat_outputs, concat_durations, interstitial_insertions = (
+            prepare_interstitial_concat_items(
+                config=interstitial_config,
+                selections=interstitial_selections,
+                episode_outputs=episode_outputs,
+                episode_durations=episode_durations,
+                manifest_episodes=manifest_episodes,
+                target_signature=episode_signatures[0],
+                normalized_dir=normalized_promos_dir,
+                episode_position_offset=episode_position_offset,
+                season=season,
+            )
+        )
+
         set_runtime_stage(
             runtime_status_path,
             "concat",
@@ -2821,13 +3280,13 @@ def process_job(job, runtime_status_path=None):
             total_chunks=None,
             current_chunk_episode_range=None,
         )
-        create_concat_file(episode_outputs, concat_file, durations=episode_durations)
+        create_concat_file(concat_outputs, concat_file, durations=concat_durations)
         partial_output = output_video.with_name(output_video.stem + ".partial" + output_video.suffix)
         partial_output.unlink(missing_ok=True)
         try:
             render_concat(concat_file, partial_output, allow_reencode=False)
             final_duration = ffprobe_duration(partial_output)
-            expected_final_duration = sum(episode_durations)
+            expected_final_duration = sum(concat_durations)
             final_drift = final_duration - expected_final_duration
             print(
                 f"[FINAL TIMELINE] expected={expected_final_duration:.3f}s "
@@ -2847,7 +3306,10 @@ def process_job(job, runtime_status_path=None):
             partial_output.unlink(missing_ok=True)
             raise
 
-        timestamps = build_timestamps_from_episodes(manifest_episodes)
+        timestamps = build_timestamps_from_episodes(
+            manifest_episodes,
+            interstitial_insertions,
+        )
 
         timestamps_description = build_timestamps_description(timestamps)
         with open(output_txt, "w", encoding="utf-8") as file:
@@ -2895,6 +3357,12 @@ def process_job(job, runtime_status_path=None):
         manifest["branding_banner"] = build_branding_banner_render_signature(
             job,
             branding_banner,
+        )
+        manifest["interstitial_promos"] = build_interstitial_manifest(
+            interstitial_config,
+            interstitial_pool,
+            interstitial_selections,
+            interstitial_insertions,
         )
 
         print("\n[QUALITY SUMMARY]")
