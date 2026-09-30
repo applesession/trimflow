@@ -515,6 +515,11 @@ class MediaAudioSelectionTests(unittest.TestCase):
             [command[index + 1] for index, value in enumerate(command) if value == "-i"],
             ["episode.mkv", "branding.mp4", "support_banner.png", "episode.mka"],
         )
+        support_index = command.index("support_banner.png")
+        self.assertEqual(
+            command[support_index - 5:support_index],
+            ["-loop", "1", "-t", "20.000000", "-i"],
+        )
         self.assertIn("[2:v]scale=596:-1,format=rgba[support_banner]", graph)
         self.assertIn("x=(W-w)/2", graph)
         self.assertIn("H-h-40", graph)
@@ -531,6 +536,7 @@ class MediaAudioSelectionTests(unittest.TestCase):
             "rendered.mkv",
             {"video_codec": "libx264", "audio_codec": "aac"},
             audio_stream_index=0,
+            target_duration=10.0,
             support_banner={
                 "shown": True,
                 "path": "support_banner.png",
@@ -544,6 +550,11 @@ class MediaAudioSelectionTests(unittest.TestCase):
 
         command = mock_run.call_args.args[0]
         graph = command[command.index("-filter_complex") + 1]
+        support_index = command.index("support_banner.png")
+        self.assertEqual(
+            command[support_index - 5:support_index],
+            ["-loop", "1", "-t", "10.000000", "-i"],
+        )
         self.assertIn("[2:v]scale=596:-1,format=rgba[support_banner]", graph)
         self.assertIn("enable='between(t,2.000000,8.000000)'", graph)
         self.assertIn("[0:a:0]asetpts=PTS-STARTPTS[anormalized]", graph)

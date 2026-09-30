@@ -994,6 +994,13 @@ def _support_banner_is_shown(support_banner):
     return bool(support_banner and support_banner.get("shown"))
 
 
+def _append_looped_image_input(cmd, path, target_duration=None):
+    cmd += ["-loop", "1"]
+    if target_duration is not None:
+        cmd += ["-t", f"{float(target_duration):.6f}"]
+    cmd += ["-i", str(path)]
+
+
 def _append_support_banner_filters(
     filters,
     *,
@@ -1162,7 +1169,11 @@ def _build_episode_render_cmd(
         "-i", str(branding_banner["path"]),
     ]
     if banner_shown:
-        cmd += ["-i", str(support_banner["path"])]
+        _append_looped_image_input(
+            cmd,
+            support_banner["path"],
+            target_duration,
+        )
     if external_audio_path:
         if source_start_offset:
             cmd += ["-ss", f"{source_start_offset:.6f}"]
@@ -1316,7 +1327,11 @@ def _build_final_cmd(
         cmd += ["-t", f"{float(target_duration):.6f}"]
     cmd += ["-i", str(branding_banner["path"])]
     if banner_shown:
-        cmd += ["-i", str(support_banner["path"])]
+        _append_looped_image_input(
+            cmd,
+            support_banner["path"],
+            target_duration,
+        )
     if external_audio_path:
         if source_start_offset:
             cmd += ["-ss", f"{source_start_offset:.6f}"]
