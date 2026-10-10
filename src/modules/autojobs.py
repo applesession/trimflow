@@ -397,20 +397,21 @@ def discover_jobs(config, jobs, state):
 
         if has_full_publish:
             latest_episode = max(new_episode_numbers)
-            release_jobs.append(build_job_from_release(
-                release_payload,
-                [latest_episode],
-                automation,
-                selected_variant=selected_variant,
-                processing_mode="single_episode",
-                automation_context=build_discovery_job_context(
-                    provider=automation.get("provider", "aniliberty"),
-                    release_id=release_id,
-                    is_ongoing=True,
-                    ongoing_progress_key=ongoing_progress_key,
-                    publish_strategy="single_update",
-                ),
-            ))
+            if automation["single_episode_enabled"]:
+                release_jobs.append(build_job_from_release(
+                    release_payload,
+                    [latest_episode],
+                    automation,
+                    selected_variant=selected_variant,
+                    processing_mode="single_episode",
+                    automation_context=build_discovery_job_context(
+                        provider=automation.get("provider", "aniliberty"),
+                        release_id=release_id,
+                        is_ongoing=True,
+                        ongoing_progress_key=ongoing_progress_key,
+                        publish_strategy="single_update",
+                    ),
+                ))
             release_jobs.append(build_job_from_release(
                 release_payload,
                 episode_numbers,

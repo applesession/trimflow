@@ -5,6 +5,7 @@ from shared.config import (
     load_completed_jobs,
     load_jobs,
     load_state,
+    normalize_automation_config,
     save_completed_jobs,
     save_jobs,
     save_state,
@@ -144,7 +145,10 @@ def run_jobs(
     exclude_processing_modes=None,
 ):
     log = log or print
-    active_jobs = list(jobs or [])
+    excluded_modes = set(exclude_processing_modes or ())
+    if not normalize_automation_config(config)["single_episode_enabled"]:
+        excluded_modes.add("single_episode")
+    active_jobs = [job for job in (jobs or []) if get_job_processing_mode(job) not in excluded_modes]
 
     if not active_jobs:
         log("No jobs found in jobs.json")
@@ -189,7 +193,7 @@ def run_jobs(
                 for job in load_jobs(
                     config,
                     status="pending",
-                    exclude_processing_modes=exclude_processing_modes,
+                    exclude_processing_modes=excluded_modes,
                 )
                 if job.get("_queue_id") not in attempted_queue_ids
             ]

@@ -68,6 +68,7 @@ DEFAULT_TIMING_DETECTION = {
 }
 DEFAULT_AUTOMATION = {
     "enabled": True,
+    "single_episode_enabled": True,
     "provider": "aniliberty",
     "jobs_path": "./jobs.json",
     "completed_jobs_path": "./completed_jobs.json",

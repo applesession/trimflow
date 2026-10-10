@@ -645,6 +645,25 @@ class ConfigStateTests(unittest.TestCase):
         self.assertEqual(result["jobs"][1]["automation"]["publish_strategy"], "full_refresh")
         self.assertEqual(result["summary"]["created_jobs"], 2)
 
+        reset_test_db()
+        mark_episodes_completed(77, range(1, 10))
+        save_ongoing_progress(ongoing_key, {
+            "has_full_publish": True,
+            "last_full_episode": 9,
+            "last_full_range": "001-009",
+            "updated_at": "2026-06-13T00:00:00+00:00",
+        })
+        disabled_result = discover_jobs(
+            {"automation": {"download_root": "./downloads", "single_episode_enabled": False}},
+            [],
+            state,
+        )
+        self.assertEqual(len(disabled_result["jobs"]), 1)
+        self.assertEqual(disabled_result["jobs"][0]["processing_mode"], "compilation")
+        self.assertEqual(disabled_result["jobs"][0]["episodes_range"], "001-010")
+        self.assertEqual(disabled_result["jobs"][0]["automation"]["publish_strategy"], "full_refresh")
+        self.assertEqual(disabled_result["summary"]["created_jobs"], 1)
+
     @patch("lib.autojobs.get_release_details")
     @patch("lib.autojobs.list_recent_releases")
     def test_discover_jobs_caps_jobs_to_variant_label_episode_range(

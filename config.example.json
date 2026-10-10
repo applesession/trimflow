@@ -91,6 +91,7 @@
   },
   "automation": {
     "enabled": true,
+    "single_episode_enabled": true,
     "provider": "aniliberty",
     "jobs_path": "./jobs.json",
     "completed_jobs_path": "./completed_jobs.json",

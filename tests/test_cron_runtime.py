@@ -132,6 +132,33 @@ class CronRuntimeTests(unittest.TestCase):
     @patch("lib.runner.validate_required_tools")
     @patch("lib.runner.validate_required_env")
     @patch("lib.runner.process_job")
+    def test_disabled_single_mode_skips_queued_single_jobs(
+        self, mock_process_job, mock_validate_env, mock_validate_tools, mock_validate_files,
+    ):
+        save_db_jobs([
+            {
+                "title": "Single", "season": 1, "episodes_range": "010",
+                "processing_mode": "single_episode", "source": {"type": "magnet", "magnet": "m1"},
+            },
+            {
+                "title": "Full", "season": 1, "episodes_range": "001-010",
+                "processing_mode": "compilation", "source": {"type": "magnet", "magnet": "m1"},
+            },
+        ])
+        mock_process_job.return_value = self.completed_result()
+
+        run_jobs(
+            {"defaults": {}, "automation": {"single_episode_enabled": False}},
+            load_db_jobs(status="pending"),
+        )
+
+        self.assertEqual([call.args[0]["title"] for call in mock_process_job.call_args_list], ["Full"])
+        self.assertEqual([job["title"] for job in load_db_jobs(status="pending")], ["Single"])
+
+    @patch("lib.runner.validate_required_files")
+    @patch("lib.runner.validate_required_tools")
+    @patch("lib.runner.validate_required_env")
+    @patch("lib.runner.process_job")
     def test_failed_job_returns_pending_without_same_run_retry(
         self, mock_process_job, mock_validate_env, mock_validate_tools, mock_validate_files,
     ):

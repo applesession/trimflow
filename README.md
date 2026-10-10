@@ -100,6 +100,7 @@ pip install -r requirements.txt
 
 В `automation` лежат настройки discovery:
 - `enabled`
+- `single_episode_enabled` — `false` отключает создание и обработку `single_episode`; обновление полного сборника продолжает работать. Уже созданные single-задачи остаются в очереди и выполнятся после повторного включения.
 - `provider`
 - `jobs_path`
 - `completed_jobs_path`
